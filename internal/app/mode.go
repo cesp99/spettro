@@ -21,12 +21,12 @@ func (m Mode) Next() Mode {
 	}
 }
 
-func IsCtrlTabInput(s string) bool {
+func IsModeSwitchInput(s string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(s))
 	switch normalized {
-	case "/next", "ctrl+tab", ":next":
+	case "/next", "shift+tab", ":next":
 		return true
-	case "\x1b[27;5;9~", "\x1b[9;5u":
+	case "\x1b[z", "\x1b[Z":
 		return true
 	default:
 		return false

@@ -14,6 +14,7 @@ import (
 	"spettro/internal/indexer"
 	"spettro/internal/provider"
 	"spettro/internal/storage"
+	"spettro/internal/ui"
 )
 
 type App struct {
@@ -30,6 +31,7 @@ type App struct {
 	chatter     agent.ChatAgent
 	pendingPlan string
 	pendingImgs []string
+	ui          *ui.Renderer
 }
 
 func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error) {
@@ -59,6 +61,7 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		providers: pm,
 		planner:   agent.Planner{},
 		coder:     agent.Coder{},
+		ui:        ui.NewRenderer(),
 	}
 	app.chatter = agent.Chatter{
 		ProviderManager: pm,
@@ -74,11 +77,11 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 
 func (a *App) Run(ctx context.Context) error {
 	scanner := bufio.NewScanner(a.in)
-	a.printLine("Spettro CLI MVP. Ctrl+Tab (or /next) switches mode. /help for commands.")
+	a.printLine(a.ui.Welcome())
 	a.printStatus()
 
 	for {
-		fmt.Fprintf(a.out, "[%s %s/%s] > ", a.mode, a.cfg.ActiveProvider, a.cfg.ActiveModel)
+		fmt.Fprintf(a.out, "%s ", a.ui.Prompt(string(a.mode), a.cfg.ActiveProvider, a.cfg.ActiveModel))
 		if !scanner.Scan() {
 			return scanner.Err()
 		}
@@ -88,7 +91,7 @@ func (a *App) Run(ctx context.Context) error {
 			continue
 		}
 
-		if IsCtrlTabInput(line) {
+		if IsModeSwitchInput(line) {
 			a.mode = a.mode.Next()
 			a.printStatus()
 			continue
@@ -125,7 +128,7 @@ func (a *App) handleCommand(line string) error {
 	fields := strings.Fields(line)
 	switch fields[0] {
 	case "/help":
-		a.printLine("/next, /mode, /models <provider>:<model> [api_key], /permission <yolo|restricted|ask-first>, /image <path>, /images, /index, /approve, /exit")
+		a.printLine(a.ui.Panel(string(a.mode), "Commands", "/next (Shift+Tab), /mode, /models <provider>:<model> [api_key], /permission <yolo|restricted|ask-first>, /image <path>, /images, /index, /approve, /exit"))
 	case "/exit", "/quit":
 		return io.EOF
 	case "/mode":
@@ -194,13 +197,10 @@ func (a *App) handleCommand(line string) error {
 		a.printLine("queued image for next chat request")
 	case "/images":
 		if len(a.pendingImgs) == 0 {
-			a.printLine("no queued images")
+			a.printLine(a.ui.Info("no queued images"))
 			return nil
 		}
-		a.printLine("queued images:")
-		for _, p := range a.pendingImgs {
-			a.printLine("- " + p)
-		}
+		a.printLine(a.ui.Panel(string(a.mode), "Queued Images", strings.Join(a.pendingImgs, "\n")))
 	case "/index":
 		snapshot, err := indexer.Build(a.cwd)
 		if err != nil {
@@ -209,7 +209,7 @@ func (a *App) handleCommand(line string) error {
 		if err := indexer.WriteJSON(snapshot, filepath.Join(a.store.ProjectDir, "index.json")); err != nil {
 			return err
 		}
-		a.printLine(fmt.Sprintf("index generated: %d files -> .spettro/index.json", len(snapshot.Entries)))
+		a.printLine(a.ui.Panel(string(a.mode), "Indexer", fmt.Sprintf("Indexed %d files into .spettro/index.json", len(snapshot.Entries))))
 	default:
 		return fmt.Errorf("unknown command: %s", fields[0])
 	}
@@ -225,7 +225,7 @@ func (a *App) handlePlanning(ctx context.Context, prompt string) error {
 		return err
 	}
 	a.pendingPlan = plan
-	a.printLine("plan generated in .spettro/PLAN.md. run /approve to execute in coding agent.")
+	a.printLine(a.ui.Panel(string(a.mode), "Plan Generated", "Saved to .spettro/PLAN.md.\nUse /approve in coding flow to execute."))
 	return nil
 }
 
@@ -241,7 +241,7 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 	if err := a.store.AppendProjectFile("AGENT.md", result+"\n"); err != nil {
 		return err
 	}
-	a.printLine("coding action logged to .spettro/AGENT.md")
+	a.printLine(a.ui.Panel(string(a.mode), "Coding Action", "Logged output to .spettro/AGENT.md"))
 	return nil
 }
 
@@ -251,20 +251,20 @@ func (a *App) handleChat(ctx context.Context, prompt string) error {
 		return err
 	}
 	a.pendingImgs = nil
-	a.printLine(resp.Content)
-	a.printLine(fmt.Sprintf("(provider=%s model=%s est_tokens=%d)", resp.Provider, resp.Model, resp.EstimatedTokens))
+	a.printLine(a.ui.Panel(string(a.mode), "Assistant", resp.Content))
+	a.printLine(a.ui.Info(fmt.Sprintf("provider=%s model=%s est_tokens=%d", resp.Provider, resp.Model, resp.EstimatedTokens)))
 	return nil
 }
 
 func (a *App) printModels() {
 	a.printLine("available models:")
 	for _, m := range a.providers.Models() {
-		a.printLine(fmt.Sprintf("- %s:%s (vision=%t)", m.Provider, m.Name, m.Vision))
+		a.printLine(a.ui.Info(fmt.Sprintf("- %s:%s (vision=%t)", m.Provider, m.Name, m.Vision)))
 	}
 }
 
 func (a *App) printStatus() {
-	a.printLine(fmt.Sprintf("mode=%s permission=%s", a.mode, a.cfg.Permission))
+	a.printLine(a.ui.Status(string(a.mode), string(a.cfg.Permission)))
 }
 
 func (a *App) printLine(s string) {

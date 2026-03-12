@@ -19,10 +19,10 @@ func TestModeNextCycle(t *testing.T) {
 	}
 }
 
-func TestCtrlTabInputs(t *testing.T) {
-	for _, in := range []string{"/next", "ctrl+tab", ":next", "\x1b[27;5;9~"} {
-		if !IsCtrlTabInput(in) {
-			t.Fatalf("expected ctrl-tab match for %q", in)
+func TestShiftTabInputs(t *testing.T) {
+	for _, in := range []string{"/next", "shift+tab", ":next", "\x1b[Z"} {
+		if !IsModeSwitchInput(in) {
+			t.Fatalf("expected shift-tab switch match for %q", in)
 		}
 	}
 }
