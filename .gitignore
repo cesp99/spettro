@@ -1,0 +1,22 @@
+# Mandatory local inspiration references (never tracked)
+insp/
+
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go module/workspace extras
+go.work
+go.work.sum
+
+# Local runtime artifacts
+.spettro/
+
+# Editor/system
+.DS_Store
