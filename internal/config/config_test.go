@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,7 +18,6 @@ func TestLoadOrCreateRoundTrip(t *testing.T) {
 
 	cfg.ActiveProvider = "anthropic"
 	cfg.ActiveModel = "claude-3-7-sonnet"
-	cfg.APIKeys["anthropic"] = "secret"
 	if err := Save(cfg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -37,5 +37,13 @@ func TestLoadOrCreateRoundTrip(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("expected private permissions, got %o", info.Mode().Perm())
+	}
+
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(raw), "secret") {
+		t.Fatal("plaintext key leaked into config file")
 	}
 }

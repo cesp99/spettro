@@ -20,7 +20,7 @@ type UserConfig struct {
 	ActiveProvider string            `json:"active_provider"`
 	ActiveModel    string            `json:"active_model"`
 	Permission     PermissionLevel   `json:"permission"`
-	APIKeys        map[string]string `json:"api_keys"`
+	APIKeys        map[string]string `json:"api_keys,omitempty"`
 }
 
 func Default() UserConfig {
@@ -86,7 +86,10 @@ func Save(cfg UserConfig) error {
 		return fmt.Errorf("create global config dir: %w", err)
 	}
 
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+	// Never persist plaintext API keys in config.json.
+	scrubbed := cfg
+	scrubbed.APIKeys = nil
+	raw, err := json.MarshalIndent(scrubbed, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}

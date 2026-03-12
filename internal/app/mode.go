@@ -23,10 +23,10 @@ func (m Mode) Next() Mode {
 
 func IsModeSwitchInput(s string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(s))
-	switch normalized {
-	case "/next", "shift+tab", ":next":
+	switch {
+	case normalized == "/next", normalized == "shift+tab", normalized == ":next":
 		return true
-	case "\x1b[z", "\x1b[Z":
+	case strings.Contains(s, "\x1b[Z"), strings.Contains(s, "\x1b[z"), strings.Contains(normalized, "^[z"):
 		return true
 	default:
 		return false

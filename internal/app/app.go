@@ -32,6 +32,19 @@ type App struct {
 	pendingPlan string
 	pendingImgs []string
 	ui          *ui.Renderer
+	setup       *setupWizard
+	modelPicker *modelPicker
+}
+
+type setupWizard struct {
+	step     int
+	provider string
+	model    string
+}
+
+type modelPicker struct {
+	filter string
+	items  []provider.Model
 }
 
 func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error) {
@@ -49,6 +62,11 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 	if err != nil {
 		return nil, err
 	}
+	keys, err := config.LoadAPIKeys()
+	if err != nil {
+		return nil, err
+	}
+	cfg.APIKeys = keys
 
 	pm := provider.NewManager()
 	app := &App{
@@ -76,23 +94,46 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 }
 
 func (a *App) Run(ctx context.Context) error {
-	scanner := bufio.NewScanner(a.in)
+	reader := bufio.NewReader(a.in)
 	a.printLine(a.ui.Welcome())
+	a.printLine(a.ui.Info(a.ui.Stage(string(a.mode))))
 	a.printStatus()
+	if strings.TrimSpace(a.cfg.APIKeys[a.cfg.ActiveProvider]) == "" {
+		a.printLine(a.ui.Panel(string(a.mode), "Setup Required", "Run /setup to configure provider, model and encrypted API key storage."))
+	}
 
 	for {
 		fmt.Fprintf(a.out, "%s ", a.ui.Prompt(string(a.mode), a.cfg.ActiveProvider, a.cfg.ActiveModel))
-		if !scanner.Scan() {
-			return scanner.Err()
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
 		}
 
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+
+		if a.setup != nil {
+			if err := a.handleSetupInput(line); err != nil {
+				a.printLine("setup error: " + err.Error())
+			}
+			continue
+		}
+
+		if a.modelPicker != nil {
+			if err := a.handleModelPickerInput(line); err != nil {
+				a.printLine("models error: " + err.Error())
+			}
 			continue
 		}
 
 		if IsModeSwitchInput(line) {
 			a.mode = a.mode.Next()
+			a.printLine(a.ui.Info(a.ui.Stage(string(a.mode))))
 			a.printStatus()
 			continue
 		}
@@ -128,16 +169,25 @@ func (a *App) handleCommand(line string) error {
 	fields := strings.Fields(line)
 	switch fields[0] {
 	case "/help":
-		a.printLine(a.ui.Panel(string(a.mode), "Commands", "/next (Shift+Tab), /mode, /models <provider>:<model> [api_key], /permission <yolo|restricted|ask-first>, /image <path>, /images, /index, /approve, /exit"))
+		a.printLine(a.ui.Panel(string(a.mode), "Commands", "/setup, /next (Shift+Tab), /mode, /models [provider:model] [api_key], /permission <yolo|restricted|ask-first>, /image <path>, /images, /index, /approve, /exit\nUse /models with no args for interactive picker."))
 	case "/exit", "/quit":
 		return io.EOF
+	case "/setup":
+		return a.startSetup()
+	case "/login":
+		a.printLine("deprecated: use /setup")
+		return a.startSetup()
 	case "/mode":
 		a.mode = a.mode.Next()
+		a.printLine(a.ui.Info(a.ui.Stage(string(a.mode))))
 		a.printStatus()
 	case "/models":
-		a.printModels()
 		if len(fields) < 2 {
-			a.printLine("usage: /models <provider>:<model> [api_key]")
+			a.startModelPicker("")
+			return nil
+		}
+		if !strings.Contains(fields[1], ":") {
+			a.startModelPicker(fields[1])
 			return nil
 		}
 		pair := strings.SplitN(fields[1], ":", 2)
@@ -150,6 +200,9 @@ func (a *App) handleCommand(line string) error {
 		a.cfg.ActiveProvider = pair[0]
 		a.cfg.ActiveModel = pair[1]
 		if len(fields) >= 3 {
+			if err := config.SaveAPIKey(pair[0], fields[2]); err != nil {
+				return err
+			}
 			a.cfg.APIKeys[pair[0]] = fields[2]
 		}
 		if err := config.Save(a.cfg); err != nil {
@@ -216,6 +269,96 @@ func (a *App) handleCommand(line string) error {
 	return nil
 }
 
+func (a *App) startSetup() error {
+	a.setup = &setupWizard{}
+	a.printLine(a.ui.Panel(string(a.mode), "Initial Setup", "Let's configure Spettro.\nType /cancel to abort setup at any step."))
+	a.printLine("Select provider:")
+	a.printLine("1) openai-compatible")
+	a.printLine("2) anthropic")
+	a.printLine("Enter provider name or number:")
+	return nil
+}
+
+func (a *App) handleSetupInput(line string) error {
+	if strings.EqualFold(line, "/cancel") {
+		a.setup = nil
+		a.printLine("setup canceled")
+		return nil
+	}
+
+	switch a.setup.step {
+	case 0:
+		switch strings.TrimSpace(strings.ToLower(line)) {
+		case "1", "openai-compatible":
+			a.setup.provider = "openai-compatible"
+		case "2", "anthropic":
+			a.setup.provider = "anthropic"
+		default:
+			return fmt.Errorf("invalid provider, choose 1/2 or provider name")
+		}
+		a.setup.step = 1
+		a.printLine("Select model:")
+		for _, m := range a.providers.Models() {
+			if m.Provider == a.setup.provider {
+				a.printLine(fmt.Sprintf("- %s", m.Name))
+			}
+		}
+		a.printLine("Enter model name:")
+		return nil
+	case 1:
+		model := strings.TrimSpace(line)
+		if !a.providers.HasModel(a.setup.provider, model) {
+			return fmt.Errorf("unknown model for provider %s", a.setup.provider)
+		}
+		a.setup.model = model
+		a.setup.step = 2
+		a.printLine("Paste API key (input is not masked in current terminal):")
+		return nil
+	case 2:
+		key := strings.TrimSpace(line)
+		if key == "" {
+			return fmt.Errorf("api key cannot be empty")
+		}
+		if err := config.SaveAPIKey(a.setup.provider, key); err != nil {
+			return err
+		}
+		if a.cfg.APIKeys == nil {
+			a.cfg.APIKeys = map[string]string{}
+		}
+		a.cfg.APIKeys[a.setup.provider] = key
+		a.cfg.ActiveProvider = a.setup.provider
+		a.cfg.ActiveModel = a.setup.model
+		a.setup.step = 3
+		a.printLine("Choose default permission:")
+		a.printLine("1) ask-first")
+		a.printLine("2) restricted")
+		a.printLine("3) yolo")
+		a.printLine("Enter value:")
+		return nil
+	case 3:
+		switch strings.TrimSpace(strings.ToLower(line)) {
+		case "1", "ask-first":
+			a.cfg.Permission = config.PermissionAskFirst
+		case "2", "restricted":
+			a.cfg.Permission = config.PermissionRestricted
+		case "3", "yolo":
+			a.cfg.Permission = config.PermissionYOLO
+		default:
+			return fmt.Errorf("invalid permission, choose ask-first/restricted/yolo")
+		}
+
+		if err := config.Save(a.cfg); err != nil {
+			return err
+		}
+		a.setup = nil
+		a.printLine(a.ui.Panel(string(a.mode), "Setup Complete", fmt.Sprintf("Active provider/model: %s:%s", a.cfg.ActiveProvider, a.cfg.ActiveModel)))
+		a.printStatus()
+		return nil
+	default:
+		return fmt.Errorf("invalid setup state")
+	}
+}
+
 func (a *App) handlePlanning(ctx context.Context, prompt string) error {
 	plan, err := a.planner.Plan(ctx, prompt)
 	if err != nil {
@@ -261,6 +404,61 @@ func (a *App) printModels() {
 	for _, m := range a.providers.Models() {
 		a.printLine(a.ui.Info(fmt.Sprintf("- %s:%s (vision=%t)", m.Provider, m.Name, m.Vision)))
 	}
+}
+
+func (a *App) startModelPicker(prefix string) {
+	a.modelPicker = &modelPicker{filter: strings.ToLower(strings.TrimSpace(prefix))}
+	a.modelPicker.items = a.modelPickerMatches(a.modelPicker.filter)
+	if len(a.modelPicker.items) == 0 {
+		a.printLine("no model matches found")
+		a.modelPicker = nil
+		return
+	}
+	a.printLine(a.ui.Panel(string(a.mode), "Model Picker", "Type a number to select model.\nType text to filter.\nType /cancel to close picker."))
+	for i, m := range a.modelPicker.items {
+		a.printLine(a.ui.Info(fmt.Sprintf("%d) %s:%s (vision=%t)", i+1, m.Provider, m.Name, m.Vision)))
+	}
+}
+
+func (a *App) handleModelPickerInput(line string) error {
+	if strings.EqualFold(line, "/cancel") {
+		a.modelPicker = nil
+		a.printLine("model picker closed")
+		return nil
+	}
+	if n, err := parseSelection(line); err == nil {
+		if n < 1 || n > len(a.modelPicker.items) {
+			return fmt.Errorf("selection out of range")
+		}
+		selected := a.modelPicker.items[n-1]
+		a.cfg.ActiveProvider = selected.Provider
+		a.cfg.ActiveModel = selected.Name
+		if err := config.Save(a.cfg); err != nil {
+			return err
+		}
+		a.modelPicker = nil
+		a.printStatus()
+		return nil
+	}
+	a.startModelPicker(line)
+	return nil
+}
+
+func parseSelection(line string) (int, error) {
+	var n int
+	_, err := fmt.Sscanf(strings.TrimSpace(line), "%d", &n)
+	return n, err
+}
+
+func (a *App) modelPickerMatches(prefix string) []provider.Model {
+	matches := make([]provider.Model, 0)
+	for _, m := range a.providers.Models() {
+		full := strings.ToLower(m.Provider + ":" + m.Name)
+		if prefix == "" || strings.Contains(full, prefix) {
+			matches = append(matches, m)
+		}
+	}
+	return matches
 }
 
 func (a *App) printStatus() {

@@ -21,6 +21,8 @@ type Theme struct {
 	Label  string
 	Accent string
 	Prompt string
+	Icon   string
+	Stage  string
 }
 
 type Renderer struct {
@@ -30,9 +32,9 @@ type Renderer struct {
 func NewRenderer() *Renderer {
 	return &Renderer{
 		themes: map[string]Theme{
-			"planning": {Label: "Planning Agent", Accent: cyan, Prompt: "◈"},
-			"coding":   {Label: "Coding Agent", Accent: green, Prompt: "◆"},
-			"chat":     {Label: "Chat Agent", Accent: yellow, Prompt: "●"},
+			"planning": {Label: "Planning Agent", Accent: cyan, Prompt: "◈", Icon: "🧠", Stage: "planning (planning agent)"},
+			"coding":   {Label: "Coding Agent", Accent: green, Prompt: "◆", Icon: "⚙", Stage: "acting (coding agent)"},
+			"chat":     {Label: "Chat Agent", Accent: yellow, Prompt: "●", Icon: "💬", Stage: "chat (chat agent)"},
 		},
 	}
 }
@@ -40,19 +42,19 @@ func NewRenderer() *Renderer {
 func (r *Renderer) Welcome() string {
 	lines := []string{
 		fmt.Sprintf("%s%sSPETTRO%s  %sfast multi-agent coding CLI%s", bold, blue, reset, dim, reset),
-		fmt.Sprintf("%sShift+Tab%s switches agents. %s/models%s changes model.", gray, reset, gray, reset),
+		fmt.Sprintf("%sShift+Tab%s switches agents. %s/setup%s runs initial onboarding.", gray, reset, gray, reset),
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (r *Renderer) Prompt(mode, provider, model string) string {
 	t := r.theme(mode)
-	return fmt.Sprintf("%s%s %s%s%s/%s%s >", t.Accent, t.Prompt, bold, mode, reset, provider, model)
+	return fmt.Sprintf("%s%s %s%s%s %s%s/%s%s >", t.Accent, t.Prompt, bold, mode, reset, dim, provider, model, reset)
 }
 
 func (r *Renderer) Status(mode, permission string) string {
 	t := r.theme(mode)
-	return fmt.Sprintf("%s[%s]%s %s%s%s  %sperm:%s %s%s%s", t.Accent, t.Label, reset, bold, strings.ToUpper(mode), reset, gray, reset, red, permission, reset)
+	return fmt.Sprintf("%s%s [%s]%s %s%s%s  %sperm:%s %s%s%s", t.Accent, t.Icon, t.Label, reset, bold, strings.ToUpper(mode), reset, gray, reset, red, permission, reset)
 }
 
 func (r *Renderer) Panel(mode, title, body string) string {
@@ -71,5 +73,9 @@ func (r *Renderer) theme(mode string) Theme {
 	if t, ok := r.themes[mode]; ok {
 		return t
 	}
-	return Theme{Label: "Unknown", Accent: blue, Prompt: "•"}
+	return Theme{Label: "Unknown", Accent: blue, Prompt: "•", Icon: "•", Stage: "unknown"}
+}
+
+func (r *Renderer) Stage(mode string) string {
+	return r.theme(mode).Stage
 }
