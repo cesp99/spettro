@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"spettro/internal/config"
+	"spettro/internal/models"
 	"spettro/internal/provider"
 	"spettro/internal/storage"
 	"spettro/internal/tui"
@@ -34,6 +35,15 @@ func main() {
 	cfg.APIKeys = keys
 
 	pm := provider.NewManager()
+
+	// Load cached catalog immediately (fast disk read) so the model selector
+	// is populated before the TUI starts.  Then refresh from the network in
+	// the background – exactly like opencode's ModelsDev pattern.
+	if cat, err := models.Load(); err == nil {
+		pm.SetCatalog(cat)
+	}
+	models.RefreshBackground(pm.SetCatalog)
+
 	m := tui.New(cwd, cfg, store, pm)
 
 	p := tea.NewProgram(m,

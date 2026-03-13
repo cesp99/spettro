@@ -372,7 +372,12 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/setup":
 		m.showSetup = true
 		m.setup = setupState{}
-		m.pushSystemMsg("setup wizard — choose provider: 1) openai-compatible  2) anthropic")
+		providerIDs := m.providers.ProviderNames()
+		var plines []string
+		for i, id := range providerIDs {
+			plines = append(plines, fmt.Sprintf("  %d) %s", i+1, id))
+		}
+		m.pushSystemMsg("setup wizard — choose provider:\n" + strings.Join(plines, "\n"))
 	case "/models":
 		if len(fields) >= 2 {
 			if strings.Contains(fields[1], ":") {
@@ -562,21 +567,50 @@ func (m Model) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch m.setup.step {
 	case 0: // choose provider
-		switch input {
-		case "1", "openai-compatible":
-			m.setup.provider = "openai-compatible"
-		case "2", "anthropic":
-			m.setup.provider = "anthropic"
-		default:
-			m.pushSystemMsg("invalid choice — enter 1 or 2")
-			m.refreshViewport()
-			return m, nil
+		providerIDs := m.providers.ProviderNames()
+		// Accept number or name
+		if n, err := fmt.Sscanf(input, "%d", new(int)); n == 1 && err == nil {
+			var idx int
+			fmt.Sscanf(input, "%d", &idx)
+			idx-- // 1-based to 0-based
+			if idx < 0 || idx >= len(providerIDs) {
+				m.pushSystemMsg(fmt.Sprintf("invalid choice — enter 1-%d or provider name", len(providerIDs)))
+				m.refreshViewport()
+				return m, nil
+			}
+			m.setup.provider = providerIDs[idx]
+		} else {
+			found := false
+			for _, id := range providerIDs {
+				if strings.EqualFold(id, input) {
+					m.setup.provider = id
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.pushSystemMsg(fmt.Sprintf("unknown provider — enter 1-%d or provider name", len(providerIDs)))
+				m.refreshViewport()
+				return m, nil
+			}
 		}
 		m.setup.step = 1
 		var names []string
 		for _, mod := range m.providers.Models() {
 			if mod.Provider == m.setup.provider {
-				names = append(names, "  "+mod.Name)
+				displayName := mod.DisplayName
+				if displayName == "" {
+					displayName = mod.Name
+				}
+				tag := mod.Tag()
+				line := "  " + mod.Name
+				if displayName != mod.Name {
+					line += " (" + displayName + ")"
+				}
+				if tag != "" {
+					line += "  " + tag
+				}
+				names = append(names, line)
 			}
 		}
 		m.pushSystemMsg("choose model:\n" + strings.Join(names, "\n"))
@@ -844,46 +878,99 @@ func (m Model) viewStatusBar() string {
 }
 
 // viewSelector renders the model selector dialog as a full-screen overlay.
+// Layout is inspired by opencode's dialog-model: provider sections, fuzzy
+// search, tag badges (img / think / ctx size).
 func (m Model) viewSelector() string {
 	mc := modeColor(m.mode)
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ Select Model")
-	filterLine := styleMuted.Render("search: ") +
-		lipgloss.NewStyle().Foreground(colorText).Render(m.selFilter) +
-		lipgloss.NewStyle().Foreground(mc).Render("_")
+	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ select model")
 
+	// Search bar
+	cursor := lipgloss.NewStyle().Foreground(mc).Render("_")
+	filterLine := styleMuted.Render("search  ") +
+		lipgloss.NewStyle().Foreground(colorText).Render(m.selFilter) +
+		cursor
+
+	// Model rows grouped by provider
 	var rows []string
 	currentProvider := ""
 	for i, mod := range m.selItems {
+		// Provider section header
 		if mod.Provider != currentProvider {
 			currentProvider = mod.Provider
-			rows = append(rows, "")
-			rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).
-				Render("  ─ "+currentProvider+" ─"))
+			if len(rows) > 0 {
+				rows = append(rows, "")
+			}
+			provLabel := mod.ProviderName
+			if provLabel == "" {
+				provLabel = mod.Provider
+			}
+			rows = append(rows, lipgloss.NewStyle().
+				Foreground(colorMuted).Bold(true).
+				Render("  ─ "+provLabel))
 		}
-		cursor := "  "
-		var nameStyle lipgloss.Style
-		if i == m.selCursor {
-			cursor = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
+
+		// Selected vs normal row
+		isSelected := i == m.selCursor
+		isCurrent := mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel
+
+		var prefix string
+		var nameStyle, tagStyle lipgloss.Style
+		if isSelected {
+			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
 			nameStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+			tagStyle = lipgloss.NewStyle().Foreground(colorMuted)
 		} else {
+			prefix = "  "
 			nameStyle = lipgloss.NewStyle().Foreground(colorMuted)
+			tagStyle = lipgloss.NewStyle().Foreground(colorDim)
 		}
-		vision := ""
-		if mod.Vision {
-			vision = lipgloss.NewStyle().Foreground(colorMuted).Render("  vision")
+
+		displayName := mod.DisplayName
+		if displayName == "" {
+			displayName = mod.Name
 		}
-		rows = append(rows, cursor+nameStyle.Render(mod.Name)+vision)
+		if isCurrent {
+			displayName += lipgloss.NewStyle().Foreground(mc).Render(" ●")
+		}
+
+		tag := tagStyle.Render(mod.Tag())
+		row := prefix + nameStyle.Render(displayName)
+		if tag != "" {
+			row += "  " + tag
+		}
+		rows = append(rows, row)
 	}
 	if len(m.selItems) == 0 {
 		rows = append(rows, styleMuted.Render("  no matches"))
 	}
 
-	hint := styleMuted.Render("↑↓: navigate  enter: select  esc: close")
+	hint := styleMuted.Render("↑↓ navigate  enter select  esc close  f2 cycle")
 
-	dialogWidth := 60
+	dialogWidth := 70
 	if m.width < dialogWidth+4 {
 		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+
+	// Cap visible rows to avoid overflowing the screen
+	maxRows := m.height - 12
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	// Scroll window around cursor
+	start := 0
+	if len(rows) > maxRows {
+		start = m.selCursor - maxRows/2
+		if start < 0 {
+			start = 0
+		}
+		if start+maxRows > len(rows) {
+			start = len(rows) - maxRows
+		}
+		rows = rows[start : start+maxRows]
 	}
 
 	dialog := lipgloss.NewStyle().
@@ -895,6 +982,7 @@ func (m Model) viewSelector() string {
 			title,
 			"",
 			filterLine,
+			"",
 			strings.Join(rows, "\n"),
 			"",
 			hint,
