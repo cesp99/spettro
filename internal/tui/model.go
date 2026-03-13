@@ -16,10 +16,13 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/conversation"
 	"spettro/internal/indexer"
 	"spettro/internal/provider"
 	"spettro/internal/storage"
 )
+
+const coAuthorInfo = "Co-Authored-By: Spettro <spettro@eyed.to>"
 
 // ── message types ────────────────────────────────────────────────────────────
 
@@ -40,10 +43,12 @@ type ToolItem struct {
 }
 
 type ChatMessage struct {
-	Role    Role
-	Content string
-	Tools   []ToolItem
-	At      time.Time
+	Role     Role
+	Content  string
+	Thinking string // content from <think>...</think> blocks, hidden by default
+	Meta     string // muted footer hint shown below assistant messages
+	Tools    []ToolItem
+	At       time.Time
 }
 
 // ── command palette ───────────────────────────────────────────────────────────
@@ -63,8 +68,13 @@ var allCommands = []commandDef{
 	{"/permission", "set permission level"},
 	{"/image", "attach image to next message"},
 	{"/images", "list queued images"},
+	{"/commit", "commit changes (LLM message + Spettro co-author)"},
+	{"/search", "search repo files  usage: /search [query]"},
 	{"/index", "index project files"},
-	{"/coauthor", "show co-author git info"},
+	{"/coauthor", "show co-author git trailer"},
+	{"/compact", "summarize conversation to save context"},
+	{"/clear", "clear conversation history"},
+	{"/resume", "resume a previous conversation"},
 	{"/exit", "exit spettro"},
 }
 
@@ -88,6 +98,7 @@ type tickMsg time.Time
 
 type agentDoneMsg struct {
 	content string
+	meta    string // hint shown below the message
 	err     error
 }
 
@@ -96,9 +107,24 @@ type planDoneMsg struct {
 	err  error
 }
 
+type commitDoneMsg struct {
+	commitMsg string
+	err       error
+}
+
+type searchDoneMsg struct {
+	result string
+	err    error
+}
+
 type bannerClearMsg struct{}
 
 type quitWarningMsg struct{}
+
+type compactDoneMsg struct {
+	summary string
+	err     error
+}
 
 // ── setup state ──────────────────────────────────────────────────────────────
 
@@ -170,6 +196,22 @@ type Model struct {
 	// quit protection: require two ctrl+c within 2 seconds
 	ctrlCAt time.Time
 
+	// trust dialog
+	showTrust   bool
+	trustCursor int
+
+	// thinking block visibility (toggled with ctrl+o)
+	showThinking bool
+
+	// conversation persistence
+	convID  string // current conversation ID (set on first message)
+	convDir string // path to .spettro/conversations/
+
+	// resume dialog
+	showResume   bool
+	resumeItems  []conversation.Summary
+	resumeCursor int
+
 	// app deps
 	cwd       string
 	store     *storage.Store
@@ -177,6 +219,8 @@ type Model struct {
 	planner   agent.PlanningAgent
 	coder     agent.CodingAgent
 	chatter   agent.ChatAgent
+	committer agent.CommitAgent
+	searcher  agent.SearchAgent
 }
 
 // New creates a new bubbletea Model wired to all the internal services.
@@ -186,6 +230,11 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 8000
 	ta.SetHeight(3)
+	// Remove default cursor-line highlight and prompt glyph that cause
+	// a black background band and a white bar on the left side.
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle()
+	ta.BlurredStyle.Prompt = lipgloss.NewStyle()
 	ta.Focus()
 
 	sp := spinner.New()
@@ -206,13 +255,25 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		ta:        ta,
 		spin:      sp,
 		favorites: favs,
-		planner:   agent.Planner{},
-		coder:     agent.Coder{},
+		convDir:   conversation.ProjectDir(store.GlobalDir, cwd),
+		planner: agent.LLMPlanner{
+			ProviderManager: pm,
+			ProviderName:    func() string { return cfg.ActiveProvider },
+			ModelName:       func() string { return cfg.ActiveModel },
+			CWD:             cwd,
+		},
+		coder: agent.Coder{},
 		chatter: agent.Chatter{
 			ProviderManager: pm,
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 		},
+		committer: agent.LLMCommitter{
+			ProviderManager: pm,
+			ProviderName:    func() string { return cfg.ActiveProvider },
+			ModelName:       func() string { return cfg.ActiveModel },
+		},
+		searcher: agent.RepoSearcher{},
 	}
 }
 
@@ -234,7 +295,18 @@ func tick() tea.Cmd {
 
 // ── Update ───────────────────────────────────────────────────────────────────
 
+// Update delegates to update() then always recomputes layout so that
+// changes to thinking/banner/cmdItems are immediately reflected in viewport height.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	newModel, cmd := m.update(msg)
+	if nm, ok := newModel.(Model); ok {
+		nm = nm.recalcLayout()
+		return nm, cmd
+	}
+	return newModel, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -245,7 +317,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.recalcLayout()
 		if !m.ready {
 			m.ready = true
-			m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+			// Show trust dialog if this folder hasn't been trusted yet.
+			if !config.IsTrusted(m.cwd) {
+				m.showTrust = true
+			} else {
+				m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+			}
 			m.refreshViewport()
 		}
 
@@ -263,10 +340,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.showBanner("error: "+msg.err.Error(), "error")
 		} else {
+			main, thinking := stripThinking(msg.content)
 			m.messages = append(m.messages, ChatMessage{
-				Role:    RoleAssistant,
-				Content: msg.content,
-				At:      time.Now(),
+				Role:     RoleAssistant,
+				Content:  main,
+				Thinking: thinking,
+				Meta:     msg.meta,
+				At:       time.Now(),
 			})
 		}
 		m.refreshViewport()
@@ -282,6 +362,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content: "Plan generated. Saved to .spettro/PLAN.md\nSwitch to coding mode (/mode) then /approve to execute.",
 				At:      time.Now(),
 			})
+		}
+		m.refreshViewport()
+
+	case commitDoneMsg:
+		m.thinking = false
+		if msg.err != nil {
+			m.showBanner("commit error: "+msg.err.Error(), "error")
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: fmt.Sprintf("committed: %s\n\n%s", msg.commitMsg, coAuthorInfo),
+				At:      time.Now(),
+			})
+		}
+		m.refreshViewport()
+
+	case searchDoneMsg:
+		m.thinking = false
+		if msg.err != nil {
+			m.showBanner("search error: "+msg.err.Error(), "error")
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleSystem,
+				Content: msg.result,
+				At:      time.Now(),
+			})
+		}
+		m.refreshViewport()
+
+	case compactDoneMsg:
+		m.thinking = false
+		if msg.err != nil {
+			m.showBanner("compact error: "+msg.err.Error(), "error")
+		} else {
+			m.autoSave() // save full history before compacting
+			m.convID = "" // new conversation after compact
+			m.messages = []ChatMessage{{
+				Role:    RoleSystem,
+				Content: "── conversation compacted ──\n\n" + msg.summary,
+				At:      time.Now(),
+			}}
 		}
 		m.refreshViewport()
 
@@ -331,6 +452,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		// Dialogs get priority
+		if m.showTrust {
+			return m.updateTrust(msg)
+		}
+		if m.showResume {
+			return m.updateResume(msg)
+		}
 		if m.showConnect {
 			return m.updateConnect(msg)
 		}
@@ -344,7 +471,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Pass remaining input to textarea and viewport when no dialog
-	if !m.showSelector && !m.showSetup && !m.showConnect {
+	if !m.showTrust && !m.showResume && !m.showSelector && !m.showSetup && !m.showConnect {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)
@@ -391,9 +518,20 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case "tab":
+		if len(m.cmdItems) > 0 {
+			m.cmdCursor = (m.cmdCursor + 1) % len(m.cmdItems)
+			return m, nil
+		}
+
 	case "shift+tab":
 		m.mode = nextMode(m.mode)
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
+		return m, nil
+
+	case "ctrl+o":
+		m.showThinking = !m.showThinking
+		m.refreshViewport()
 		return m, nil
 
 	case "f2":
@@ -580,8 +718,33 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				m.showBanner(fmt.Sprintf("indexed %d files → .spettro/index.json", len(snap.Entries)), "success")
 			}
 		}
+	case "/commit":
+		return m.runCommitter()
+	case "/search":
+		query := ""
+		if len(fields) >= 2 {
+			query = strings.Join(fields[1:], " ")
+		}
+		return m.runSearcher(query)
 	case "/coauthor":
-		m.pushSystemMsg("co-author: Claude (claude.ai)\nAdd to your commit:\n  Co-Authored-By: Claude <noreply@anthropic.com>")
+		m.pushSystemMsg("spettro co-author trailer:\n  " + coAuthorInfo + "\n\nThis trailer is appended automatically by /commit.")
+	case "/compact":
+		return m.runCompact()
+	case "/clear":
+		m.autoSave()
+		m.messages = nil
+		m.convID = ""
+		m.pushSystemMsg("conversation cleared")
+		m.refreshViewport()
+	case "/resume":
+		items, err := conversation.List(m.convDir)
+		if err != nil || len(items) == 0 {
+			m.showBanner("no saved conversations found", "info")
+		} else {
+			m.showResume = true
+			m.resumeItems = items
+			m.resumeCursor = 0
+		}
 	default:
 		m.showBanner("unknown command: "+cmd, "error")
 	}
@@ -614,7 +777,16 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 func (m Model) runPlanner(prompt string) (tea.Model, tea.Cmd) {
 	m.thinking = true
 	store := m.store
-	planner := m.planner
+	cwd := m.cwd
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
+	planner := agent.LLMPlanner{
+		ProviderManager: pm,
+		ProviderName:    func() string { return providerName },
+		ModelName:       func() string { return modelName },
+		CWD:             cwd,
+	}
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
@@ -644,7 +816,7 @@ func (m Model) runCoder(input string, approved bool) (tea.Model, tea.Cmd) {
 			if err != nil {
 				return agentDoneMsg{err: err}
 			}
-			_ = store.AppendProjectFile("AGENT.md", result+"\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n")
+			_ = store.AppendProjectFile("AGENT.md", result+"\n\n"+coAuthorInfo+"\n")
 			return agentDoneMsg{content: result}
 		},
 	)
@@ -655,20 +827,94 @@ func (m Model) runChatter(input string) (tea.Model, tea.Cmd) {
 	m.thinking = true
 	imgs := append([]string(nil), m.pendingImgs...)
 	m.pendingImgs = nil
-	chatter := m.chatter
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
-			resp, err := chatter.Reply(context.Background(), input, imgs)
+			resp, err := pm.Send(context.Background(), providerName, modelName, provider.Request{
+				Prompt: input,
+				Images: imgs,
+			})
 			if err != nil {
 				return agentDoneMsg{err: err}
 			}
-			return agentDoneMsg{content: fmt.Sprintf("%s\n\n%s",
-				resp.Content,
-				lipgloss.NewStyle().Foreground(colorMuted).Render(
-					fmt.Sprintf("provider:%s model:%s ~%d tokens", resp.Provider, resp.Model, resp.EstimatedTokens),
-				),
-			)}
+			return agentDoneMsg{
+				content: resp.Content,
+				meta:    "ctrl+o for details",
+			}
+		},
+	)
+}
+
+// runCommitter starts an async commit using the LLMCommitter.
+func (m Model) runCommitter() (tea.Model, tea.Cmd) {
+	m.thinking = true
+	cwd := m.cwd
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
+	committer := agent.LLMCommitter{
+		ProviderManager: pm,
+		ProviderName:    func() string { return providerName },
+		ModelName:       func() string { return modelName },
+	}
+	return m, tea.Batch(
+		m.spin.Tick,
+		func() tea.Msg {
+			msg, err := committer.Commit(context.Background(), cwd)
+			return commitDoneMsg{commitMsg: msg, err: err}
+		},
+	)
+}
+
+// runSearcher starts an async repo search.
+func (m Model) runSearcher(query string) (tea.Model, tea.Cmd) {
+	m.thinking = true
+	searcher := m.searcher
+	cwd := m.cwd
+	return m, tea.Batch(
+		m.spin.Tick,
+		func() tea.Msg {
+			result, err := searcher.Search(context.Background(), cwd, query)
+			return searchDoneMsg{result: result, err: err}
+		},
+	)
+}
+
+// runCompact sends the conversation transcript to the LLM and replaces messages with a summary.
+func (m Model) runCompact() (tea.Model, tea.Cmd) {
+	if len(m.messages) == 0 {
+		m.showBanner("nothing to compact", "info")
+		return m, nil
+	}
+	m.thinking = true
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
+	// Build a text summary of the conversation
+	var sb strings.Builder
+	for _, msg := range m.messages {
+		if msg.Role == RoleSystem {
+			continue
+		}
+		sb.WriteString(string(msg.Role))
+		sb.WriteString(": ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n\n")
+	}
+	transcript := sb.String()
+	return m, tea.Batch(
+		m.spin.Tick,
+		func() tea.Msg {
+			resp, err := pm.Send(context.Background(), providerName, modelName, provider.Request{
+				Prompt: "Summarize the following conversation concisely, preserving all key decisions, facts, code snippets, and action items. Output only the summary, no preamble.\n\n" + transcript,
+			})
+			if err != nil {
+				return compactDoneMsg{err: err}
+			}
+			return compactDoneMsg{summary: resp.Content}
 		},
 	)
 }
@@ -905,6 +1151,7 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cfg.APIKeys = map[string]string{}
 			}
 			m.cfg.APIKeys[m.connectProvider] = key
+			m.providers.SetAPIKeys(m.cfg.APIKeys)
 			m.showConnect = false
 			m.ta.Reset()
 			m.ta.Focus()
@@ -1065,6 +1312,14 @@ func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	if !m.ready {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("\n  loading…")
+	}
+
+	if m.showTrust {
+		return m.viewTrust()
+	}
+
+	if m.showResume {
+		return m.viewResume()
 	}
 
 	if m.showConnect {
@@ -1567,7 +1822,40 @@ func (m *Model) showBanner(text, kind string) {
 	m.bannerKind = kind
 }
 
+func (m *Model) autoSave() {
+	// only save if there are substantive messages
+	hasContent := false
+	for _, msg := range m.messages {
+		if msg.Role == RoleUser || msg.Role == RoleAssistant {
+			hasContent = true
+			break
+		}
+	}
+	if !hasContent {
+		return
+	}
+	if m.convID == "" {
+		m.convID = conversation.NewID()
+	}
+	msgs := make([]conversation.Message, len(m.messages))
+	for i, msg := range m.messages {
+		msgs[i] = conversation.Message{
+			Role:     string(msg.Role),
+			Content:  msg.Content,
+			Thinking: msg.Thinking,
+			Meta:     msg.Meta,
+			At:       msg.At,
+		}
+	}
+	_ = conversation.Save(m.convDir, conversation.Conversation{
+		ID:        m.convID,
+		StartedAt: msgs[0].At,
+		Messages:  msgs,
+	})
+}
+
 func (m *Model) refreshViewport() {
+	m.autoSave()
 	m.vp.SetContent(m.renderMessages())
 	m.vp.GotoBottom()
 }
@@ -1589,11 +1877,16 @@ func (m Model) renderMessages() string {
 
 		case RoleAssistant:
 			label := lipgloss.NewStyle().Foreground(mc).Render("  ◈ ")
-			body := lipgloss.NewStyle().
-				Foreground(colorText).
-				Width(m.width - 6).
-				Render(msg.Content)
-			parts = append(parts, label+"\n"+body)
+			body := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
+			entry := label + "\n" + body
+			if m.showThinking && msg.Thinking != "" {
+				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
+				entry += "\n" + thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘")
+			}
+			if msg.Meta != "" {
+				entry += "\n" + styleMuted.Render("  "+msg.Meta)
+			}
+			parts = append(parts, entry)
 
 		case RoleSystem:
 			s := lipgloss.NewStyle().
@@ -1608,13 +1901,27 @@ func (m Model) renderMessages() string {
 	return strings.Join(parts, "\n\n")
 }
 
-// recalcLayout updates sub-model sizes when the terminal is resized.
+// recalcLayout updates sub-model sizes based on current terminal dimensions
+// and dynamic state (thinking indicator, banner, command palette).
 func (m Model) recalcLayout() Model {
 	eyesH := len(eyesActing) // 9 lines
 	headerH := 1
-	sepH := 2 // two separators
-	inputH := 7 // border + label + textarea(3) + optional thinking/banner
+	sepH := 2    // two separators
 	statusH := 1
+
+	// Input box: border top(1) + label(1) + textarea(3) + border bottom(1) = 6 base
+	inputH := 6
+	if m.thinking {
+		inputH++ // thinking line
+	}
+	if m.banner != "" {
+		inputH++ // banner line
+	}
+	// Command palette above input box: border(2) + items
+	if len(m.cmdItems) > 0 {
+		inputH += 2 + len(m.cmdItems)
+	}
+
 	fixed := headerH + eyesH + sepH + inputH + statusH
 
 	contentH := m.height - fixed
@@ -1633,7 +1940,258 @@ func (m Model) recalcLayout() Model {
 	return m
 }
 
+// ── Resume dialog ─────────────────────────────────────────────────────────────
+
+func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.showResume = false
+	case "up", "ctrl+p", "shift+tab":
+		if m.resumeCursor > 0 {
+			m.resumeCursor--
+		}
+	case "down", "ctrl+n", "tab":
+		if m.resumeCursor < len(m.resumeItems)-1 {
+			m.resumeCursor++
+		}
+	case "enter":
+		if len(m.resumeItems) > 0 {
+			sel := m.resumeItems[m.resumeCursor]
+			conv, err := conversation.Load(sel.Path)
+			if err != nil {
+				m.showResume = false
+				m.showBanner("failed to load conversation: "+err.Error(), "error")
+				return m, nil
+			}
+			m.convID = conv.ID
+			m.messages = make([]ChatMessage, 0, len(conv.Messages))
+			for _, cm := range conv.Messages {
+				m.messages = append(m.messages, ChatMessage{
+					Role:     Role(cm.Role),
+					Content:  cm.Content,
+					Thinking: cm.Thinking,
+					Meta:     cm.Meta,
+					At:       cm.At,
+				})
+			}
+			m.showResume = false
+			m.refreshViewport()
+			m.showBanner(fmt.Sprintf("resumed conversation from %s", conv.StartedAt.Format("2006-01-02 15:04")), "success")
+		}
+	}
+	return m, nil
+}
+
+func (m Model) viewResume() string {
+	mc := modeColor(m.mode)
+	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation")
+
+	var rows []string
+	for i, s := range m.resumeItems {
+		isSelected := i == m.resumeCursor
+		timeStr := s.StartedAt.Format("2006-01-02 15:04")
+		preview := s.Preview
+		if preview == "" {
+			preview = "(empty)"
+		}
+		var prefix string
+		var timeStyle, previewStyle lipgloss.Style
+		if isSelected {
+			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
+			timeStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+			previewStyle = lipgloss.NewStyle().Foreground(colorMuted)
+		} else {
+			prefix = "  "
+			timeStyle = lipgloss.NewStyle().Foreground(colorMuted)
+			previewStyle = lipgloss.NewStyle().Foreground(colorDim)
+		}
+		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(preview))
+	}
+	if len(rows) == 0 {
+		rows = append(rows, styleMuted.Render("  no saved conversations"))
+	}
+
+	hint := styleMuted.Render("↑↓ navigate  enter load  esc close")
+
+	dialogWidth := 72
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+
+	maxRows := m.height - 12
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	if len(rows) > maxRows {
+		start := m.resumeCursor - maxRows/2
+		if start < 0 {
+			start = 0
+		}
+		if start+maxRows > len(rows) {
+			start = len(rows) - maxRows
+		}
+		rows = rows[start : start+maxRows]
+	}
+
+	dialog := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(mc).
+		Width(dialogWidth).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			strings.Join(rows, "\n"),
+			"",
+			hint,
+		))
+
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		dialog,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(colorDim),
+	)
+}
+
+// ── Trust dialog ──────────────────────────────────────────────────────────────
+
+func (m Model) updateTrust(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "ctrl+p", "shift+tab":
+		if m.trustCursor > 0 {
+			m.trustCursor--
+		}
+	case "down", "ctrl+n", "tab":
+		if m.trustCursor < 2 {
+			m.trustCursor++
+		}
+	case "enter":
+		switch m.trustCursor {
+		case 0: // Yes, this session
+			m.showTrust = false
+			m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+			m.refreshViewport()
+		case 1: // Yes and remember
+			_ = config.AddTrusted(m.cwd)
+			m.showTrust = false
+			m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+			m.refreshViewport()
+		case 2: // No
+			return m, tea.Quit
+		}
+	case "1", "y", "Y":
+		m.showTrust = false
+		m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+		m.refreshViewport()
+	case "2":
+		_ = config.AddTrusted(m.cwd)
+		m.showTrust = false
+		m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+		m.refreshViewport()
+	case "3", "n", "N", "esc", "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m Model) viewTrust() string {
+	mc := modeColor(m.mode)
+	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ confirm folder trust")
+	pathStyle := lipgloss.NewStyle().Foreground(colorText).Bold(true)
+	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24"))
+
+	options := []string{
+		"Yes, trust this session",
+		"Yes, and remember this folder",
+		"No, exit",
+	}
+
+	var optLines []string
+	for i, opt := range options {
+		var prefix string
+		var style lipgloss.Style
+		if i == m.trustCursor {
+			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
+			style = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+		} else {
+			prefix = "  "
+			style = lipgloss.NewStyle().Foreground(colorMuted)
+		}
+		optLines = append(optLines, prefix+style.Render(fmt.Sprintf("%d  %s", i+1, opt)))
+	}
+
+	inner := lipgloss.JoinVertical(lipgloss.Left,
+		title, "",
+		pathStyle.Render("  "+m.cwd),
+		"",
+		warnStyle.Render("  Spettro may read files and run commands in this folder."),
+		styleMuted.Render("  Only trust folders you own and control."),
+		"",
+		strings.Join(optLines, "\n"),
+		"",
+		styleMuted.Render("  ↑↓ navigate  enter confirm  1/2/3 direct select"),
+	)
+
+	dialogWidth := 64
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+
+	dialog := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(mc).
+		Width(dialogWidth).
+		Padding(1, 2).
+		Render(inner)
+
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		dialog,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(colorDim),
+	)
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// stripThinking extracts <think>...</think> blocks from content.
+// Returns the cleaned content and the concatenated thinking text.
+func stripThinking(content string) (main, thinking string) {
+	var sb, tb strings.Builder
+	remaining := content
+	for {
+		start := strings.Index(remaining, "<think>")
+		if start == -1 {
+			sb.WriteString(remaining)
+			break
+		}
+		sb.WriteString(remaining[:start])
+		remaining = remaining[start+len("<think>"):]
+		end := strings.Index(remaining, "</think>")
+		if end == -1 {
+			tb.WriteString(remaining)
+			break
+		}
+		tb.WriteString(remaining[:end])
+		remaining = remaining[end+len("</think>"):]
+	}
+	return strings.TrimSpace(sb.String()), strings.TrimSpace(tb.String())
+}
+
+// indent prefixes each line of s with the given prefix string.
+func indent(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
+}
 
 func nextMode(mode string) string {
 	switch mode {
@@ -1671,6 +2229,9 @@ const helpText = `commands:
   /images        list queued images
   /index         index project files → .spettro/index.json
   /coauthor      show co-author info for git commits
+  /compact       summarize conversation to save context
+  /clear         clear conversation history (auto-saves first)
+  /resume        resume a previous saved conversation
 
 keys:
   shift+tab      cycle mode (planning → coding → chat)

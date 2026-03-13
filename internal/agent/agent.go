@@ -22,6 +22,9 @@ type ChatAgent interface {
 	Reply(context.Context, string, []string) (provider.Response, error)
 }
 
+// CommitAgent is defined in committer.go.
+// SearchAgent is defined in searcher.go.
+
 type Planner struct{}
 
 func (Planner) Plan(_ context.Context, userPrompt string) (string, error) {

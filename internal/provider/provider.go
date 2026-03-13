@@ -7,16 +7,13 @@ import (
 	"strings"
 	"sync"
 
+	anthropic "github.com/anthropics/anthropic-sdk-go"
+	anthropicOption "github.com/anthropics/anthropic-sdk-go/option"
+	openai "github.com/openai/openai-go/v3"
+	openaiOption "github.com/openai/openai-go/v3/option"
+
 	"spettro/internal/budget"
 	"spettro/internal/models"
-)
-
-// SDK dependencies required by spec:
-// - github.com/openai/openai-go/v3
-// - github.com/anthropics/anthropic-sdk-go
-import (
-	_ "github.com/anthropics/anthropic-sdk-go"
-	_ "github.com/openai/openai-go/v3"
 )
 
 // Model is a provider+model pair enriched with metadata from models.dev.
@@ -31,6 +28,7 @@ type Model struct {
 	Context      int    // max context tokens (0 = unknown)
 	Status       string // "" | "alpha" | "beta" | "deprecated"
 	EnvKey       string // primary env var, e.g. "ANTHROPIC_API_KEY"
+	Local        bool   // true for locally-hosted models (no API key required)
 }
 
 // Tag returns a compact badge string for the model selector UI.
@@ -94,50 +92,111 @@ var fallbackModels = []Model{
 }
 
 type Manager struct {
-	mu       sync.RWMutex
-	adapters map[string]Adapter
-	catalog  []Model // populated from models.dev; nil = not loaded yet
+	mu           sync.RWMutex
+	catalog      []Model           // populated from models.dev; nil = not loaded yet
+	localModels  []Model           // models from locally-hosted servers
+	apiKeys      map[string]string // provider ID → API key
+	providerAPIs map[string]string // provider ID → base URL (from models.dev or local)
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		adapters: map[string]Adapter{
-			"anthropic": AnthropicAdapter{},
-			// All other providers use the OpenAI-compatible adapter.
-		},
+		apiKeys:      map[string]string{},
+		providerAPIs: map[string]string{},
 	}
+}
+
+// SetAPIKeys updates the API keys used by the adapters. Safe to call from any goroutine.
+func (m *Manager) SetAPIKeys(keys map[string]string) {
+	m.mu.Lock()
+	m.apiKeys = make(map[string]string, len(keys))
+	for k, v := range keys {
+		m.apiKeys[k] = v
+	}
+	m.mu.Unlock()
 }
 
 // SetCatalog replaces the model list with data from a models.dev catalog.
 // It is safe to call from any goroutine.
 func (m *Manager) SetCatalog(cat models.Catalog) {
 	built := buildModels(cat)
+	apis := make(map[string]string, len(cat))
+	for id, prov := range cat {
+		if prov.API != "" {
+			apis[id] = prov.API
+		}
+	}
 	m.mu.Lock()
 	m.catalog = built
+	// Preserve local server entries that were registered via AddLocalModels.
+	for k, v := range m.providerAPIs {
+		if strings.HasPrefix(k, "http://") || strings.HasPrefix(k, "https://") {
+			apis[k] = v
+		}
+	}
+	m.providerAPIs = apis
 	m.mu.Unlock()
 }
 
-// Models returns the full model list (catalog if loaded, else fallback).
+// AddLocalModels registers models from a local server, replacing any previous
+// models for the same provider ID (base URL). Safe to call from any goroutine.
+func (m *Manager) AddLocalModels(models []Model) {
+	if len(models) == 0 {
+		return
+	}
+	providerID := models[0].Provider
+	// The OpenAI SDK requires the base URL to include /v1.
+	baseURL := strings.TrimRight(providerID, "/") + "/v1"
+	m.mu.Lock()
+	filtered := m.localModels[:0:0]
+	for _, mod := range m.localModels {
+		if mod.Provider != providerID {
+			filtered = append(filtered, mod)
+		}
+	}
+	m.localModels = append(filtered, models...)
+	m.providerAPIs[providerID] = baseURL
+	m.mu.Unlock()
+}
+
+// RemoveLocalModels removes all models from the given local server URL.
+func (m *Manager) RemoveLocalModels(providerID string) {
+	m.mu.Lock()
+	filtered := m.localModels[:0:0]
+	for _, mod := range m.localModels {
+		if mod.Provider != providerID {
+			filtered = append(filtered, mod)
+		}
+	}
+	m.localModels = filtered
+	delete(m.providerAPIs, providerID)
+	m.mu.Unlock()
+}
+
+// Models returns the full model list (catalog if loaded, else fallback) plus local models.
 func (m *Manager) Models() []Model {
 	m.mu.RLock()
 	cat := m.catalog
+	local := m.localModels
 	m.mu.RUnlock()
-	if len(cat) > 0 {
-		out := make([]Model, len(cat))
-		copy(out, cat)
-		return out
+	base := cat
+	if len(base) == 0 {
+		base = fallbackModels
 	}
-	return append([]Model(nil), fallbackModels...)
+	out := make([]Model, len(base)+len(local))
+	copy(out, base)
+	copy(out[len(base):], local)
+	return out
 }
 
-// ConnectedModels returns only models whose provider has an API key set.
-// Providers without a key are hidden from the model selector.
+// ConnectedModels returns models from providers with an API key, plus all local models.
 func (m *Manager) ConnectedModels(apiKeys map[string]string) []Model {
-	if len(apiKeys) == 0 {
-		return nil
-	}
 	var out []Model
 	for _, mod := range m.Models() {
+		if mod.Local {
+			out = append(out, mod)
+			continue
+		}
 		if key, ok := apiKeys[mod.Provider]; ok && key != "" {
 			out = append(out, mod)
 		}
@@ -235,11 +294,10 @@ func (m *Manager) HasModel(providerName, modelName string) bool {
 }
 
 func (m *Manager) Send(ctx context.Context, providerName, modelName string, req Request) (Response, error) {
-	adapter, ok := m.adapters[providerName]
-	if !ok {
-		// Fall back to the OpenAI-compatible adapter for unknown providers.
-		adapter = OpenAICompatibleAdapter{}
-	}
+	m.mu.RLock()
+	apiKey := m.apiKeys[providerName]
+	baseURL := m.providerAPIs[providerName]
+	m.mu.RUnlock()
 
 	if len(req.Images) > 0 && !m.SupportsVision(providerName, modelName) {
 		return Response{}, fmt.Errorf("model does not support vision: %s/%s", providerName, modelName)
@@ -251,13 +309,29 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		return Response{}, err
 	}
 
+	var adapter Adapter
+	if providerName == "anthropic" {
+		adapter = AnthropicAdapter{APIKey: apiKey}
+	} else {
+		// For local servers the provider ID is the URL itself; ensure /v1 is included.
+		if baseURL == "" && (strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://")) {
+			baseURL = strings.TrimRight(providerName, "/") + "/v1"
+		}
+		if apiKey == "" {
+			apiKey = "local" // placeholder — local servers don't require auth
+		}
+		adapter = OpenAICompatibleAdapter{APIKey: apiKey, BaseURL: baseURL}
+	}
+
 	resp, err := adapter.Send(ctx, modelName, req)
 	if err != nil {
 		return Response{}, err
 	}
-	resp.EstimatedTokens = budget.EstimateTokens(allParts...)
 	resp.Provider = providerName
 	resp.Model = modelName
+	if resp.EstimatedTokens == 0 {
+		resp.EstimatedTokens = budget.EstimateTokens(allParts...)
+	}
 	return resp, nil
 }
 
@@ -329,27 +403,86 @@ func buildModels(cat models.Catalog) []Model {
 
 // ── adapters ─────────────────────────────────────────────────────────────────
 
-type OpenAICompatibleAdapter struct{}
-
-func (OpenAICompatibleAdapter) Send(_ context.Context, model string, req Request) (Response, error) {
-	return Response{
-		Content: fmt.Sprintf("[openai-compatible/%s] %s", model, summarize(req.Prompt)),
-	}, nil
+type OpenAICompatibleAdapter struct {
+	APIKey  string
+	BaseURL string // empty = use OpenAI's default endpoint
 }
 
-type AnthropicAdapter struct{}
-
-func (AnthropicAdapter) Send(_ context.Context, model string, req Request) (Response, error) {
-	return Response{
-		Content: fmt.Sprintf("[anthropic/%s] %s", model, summarize(req.Prompt)),
-	}, nil
-}
-
-func summarize(s string) string {
-	const max = 160
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
-		return s
+func (a OpenAICompatibleAdapter) Send(ctx context.Context, model string, req Request) (Response, error) {
+	opts := []openaiOption.RequestOption{openaiOption.WithAPIKey(a.APIKey)}
+	if a.BaseURL != "" {
+		opts = append(opts, openaiOption.WithBaseURL(a.BaseURL))
 	}
-	return s[:max] + "..."
+	client := openai.NewClient(opts...)
+
+	completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model: model,
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.UserMessage(req.Prompt),
+		},
+	})
+	if err != nil {
+		// Some models (e.g. Codex) only support the legacy /v1/completions endpoint.
+		if strings.Contains(err.Error(), "not a chat model") || strings.Contains(err.Error(), "v1/completions") {
+			return a.sendLegacyCompletion(ctx, client, model, req)
+		}
+		return Response{}, err
+	}
+
+	content := ""
+	if len(completion.Choices) > 0 {
+		content = completion.Choices[0].Message.Content
+	}
+	return Response{
+		Content:         content,
+		EstimatedTokens: int(completion.Usage.TotalTokens),
+	}, nil
+}
+
+func (a OpenAICompatibleAdapter) sendLegacyCompletion(ctx context.Context, client openai.Client, model string, req Request) (Response, error) {
+	completion, err := client.Completions.New(ctx, openai.CompletionNewParams{
+		Model:  openai.CompletionNewParamsModel(model),
+		Prompt: openai.CompletionNewParamsPromptUnion{OfString: openai.String(req.Prompt)},
+	})
+	if err != nil {
+		return Response{}, err
+	}
+	content := ""
+	if len(completion.Choices) > 0 {
+		content = completion.Choices[0].Text
+	}
+	return Response{
+		Content:         content,
+		EstimatedTokens: int(completion.Usage.TotalTokens),
+	}, nil
+}
+
+type AnthropicAdapter struct {
+	APIKey string
+}
+
+func (a AnthropicAdapter) Send(ctx context.Context, model string, req Request) (Response, error) {
+	client := anthropic.NewClient(anthropicOption.WithAPIKey(a.APIKey))
+
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(model),
+		MaxTokens: 8096,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(req.Prompt)),
+		},
+	})
+	if err != nil {
+		return Response{}, err
+	}
+
+	var sb strings.Builder
+	for _, block := range msg.Content {
+		if block.Type == "text" {
+			sb.WriteString(block.AsText().Text)
+		}
+	}
+	return Response{
+		Content:         sb.String(),
+		EstimatedTokens: int(msg.Usage.InputTokens + msg.Usage.OutputTokens),
+	}, nil
 }
