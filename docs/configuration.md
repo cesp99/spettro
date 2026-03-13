@@ -17,7 +17,6 @@ Spettro uses both project-local and user-global storage.
 | Path | Purpose |
 | --- | --- |
 | `PLAN.md` | Last generated implementation plan. |
-| `AGENT.md` | Coding outputs appended over time. |
 | `index.json` | Optional project snapshot (when indexer path is used). |
 | `allowed_commands.json` | Commands approved with "yes and don't ask again" for this project. |
 

@@ -258,10 +258,7 @@ func (a *App) handleCommand(line string) error {
 		if err != nil {
 			return err
 		}
-		if err := a.store.AppendProjectFile("AGENT.md", result.Content+"\n"); err != nil {
-			return err
-		}
-		a.printLine("approved and executed. output stored in .spettro/AGENT.md")
+		a.printLine(a.ui.Panel(string(a.mode), "Assistant", result.Content))
 		a.pendingPlan = ""
 	case "/image":
 		if len(fields) < 2 {
@@ -409,10 +406,7 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.store.AppendProjectFile("AGENT.md", result.Content+"\n"); err != nil {
-		return err
-	}
-	a.printLine(a.ui.Panel(string(a.mode), "Coding Action", "Logged output to .spettro/AGENT.md"))
+	a.printLine(a.ui.Panel(string(a.mode), "Assistant", result.Content))
 	return nil
 }
 
@@ -505,8 +499,7 @@ func (a *App) promptShellApproval(ctx context.Context, req agent.ShellApprovalRe
 		if err := ctx.Err(); err != nil {
 			return agent.ShellApprovalDeny, err
 		}
-		a.printLine(fmt.Sprintf("spettro wants to run this command Bash(%s)", req.Command))
-		a.printLine("Allow? 1) yes  2) yes and don't ask again  3) no")
+		a.printLine(formatShellApprovalPrompt(req.Command))
 		fmt.Fprint(a.out, "> ")
 		line, err := a.reader.ReadString('\n')
 		if err != nil {
@@ -519,8 +512,38 @@ func (a *App) promptShellApproval(ctx context.Context, req agent.ShellApprovalRe
 			return agent.ShellApprovalAllowAlways, nil
 		case "3", "n", "no":
 			return agent.ShellApprovalDeny, nil
+		case "4":
+			a.printLine("type what the agent should do instead:")
+			fmt.Fprint(a.out, "> ")
+			instead, rerr := a.reader.ReadString('\n')
+			if rerr != nil {
+				return agent.ShellApprovalDeny, rerr
+			}
+			instead = strings.TrimSpace(instead)
+			if instead == "" {
+				a.printLine("empty alternative instruction; command denied")
+				return agent.ShellApprovalDeny, nil
+			}
+			return agent.ShellApprovalDeny, fmt.Errorf("shell-exec denied by user; do this instead: %s", instead)
 		default:
-			a.printLine("invalid choice; use 1, 2, or 3")
+			text := strings.TrimSpace(line)
+			if text != "" {
+				return agent.ShellApprovalDeny, fmt.Errorf("shell-exec denied by user; do this instead: %s", text)
+			}
+			a.printLine("invalid choice; use 1, 2, 3, or 4")
 		}
 	}
+}
+
+func formatShellApprovalPrompt(command string) string {
+	return strings.Join([]string{
+		"spettro wants to run this command:",
+		"  Bash(" + command + ")",
+		"",
+		"choose an action:",
+		"  1) yes",
+		"  2) yes and don't ask again",
+		"  3) no",
+		"  4) tell the agent what to do instead",
+	}, "\n")
 }

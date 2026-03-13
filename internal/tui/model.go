@@ -72,7 +72,6 @@ var allCommands = []commandDef{
 	{"/image", "attach image to next message"},
 	{"/init", "analyze codebase and write SPETTRO.md"},
 	{"/explore", "explore the codebase with the AI"},
-	{"/commit", "commit changes (LLM message + Spettro co-author)"},
 	{"/search", "search repo files  usage: /search [query]"},
 	{"/compact", "summarize conversation (optionally focused)"},
 	{"/clear", "clear conversation history"},
@@ -148,7 +147,12 @@ type toolProgressMsg struct {
 
 type shellApprovalRequestMsg struct {
 	request  agent.ShellApprovalRequest
-	response chan agent.ShellApprovalDecision
+	response chan shellApprovalResponse
+}
+
+type shellApprovalResponse struct {
+	decision agent.ShellApprovalDecision
+	err      error
 }
 
 // ── setup state ──────────────────────────────────────────────────────────────
@@ -240,6 +244,7 @@ type Model struct {
 	approvalCh  chan shellApprovalRequestMsg
 	cancelAgent context.CancelFunc // non-nil while an agent goroutine is running
 	pendingAuth *shellApprovalRequestMsg
+	approvalAltMode bool
 
 	// conversation persistence
 	convID  string // current conversation ID (set on first message)
@@ -545,7 +550,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellApprovalRequestMsg:
 		if m.thinking {
 			m.pendingAuth = &msg
-			m.pushSystemMsg(fmt.Sprintf("spettro wants to run this command Bash(%s)\n1) yes\n2) yes and don't ask again\n3) no", msg.request.Command))
+			m.approvalAltMode = false
+			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
 			if m.approvalCh != nil {
 				cmds = append(cmds, waitForShellApproval(m.approvalCh))
@@ -742,6 +748,14 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// If command palette is open, insert selection into the input first.
 		if len(m.cmdItems) > 0 {
 			chosen := m.cmdItems[m.cmdCursor].name
+			current := strings.TrimSpace(m.ta.Value())
+			if current == chosen {
+				m.ta.Reset()
+				m.cmdItems = nil
+				m.cmdCursor = 0
+				m.mentionItems = nil
+				return m.handleCommand(chosen)
+			}
 			m.ta.SetValue(chosen + " ")
 			m.cmdItems = nil
 			m.cmdCursor = 0
@@ -900,8 +914,6 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/explore":
 		rest := strings.TrimSpace(strings.TrimPrefix(input, cmd))
 		return m.runExplore(rest)
-	case "/commit":
-		return m.runCommitter()
 	case "/search":
 		query := ""
 		if len(fields) >= 2 {
@@ -1007,7 +1019,6 @@ func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (t
 	m.approvalCh = approvalCh
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
-	store := m.store
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel
@@ -1020,15 +1031,18 @@ func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (t
 		RequiredReads:   mentionedFiles,
 		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
 		ShellApproval: func(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
-			respCh := make(chan agent.ShellApprovalDecision, 1)
+			respCh := make(chan shellApprovalResponse, 1)
 			select {
 			case approvalCh <- shellApprovalRequestMsg{request: req, response: respCh}:
 			case <-ctx.Done():
 				return agent.ShellApprovalDeny, ctx.Err()
 			}
 			select {
-			case decision := <-respCh:
-				return decision, nil
+			case resp := <-respCh:
+				if resp.err != nil {
+					return agent.ShellApprovalDeny, resp.err
+				}
+				return resp.decision, nil
 			case <-ctx.Done():
 				return agent.ShellApprovalDeny, ctx.Err()
 			}
@@ -1051,7 +1065,6 @@ func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (t
 			if err != nil {
 				return agentDoneMsg{err: err}
 			}
-			_ = store.AppendProjectFile("AGENT.md", result.Content+"\n\n"+coAuthorInfo+"\n")
 			return agentDoneMsg{content: result.Content, tools: result.Tools}
 		},
 	)
@@ -1253,15 +1266,33 @@ func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingAuth == nil {
 		return m, nil
 	}
+	shortcutAllowed := !m.approvalAltMode && strings.TrimSpace(m.ta.Value()) == ""
+	if shortcutAllowed {
+		switch msg.String() {
+		case "1", "y", "Y":
+			return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
+		case "2", "a", "A":
+			return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
+		case "3", "n", "N", "esc", "ctrl+c":
+			return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
+		case "4":
+			m.approvalAltMode = true
+			m.ta.Reset()
+			m.showBanner("type what the agent should do instead, then press enter", "info")
+			return m, nil
+		}
+	}
 	switch msg.String() {
-	case "1", "y", "Y":
-		return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
-	case "2", "a", "A":
-		return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
-	case "3", "n", "N", "esc", "ctrl+c":
-		return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
 	case "enter":
-		val := strings.ToLower(strings.TrimSpace(m.ta.Value()))
+		raw := strings.TrimSpace(m.ta.Value())
+		val := strings.ToLower(raw)
+		if m.approvalAltMode {
+			if raw == "" {
+				m.showBanner("type what the agent should do instead, then press enter", "warn")
+				return m, nil
+			}
+			return m.resolveShellApprovalAlternative(raw), nil
+		}
 		switch val {
 		case "1", "y", "yes":
 			return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
@@ -1269,9 +1300,15 @@ func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
 		case "3", "n", "no":
 			return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
-		default:
-			m.showBanner("choose 1, 2, or 3 for command approval", "warn")
+		case "4":
+			m.showBanner("type what the agent should do instead, then press enter", "info")
 			return m, nil
+		default:
+			if raw == "" {
+				m.showBanner("choose 1, 2, 3, or type an alternative instruction", "warn")
+				return m, nil
+			}
+			return m.resolveShellApprovalAlternative(raw), nil
 		}
 	}
 	var taCmd tea.Cmd
@@ -1282,13 +1319,32 @@ func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner string) Model {
 	if m.pendingAuth != nil {
 		select {
-		case m.pendingAuth.response <- decision:
+		case m.pendingAuth.response <- shellApprovalResponse{decision: decision}:
 		default:
 		}
 	}
 	m.pendingAuth = nil
+	m.approvalAltMode = false
 	m.ta.Reset()
 	m.showBanner(banner, "info")
+	m.refreshViewport()
+	return m
+}
+
+func (m Model) resolveShellApprovalAlternative(instruction string) Model {
+	if m.pendingAuth != nil {
+		select {
+		case m.pendingAuth.response <- shellApprovalResponse{
+			decision: agent.ShellApprovalDeny,
+			err:      fmt.Errorf("shell-exec denied by user; do this instead: %s", instruction),
+		}:
+		default:
+		}
+	}
+	m.pendingAuth = nil
+	m.approvalAltMode = false
+	m.ta.Reset()
+	m.showBanner("alternative instruction sent", "info")
 	m.refreshViewport()
 	return m
 }
@@ -2058,12 +2114,14 @@ func (m Model) viewInput() string {
 	prompt := modePrompt(m.mode)
 	label := lipgloss.NewStyle().Foreground(mc).Bold(true).Render(prompt + " " + m.mode)
 
-	var thinkingLine string
-	if m.thinking {
-		thinkingLine = "\n  " + m.spin.View() + styleMuted.Render(" thinking…")
+	lines := []string{label}
+	if m.pendingAuth != nil {
+		lines = append(lines, styleWarn.Render(formatShellApprovalPrompt(m.pendingAuth.request.Command)))
 	}
-
-	var bannerLine string
+	lines = append(lines, m.ta.View())
+	if m.thinking {
+		lines = append(lines, "  "+m.spin.View()+styleMuted.Render(" thinking…"))
+	}
 	if m.banner != "" {
 		var bs lipgloss.Style
 		switch m.bannerKind {
@@ -2076,7 +2134,7 @@ func (m Model) viewInput() string {
 		default:
 			bs = styleMuted
 		}
-		bannerLine = "\n  " + bs.Render(m.banner)
+		lines = append(lines, "  "+bs.Render(m.banner))
 	}
 
 	boxStyle := lipgloss.NewStyle().
@@ -2085,7 +2143,7 @@ func (m Model) viewInput() string {
 		Width(m.width - 2).
 		PaddingLeft(1).PaddingRight(1)
 
-	inner := label + "\n" + m.ta.View() + thinkingLine + bannerLine
+	inner := strings.Join(lines, "\n")
 	inputBox := boxStyle.Render(inner)
 
 	palette := m.viewCommandPalette()
@@ -2431,7 +2489,7 @@ func (m *Model) stopAgent() {
 	}
 	if m.pendingAuth != nil {
 		select {
-		case m.pendingAuth.response <- agent.ShellApprovalDeny:
+		case m.pendingAuth.response <- shellApprovalResponse{decision: agent.ShellApprovalDeny}:
 		default:
 		}
 	}
@@ -2441,6 +2499,7 @@ func (m *Model) stopAgent() {
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.approvalAltMode = false
 }
 
 func (m *Model) pushSystemMsg(content string) {
@@ -2513,11 +2572,11 @@ func (m Model) renderMessages() string {
 			bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
 			body := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
 			var entryLines []string
-			if strings.TrimSpace(msg.Content) != "" {
-				entryLines = append(entryLines, bullet+" "+body)
-			}
 			if len(msg.Tools) > 0 {
 				entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
+			}
+			if strings.TrimSpace(msg.Content) != "" {
+				entryLines = append(entryLines, bullet+" "+body)
 			}
 			if m.showTools && msg.Thinking != "" {
 				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
@@ -2580,6 +2639,9 @@ func (m Model) recalcLayout() Model {
 	}
 	if m.banner != "" {
 		inputH++ // banner line
+	}
+	if m.pendingAuth != nil {
+		inputH += len(strings.Split(formatShellApprovalPrompt(m.pendingAuth.request.Command), "\n"))
 	}
 	// Command palette above input box: border(2) + title/hint(2) + items
 	if len(m.cmdItems) > 0 {
@@ -2873,6 +2935,19 @@ func waitForShellApproval(ch chan shellApprovalRequestMsg) tea.Cmd {
 	}
 }
 
+func formatShellApprovalPrompt(command string) string {
+	return strings.Join([]string{
+		"spettro wants to run this command:",
+		"  Bash(" + command + ")",
+		"",
+		"choose an action:",
+		"  1) yes",
+		"  2) yes and don't ask again",
+		"  3) no",
+		"  4) tell the agent what to do instead",
+	}, "\n")
+}
+
 // formatToolLabel returns a human-readable label for a completed tool call.
 func formatToolLabel(name, argsJSON string) string {
 	switch name {
@@ -2916,6 +2991,30 @@ func formatToolLabel(name, argsJSON string) string {
 			return "$ " + cmd
 		}
 		return "Run command"
+	case "glob":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
+			p := args.Pattern
+			if len(p) > 50 {
+				p = p[:47] + "..."
+			}
+			return fmt.Sprintf("Glob %q", p)
+		}
+		return "Glob"
+	case "grep":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
+			p := args.Pattern
+			if len(p) > 50 {
+				p = p[:47] + "..."
+			}
+			return fmt.Sprintf("Grep %q", p)
+		}
+		return "Grep"
 	}
 	return name
 }
@@ -2963,6 +3062,30 @@ func formatRunningLabel(name, argsJSON string) string {
 			return "Running $ " + cmd + "…"
 		}
 		return "Running…"
+	case "glob":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
+			p := args.Pattern
+			if len(p) > 50 {
+				p = p[:47] + "..."
+			}
+			return fmt.Sprintf("Globbing %q…", p)
+		}
+		return "Globbing…"
+	case "grep":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
+			p := args.Pattern
+			if len(p) > 50 {
+				p = p[:47] + "..."
+			}
+			return fmt.Sprintf("Grepping %q…", p)
+		}
+		return "Grepping…"
 	}
 	return name + "…"
 }
@@ -2992,6 +3115,10 @@ func toolActionVerb(name string) string {
 		return "Search"
 	case "shell-exec":
 		return "Run"
+	case "glob":
+		return "Glob"
+	case "grep":
+		return "Grep"
 	}
 	return name
 }
@@ -3014,6 +3141,16 @@ func toolNounCount(name string, count int) string {
 			return "1 command"
 		}
 		return fmt.Sprintf("%d commands", count)
+	case "glob":
+		if count == 1 {
+			return "1 pattern"
+		}
+		return fmt.Sprintf("%d patterns", count)
+	case "grep":
+		if count == 1 {
+			return "1 pattern"
+		}
+		return fmt.Sprintf("%d patterns", count)
 	}
 	if count == 1 {
 		return "1 call"

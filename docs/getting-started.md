@@ -46,7 +46,6 @@ If permission is `ask-first`:
 Generated artifacts:
 
 - `.spettro/PLAN.md` for plans.
-- `.spettro/AGENT.md` for coding outputs.
 
 ## 5) Persist and resume conversations
 

@@ -75,8 +75,7 @@ func (c LLMCommitter) Commit(ctx context.Context, cwd string) (string, error) {
 		return "", fmt.Errorf("git add: %w", err)
 	}
 
-	fullMsg := msg + "\n\n" + coAuthor
-	if out, err := gitCmd(cwd, "commit", "-m", fullMsg); err != nil {
+	if out, err := gitCmd(cwd, "commit", "-m", msg, "--trailer", coAuthor); err != nil {
 		return "", fmt.Errorf("git commit: %s: %w", strings.TrimSpace(out), err)
 	}
 
