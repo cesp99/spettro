@@ -762,15 +762,15 @@ func (m Model) openSelector(prefix string) Model {
 }
 
 // filterModels returns the model list for the selector.
-// With no query: shows a curated set of well-known models (keeps the list short).
-// With a query: searches the full catalog so the user can find any model.
+// Always searches within the curated ~20-model pool so the list stays short.
 func (m Model) filterModels(prefix string) []provider.Model {
+	curated := m.providers.CuratedModels()
 	if prefix == "" {
-		return m.providers.CuratedModels()
+		return curated
 	}
 	q := strings.ToLower(prefix)
 	var out []provider.Model
-	for _, mod := range m.providers.Models() {
+	for _, mod := range curated {
 		hay := strings.ToLower(mod.Provider + " " + mod.ProviderName + " " + mod.Name + " " + mod.DisplayName)
 		if strings.Contains(hay, q) {
 			out = append(out, mod)

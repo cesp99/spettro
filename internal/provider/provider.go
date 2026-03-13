@@ -75,14 +75,37 @@ type Adapter interface {
 	Send(context.Context, string, Request) (Response, error)
 }
 
-// fallbackModels are used when models.dev has not been loaded yet.
+// fallbackModels is the curated list shown in the selector.
+// These are always present regardless of whether models.dev has loaded.
+// The catalog enriches them with live metadata (context size, etc.) when available.
 var fallbackModels = []Model{
+	// Anthropic
 	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-opus-4", DisplayName: "Claude Opus 4", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
 	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
-	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-3-7-sonnet", DisplayName: "Claude 3.7 Sonnet", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
+	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-3-5-haiku-20241022", DisplayName: "Claude 3.5 Haiku", Vision: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
+	// OpenAI
 	{Provider: "openai", ProviderName: "OpenAI", Name: "gpt-4.1", DisplayName: "GPT-4.1", Vision: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
 	{Provider: "openai", ProviderName: "OpenAI", Name: "gpt-4o", DisplayName: "GPT-4o", Vision: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
 	{Provider: "openai", ProviderName: "OpenAI", Name: "o3", DisplayName: "o3", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
+	{Provider: "openai", ProviderName: "OpenAI", Name: "o4-mini", DisplayName: "o4-mini", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
+	// Google
+	{Provider: "google", ProviderName: "Google", Name: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "GOOGLE_API_KEY"},
+	{Provider: "google", ProviderName: "Google", Name: "gemini-2.0-flash", DisplayName: "Gemini 2.0 Flash", Vision: true, ToolCall: true, EnvKey: "GOOGLE_API_KEY"},
+	// xAI
+	{Provider: "x-ai", ProviderName: "xAI", Name: "grok-3", DisplayName: "Grok 3", Vision: true, ToolCall: true, EnvKey: "XAI_API_KEY"},
+	{Provider: "x-ai", ProviderName: "xAI", Name: "grok-3-mini", DisplayName: "Grok 3 Mini", Reasoning: true, ToolCall: true, EnvKey: "XAI_API_KEY"},
+	// Groq
+	{Provider: "groq", ProviderName: "Groq", Name: "llama-3.3-70b-versatile", DisplayName: "Llama 3.3 70B", ToolCall: true, EnvKey: "GROQ_API_KEY"},
+	{Provider: "groq", ProviderName: "Groq", Name: "qwen-qwq-32b", DisplayName: "QwQ 32B", Reasoning: true, ToolCall: true, EnvKey: "GROQ_API_KEY"},
+	// Cerebras
+	{Provider: "cerebras", ProviderName: "Cerebras", Name: "llama-3.3-70b", DisplayName: "Llama 3.3 70B", ToolCall: true, EnvKey: "CEREBRAS_API_KEY"},
+	{Provider: "cerebras", ProviderName: "Cerebras", Name: "llama-4-scout-17b-16e-instruct", DisplayName: "Llama 4 Scout", ToolCall: true, EnvKey: "CEREBRAS_API_KEY"},
+	// Qwen
+	{Provider: "qwen", ProviderName: "Qwen", Name: "qwen-max", DisplayName: "Qwen Max", Vision: true, ToolCall: true, EnvKey: "QWEN_API_KEY"},
+	{Provider: "qwen", ProviderName: "Qwen", Name: "qwen3-coder-plus", DisplayName: "Qwen3 Coder Plus", ToolCall: true, EnvKey: "QWEN_API_KEY"},
+	// Z.AI
+	{Provider: "zai", ProviderName: "Z.AI", Name: "glm-4-flash", DisplayName: "GLM-4 Flash", Vision: true, ToolCall: true, EnvKey: "ZAI_API_KEY"},
+	{Provider: "zai", ProviderName: "Z.AI", Name: "glm-4.5", DisplayName: "GLM-4.5", Vision: true, ToolCall: true, EnvKey: "ZAI_API_KEY"},
 }
 
 type Manager struct {
@@ -132,60 +155,26 @@ func (m *Manager) ProviderEnvKey(providerID string) string {
 	return ""
 }
 
-// CuratedModels returns a short, hand-picked list of popular models.
-// This is shown by default in the selector (no search query) so the user
-// isn't overwhelmed by hundreds of models.dev entries.
-// Typing in the selector searches the full catalog.
+// CuratedModels returns the fixed ~20-model curated list, optionally enriched
+// with live metadata (context size, status, etc.) from the models.dev catalog.
+// This is the only pool used in the selector — both the default view and search.
 func (m *Manager) CuratedModels() []Model {
-	wanted := map[string][]string{
-		"anthropic": {
-			"claude-opus-4",
-			"claude-sonnet-4-5",
-			"claude-3-7-sonnet-20250219",
-			"claude-3-7-sonnet",
-			"claude-3-5-haiku-20241022",
-		},
-		"openai": {
-			"o3",
-			"o4-mini",
-			"gpt-4.1",
-			"gpt-4o",
-		},
-		"google": {
-			"gemini-2.5-pro",
-			"gemini-2.0-flash",
-		},
-		"groq": {
-			"llama-3.3-70b-versatile",
-		},
-		"xai": {
-			"grok-3",
-			"grok-3-mini",
-		},
-	}
-
-	all := m.Models()
-	// Index all models for fast lookup
-	byKey := make(map[string]Model, len(all))
-	for _, mod := range all {
+	// Build a lookup from the live catalog for enrichment.
+	byKey := make(map[string]Model)
+	for _, mod := range m.Models() {
 		byKey[mod.Provider+":"+mod.Name] = mod
 	}
 
-	// Collect matching curated entries in defined order
-	providerOrder := []string{"anthropic", "openai", "google", "groq", "xai"}
-	var out []Model
-	for _, pid := range providerOrder {
-		ids := wanted[pid]
-		for _, id := range ids {
-			if mod, ok := byKey[pid+":"+id]; ok {
-				out = append(out, mod)
-			}
+	out := make([]Model, len(fallbackModels))
+	for i, base := range fallbackModels {
+		if live, ok := byKey[base.Provider+":"+base.Name]; ok {
+			// Prefer live metadata but keep our hardcoded display names.
+			live.DisplayName = base.DisplayName
+			live.EnvKey = base.EnvKey
+			out[i] = live
+		} else {
+			out[i] = base
 		}
-	}
-
-	// If catalog hasn't loaded yet, fallback models are already curated
-	if len(out) == 0 {
-		return append([]Model(nil), fallbackModels...)
 	}
 	return out
 }
