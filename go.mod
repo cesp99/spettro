@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/openai/openai-go/v3 v3.4.0
+	github.com/pelletier/go-toml/v2 v2.2.4
 	golang.org/x/crypto v0.32.0
 )
 

@@ -1,0 +1,130 @@
+version = 1
+default_agent = "planning"
+
+[metadata]
+name = "Spettro workspace agents"
+description = "Project-level callable agents and tools for Spettro CLI."
+
+[runtime]
+default_permission = "ask-first"
+default_timeout_sec = 120
+allow_network_tools = false
+log_tool_calls = true
+
+[[tools]]
+id = "repo-search"
+name = "Repository Search"
+description = "Search file names and file contents in the current repository."
+kind = "builtin"
+enabled = true
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ["read", "search"]
+
+[[tools]]
+id = "file-write"
+name = "File Writer"
+description = "Create, update, or append files in the workspace."
+kind = "builtin"
+enabled = true
+timeout_sec = 60
+requires_approval = true
+permitted_actions = ["write"]
+
+[[tools]]
+id = "shell-exec"
+name = "Shell Executor"
+description = "Run shell commands in the repository root."
+kind = "builtin"
+enabled = true
+timeout_sec = 120
+requires_approval = true
+permitted_actions = ["execute", "git"]
+
+[[tools]]
+id = "provider-chat"
+name = "Provider Chat"
+description = "Send prompts/images to the active model provider."
+kind = "builtin"
+enabled = true
+timeout_sec = 120
+requires_approval = false
+permitted_actions = ["chat"]
+
+[[tools]]
+id = "github-mcp"
+name = "GitHub MCP"
+description = "Optional MCP bridge for PR/issue/workflow operations."
+kind = "mcp"
+enabled = false
+entry_point = "mcp://github"
+timeout_sec = 45
+requires_approval = true
+permitted_actions = ["network", "git", "read"]
+
+[[agents]]
+id = "planning"
+name = "Planning Agent"
+description = "Produces implementation plans and risk notes before coding."
+skill = "architecture"
+mode = "planning"
+model_provider = ""
+model = ""
+prompt_file = ""
+system_prompt = """
+You are Spettro's planning agent.
+Return a concrete markdown plan with objective, analysis, steps, and notes.
+Do not edit files directly.
+"""
+allowed_tools = ["repo-search"]
+permitted_actions = ["read", "search", "plan"]
+permission = "ask-first"
+temperature = 0.2
+max_tokens = 4096
+max_steps = 20
+handoffs = ["coding", "chat"]
+enabled = true
+
+[[agents]]
+id = "coding"
+name = "Coding Agent"
+description = "Executes approved plans and produces code changes."
+skill = "implementation"
+mode = "coding"
+model_provider = ""
+model = ""
+prompt_file = ""
+system_prompt = """
+You are Spettro's coding agent.
+Implement approved tasks with safe, minimal, tested changes.
+"""
+allowed_tools = ["repo-search", "file-write", "shell-exec"]
+permitted_actions = ["read", "write", "execute", "git"]
+permission = "restricted"
+temperature = 0.1
+max_tokens = 8192
+max_steps = 40
+handoffs = ["planning", "chat"]
+enabled = true
+
+[[agents]]
+id = "chat"
+name = "Chat Agent"
+description = "General assistant mode for explanation and Q&A."
+skill = "conversation"
+mode = "chat"
+model_provider = ""
+model = ""
+prompt_file = ""
+system_prompt = """
+You are Spettro's chat agent.
+Answer clearly and concisely, using project context when useful.
+"""
+allowed_tools = ["provider-chat", "repo-search"]
+permitted_actions = ["chat", "read", "search"]
+permission = "ask-first"
+temperature = 0.4
+max_tokens = 8192
+max_steps = 12
+handoffs = ["planning", "coding"]
+enabled = true

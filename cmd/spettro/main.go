@@ -35,6 +35,11 @@ func main() {
 	cfg.APIKeys = keys
 
 	pm := provider.NewManager()
+	pm.SetAPIKeys(keys)
+
+	if _, err := config.LoadAgentManifestForProject(cwd); err != nil {
+		fatal("agent manifest error: %v", err)
+	}
 
 	// Load cached catalog immediately (fast disk read) so the model selector
 	// is populated before the TUI starts.  Then refresh from the network in
