@@ -67,6 +67,7 @@ type Request struct {
 	Prompt      string
 	Images      []string
 	RequireFast bool
+	MaxTokens   int // token budget for this request; 0 = budget.DefaultMax
 }
 
 type Response struct {
@@ -305,7 +306,7 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 
 	allParts := []string{req.Prompt}
 	allParts = append(allParts, req.Images...)
-	if err := budget.Validate(allParts...); err != nil {
+	if err := budget.Validate(req.MaxTokens, allParts...); err != nil {
 		return Response{}, err
 	}
 
@@ -313,9 +314,14 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	if providerName == "anthropic" {
 		adapter = AnthropicAdapter{APIKey: apiKey}
 	} else {
-		// For local servers the provider ID is the URL itself; ensure /v1 is included.
-		if baseURL == "" && (strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://")) {
-			baseURL = strings.TrimRight(providerName, "/") + "/v1"
+		if baseURL == "" {
+			if strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://") {
+				// Local server: provider ID is the URL itself.
+				baseURL = strings.TrimRight(providerName, "/") + "/v1"
+			} else if known, ok := knownBaseURLs[providerName]; ok {
+				// Well-known provider whose URL wasn't in the catalog yet (e.g. first run).
+				baseURL = known
+			}
 		}
 		if apiKey == "" {
 			apiKey = "local" // placeholder — local servers don't require auth
@@ -358,20 +364,14 @@ func buildModels(cat models.Catalog) []Model {
 	for _, pid := range providerIDs {
 		prov := cat[pid]
 
-		// Sort models within provider: non-deprecated first, then alpha.
+		// Collect and sort non-deprecated models alphabetically.
 		modelIDs := make([]string, 0, len(prov.Models))
-		for id := range prov.Models {
-			modelIDs = append(modelIDs, id)
-		}
-		sort.Slice(modelIDs, func(i, j int) bool {
-			mi, mj := prov.Models[modelIDs[i]], prov.Models[modelIDs[j]]
-			di := mi.Status == "deprecated"
-			dj := mj.Status == "deprecated"
-			if di != dj {
-				return !di // non-deprecated first
+		for id, mod := range prov.Models {
+			if mod.Status != "deprecated" {
+				modelIDs = append(modelIDs, id)
 			}
-			return modelIDs[i] < modelIDs[j]
-		})
+		}
+		sort.Strings(modelIDs)
 
 		envKey := ""
 		if len(prov.Env) > 0 {
@@ -399,6 +399,23 @@ func buildModels(cat models.Catalog) []Model {
 		}
 	}
 	return out
+}
+
+// knownBaseURLs maps provider IDs to their OpenAI-compatible API base URL.
+// Used as a fallback when the models.dev catalog hasn't been loaded yet or
+// didn't include the API field for that provider.
+var knownBaseURLs = map[string]string{
+	"groq":        "https://api.groq.com/openai/v1",
+	"mistral":     "https://api.mistral.ai/v1",
+	"x-ai":        "https://api.x.ai/v1",
+	"together":    "https://api.together.xyz/v1",
+	"fireworks":   "https://api.fireworks.ai/inference/v1",
+	"openrouter":  "https://openrouter.ai/api/v1",
+	"google":      "https://generativelanguage.googleapis.com/v1beta/openai",
+	"cohere":      "https://api.cohere.com/compatibility/v1",
+	"deepseek":    "https://api.deepseek.com/v1",
+	"perplexity":  "https://api.perplexity.ai",
+	"zai":         "https://api.zai.ai/v1",
 }
 
 // ── adapters ─────────────────────────────────────────────────────────────────

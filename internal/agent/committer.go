@@ -53,7 +53,7 @@ func (c LLMCommitter) Commit(ctx context.Context, cwd string) (string, error) {
 	}
 
 	prompt := commitSystemPrompt + "\n\n" + diffOut
-	if err := budget.Validate(prompt); err != nil {
+	if err := budget.Validate(0, prompt); err != nil {
 		return "", fmt.Errorf("diff too large: %w", err)
 	}
 

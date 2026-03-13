@@ -22,6 +22,16 @@ requires_approval = false
 permitted_actions = ["read", "search"]
 
 [[tools]]
+id = "file-read"
+name = "File Reader"
+description = "Read file contents (optionally by line range) in the workspace."
+kind = "builtin"
+enabled = true
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ["read"]
+
+[[tools]]
 id = "file-write"
 name = "File Writer"
 description = "Create, update, or append files in the workspace."
@@ -72,7 +82,7 @@ model_provider = ""
 model = ""
 prompt_file = "agents/planning.md"
 system_prompt = ""
-allowed_tools = ["repo-search"]
+allowed_tools = ["repo-search", "file-read"]
 permitted_actions = ["read", "search", "plan"]
 permission = "ask-first"
 temperature = 0.2
@@ -91,7 +101,7 @@ model_provider = ""
 model = ""
 prompt_file = "agents/coding.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "file-write", "shell-exec"]
+allowed_tools = ["repo-search", "file-read", "file-write", "shell-exec"]
 permitted_actions = ["read", "write", "execute", "git"]
 permission = "restricted"
 temperature = 0.1

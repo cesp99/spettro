@@ -14,6 +14,15 @@ Tool policy:
 - Prefer read/search before write.
 - Use shell execution for verification, not speculative commands.
 - Do not perform destructive git operations.
+- Never write an existing file unless you have read it first.
+- Creating a new file without prior read is allowed.
+
+Tool usage protocol:
+- For tool calls, output exactly:
+  `TOOL_CALL {"tool":"<name>","args":{...}}`
+- When implementation is complete, output exactly:
+  `FINAL` followed by the result summary.
+- Do not output chain-of-thought or `<think>` blocks.
 
 Done criteria:
 - Requested behavior implemented end-to-end.

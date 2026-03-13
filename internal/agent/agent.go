@@ -11,11 +11,11 @@ import (
 )
 
 type PlanningAgent interface {
-	Plan(context.Context, string) (string, error)
+	Plan(context.Context, string) (RunResult, error)
 }
 
 type CodingAgent interface {
-	Execute(context.Context, string, config.PermissionLevel, bool) (string, error)
+	Execute(context.Context, string, config.PermissionLevel, bool) (RunResult, error)
 }
 
 type ChatAgent interface {
@@ -25,34 +25,49 @@ type ChatAgent interface {
 // CommitAgent is defined in committer.go.
 // SearchAgent is defined in searcher.go.
 
+type ToolTrace struct {
+	Name   string
+	Status string
+	Args   string
+	Output string
+}
+
+type RunResult struct {
+	Content string
+	Tools   []ToolTrace
+}
+
 type Planner struct{}
 
-func (Planner) Plan(_ context.Context, userPrompt string) (string, error) {
+func (Planner) Plan(_ context.Context, userPrompt string) (RunResult, error) {
 	p := strings.TrimSpace(userPrompt)
 	if p == "" {
-		return "", fmt.Errorf("empty planning prompt")
+		return RunResult{}, fmt.Errorf("empty planning prompt")
 	}
 
-	return fmt.Sprintf(
-		"# Generated Plan\n\n- Timestamp: %s\n- Objective: %s\n\n## Steps\n1. Analyze current files\n2. Propose edits\n3. Request approval\n4. Execute in coding mode\n",
-		time.Now().UTC().Format(time.RFC3339),
-		p,
-	), nil
+	return RunResult{
+		Content: fmt.Sprintf(
+			"# Generated Plan\n\n- Timestamp: %s\n- Objective: %s\n\n## Steps\n1. Analyze current files\n2. Propose edits\n3. Request approval\n4. Execute in coding mode\n",
+			time.Now().UTC().Format(time.RFC3339),
+			p,
+		),
+	}, nil
 }
 
 type Coder struct{}
 
-func (Coder) Execute(_ context.Context, plan string, level config.PermissionLevel, approved bool) (string, error) {
+func (Coder) Execute(_ context.Context, plan string, level config.PermissionLevel, approved bool) (RunResult, error) {
 	if strings.TrimSpace(plan) == "" {
-		return "", fmt.Errorf("empty approved plan")
+		return RunResult{}, fmt.Errorf("empty approved plan")
 	}
 
 	if level == config.PermissionAskFirst && !approved {
-		return "", fmt.Errorf("ask-first policy requires explicit approval")
+		return RunResult{}, fmt.Errorf("ask-first policy requires explicit approval")
 	}
 
-	result := fmt.Sprintf("Executed plan with permission=%s.\nSummary: %s\n", level, compact(plan))
-	return result, nil
+	return RunResult{
+		Content: fmt.Sprintf("Executed plan with permission=%s.\nSummary: %s\n", level, compact(plan)),
+	}, nil
 }
 
 type Chatter struct {

@@ -15,12 +15,12 @@ import (
 const AgentManifestFilename = "spettro.agents.toml"
 
 type AgentManifest struct {
-	Version      int             `toml:"version"`
-	DefaultAgent string          `toml:"default_agent"`
-	Metadata     AgentMetadata   `toml:"metadata"`
-	Runtime      RuntimePolicy   `toml:"runtime"`
-	Tools        []ToolSpec      `toml:"tools"`
-	Agents       []AgentSpec     `toml:"agents"`
+	Version      int           `toml:"version"`
+	DefaultAgent string        `toml:"default_agent"`
+	Metadata     AgentMetadata `toml:"metadata"`
+	Runtime      RuntimePolicy `toml:"runtime"`
+	Tools        []ToolSpec    `toml:"tools"`
+	Agents       []AgentSpec   `toml:"agents"`
 }
 
 type AgentMetadata struct {
@@ -93,6 +93,16 @@ func DefaultAgentManifest() AgentManifest {
 				PermittedActions: []string{"read", "search"},
 			},
 			{
+				ID:               "file-read",
+				Name:             "File Reader",
+				Description:      "Reads file contents (optionally partial) in the workspace.",
+				Kind:             "builtin",
+				Enabled:          true,
+				TimeoutSec:       30,
+				RequiresApproval: false,
+				PermittedActions: []string{"read"},
+			},
+			{
 				ID:               "file-write",
 				Name:             "File Writer",
 				Description:      "Creates and edits files in the repository workspace.",
@@ -130,7 +140,7 @@ func DefaultAgentManifest() AgentManifest {
 				Description:      "Plans changes and produces approved implementation steps.",
 				Skill:            "architecture",
 				Mode:             "planning",
-				AllowedTools:     []string{"repo-search"},
+				AllowedTools:     []string{"repo-search", "file-read"},
 				PermittedActions: []string{"read", "search", "plan"},
 				Permission:       PermissionAskFirst,
 				MaxSteps:         20,
@@ -143,7 +153,7 @@ func DefaultAgentManifest() AgentManifest {
 				Description:      "Executes approved plans with permission-aware actions.",
 				Skill:            "implementation",
 				Mode:             "coding",
-				AllowedTools:     []string{"repo-search", "file-write", "shell-exec"},
+				AllowedTools:     []string{"repo-search", "file-read", "file-write", "shell-exec"},
 				PermittedActions: []string{"read", "write", "execute", "git"},
 				Permission:       PermissionRestricted,
 				MaxSteps:         40,
