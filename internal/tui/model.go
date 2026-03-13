@@ -46,6 +46,41 @@ type ChatMessage struct {
 	At      time.Time
 }
 
+// ── command palette ───────────────────────────────────────────────────────────
+
+type commandDef struct {
+	name string
+	desc string
+}
+
+var allCommands = []commandDef{
+	{"/help", "show help"},
+	{"/models", "switch model"},
+	{"/setup", "setup wizard"},
+	{"/mode", "cycle mode"},
+	{"/approve", "execute pending plan"},
+	{"/permission", "set permission level"},
+	{"/image", "attach image to next message"},
+	{"/images", "list queued images"},
+	{"/index", "index project files"},
+	{"/coauthor", "show co-author git info"},
+	{"/exit", "exit spettro"},
+}
+
+func filterCommands(query string) []commandDef {
+	if query == "" {
+		return append([]commandDef(nil), allCommands...)
+	}
+	q := strings.ToLower(query)
+	var out []commandDef
+	for _, c := range allCommands {
+		if strings.Contains(c.name, q) || strings.Contains(c.desc, q) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // ── tea messages ─────────────────────────────────────────────────────────────
 
 type tickMsg time.Time
@@ -103,6 +138,10 @@ type Model struct {
 	selItems     []provider.Model
 	selFilter    string
 	selCursor    int
+
+	// command palette (shown when textarea starts with "/")
+	cmdItems  []commandDef
+	cmdCursor int
 
 	// setup wizard
 	showSetup bool
@@ -240,6 +279,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ctrlCAt = time.Time{}
 		}
 
+	case tea.MouseMsg:
+		// Wheel scroll for viewport and selector
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if m.showSelector {
+				if m.selCursor > 0 {
+					m.selCursor--
+				}
+			} else {
+				m.vp.LineUp(3)
+			}
+		case tea.MouseButtonWheelDown:
+			if m.showSelector {
+				if m.selCursor < len(m.selItems)-1 {
+					m.selCursor++
+				}
+			} else {
+				m.vp.LineDown(3)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
 	case tea.KeyMsg:
 		// Dialogs get priority
 		if m.showSelector {
@@ -256,6 +317,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)
+		m.syncCommandPalette()
 
 		var vpCmd tea.Cmd
 		m.vp, vpCmd = m.vp.Update(msg)
@@ -282,13 +344,24 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+q":
 		return m, tea.Quit
 
+	case "up", "ctrl+p":
+		if len(m.cmdItems) > 0 {
+			if m.cmdCursor > 0 {
+				m.cmdCursor--
+			}
+			return m, nil
+		}
+
+	case "down", "ctrl+n":
+		if len(m.cmdItems) > 0 {
+			if m.cmdCursor < len(m.cmdItems)-1 {
+				m.cmdCursor++
+			}
+			return m, nil
+		}
+
 	case "shift+tab":
 		m.mode = nextMode(m.mode)
-		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
-		return m, nil
-
-	case "tab":
-		m.mode = prevMode(m.mode)
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 		return m, nil
 
@@ -334,18 +407,32 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.thinking {
 			return m, nil
 		}
+		// If command palette is open and has a selection, run that command
+		if len(m.cmdItems) > 0 {
+			chosen := m.cmdItems[m.cmdCursor].name
+			m.ta.Reset()
+			m.cmdItems = nil
+			m.cmdCursor = 0
+			return m.handleCommand(chosen)
+		}
 		input := strings.TrimSpace(m.ta.Value())
 		if input == "" {
 			return m, nil
 		}
 		m.ta.Reset()
-
+		m.cmdItems = nil
 		if strings.HasPrefix(input, "/") {
 			return m.handleCommand(input)
 		}
 		return m.handlePrompt(input)
 
 	case "esc":
+		if len(m.cmdItems) > 0 {
+			m.ta.Reset()
+			m.cmdItems = nil
+			m.cmdCursor = 0
+			return m, nil
+		}
 		m.ta.Reset()
 		m.banner = ""
 		return m, nil
@@ -674,15 +761,37 @@ func (m Model) openSelector(prefix string) Model {
 	return m
 }
 
+// filterModels returns the model list for the selector.
+// With no query: shows a curated set of well-known models (keeps the list short).
+// With a query: searches the full catalog so the user can find any model.
 func (m Model) filterModels(prefix string) []provider.Model {
-	out := make([]provider.Model, 0)
+	if prefix == "" {
+		return m.providers.CuratedModels()
+	}
+	q := strings.ToLower(prefix)
+	var out []provider.Model
 	for _, mod := range m.providers.Models() {
-		full := strings.ToLower(mod.Provider + ":" + mod.Name)
-		if prefix == "" || strings.Contains(full, prefix) {
+		hay := strings.ToLower(mod.Provider + " " + mod.ProviderName + " " + mod.Name + " " + mod.DisplayName)
+		if strings.Contains(hay, q) {
 			out = append(out, mod)
 		}
 	}
 	return out
+}
+
+// syncCommandPalette refreshes the command palette whenever the textarea changes.
+func (m *Model) syncCommandPalette() {
+	val := m.ta.Value()
+	if strings.HasPrefix(val, "/") {
+		query := val[1:] // text after the /
+		m.cmdItems = filterCommands(query)
+		if m.cmdCursor >= len(m.cmdItems) {
+			m.cmdCursor = 0
+		}
+	} else {
+		m.cmdItems = nil
+		m.cmdCursor = 0
+	}
 }
 
 func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
