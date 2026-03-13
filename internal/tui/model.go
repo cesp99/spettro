@@ -56,6 +56,7 @@ type commandDef struct {
 var allCommands = []commandDef{
 	{"/help", "show help"},
 	{"/models", "switch model"},
+	{"/connect", "connect a provider"},
 	{"/setup", "setup wizard"},
 	{"/mode", "cycle mode"},
 	{"/approve", "execute pending plan"},
@@ -116,9 +117,9 @@ type Model struct {
 	ready  bool
 
 	// sub-models
-	vp      viewport.Model
-	ta      textarea.Model
-	spin    spinner.Model
+	vp   viewport.Model
+	ta   textarea.Model
+	spin spinner.Model
 
 	// mode and config
 	mode string
@@ -139,6 +140,14 @@ type Model struct {
 	selFilter    string
 	selCursor    int
 
+	// connect provider dialog
+	showConnect     bool
+	connectItems    []provider.ProviderInfo
+	connectFilter   string
+	connectCursor   int
+	connectStep     int    // 0 = pick provider, 1 = enter key
+	connectProvider string // provider ID chosen in step 0
+
 	// command palette (shown when textarea starts with "/")
 	cmdItems  []commandDef
 	cmdCursor int
@@ -146,6 +155,9 @@ type Model struct {
 	// setup wizard
 	showSetup bool
 	setup     setupState
+
+	// favorites: set of "provider:model" strings
+	favorites map[string]bool
 
 	// pending state
 	pendingPlan string
@@ -180,6 +192,11 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorMuted)
 
+	favs := map[string]bool{}
+	for _, f := range cfg.Favorites {
+		favs[f] = true
+	}
+
 	return Model{
 		mode:      "planning",
 		cfg:       cfg,
@@ -188,6 +205,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		providers: pm,
 		ta:        ta,
 		spin:      sp,
+		favorites: favs,
 		planner:   agent.Planner{},
 		coder:     agent.Coder{},
 		chatter: agent.Chatter{
@@ -280,22 +298,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		// Wheel scroll for viewport and selector
+		// Wheel scroll for viewport, selector, and connect dialog
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
-			if m.showSelector {
+			switch {
+			case m.showSelector:
 				if m.selCursor > 0 {
 					m.selCursor--
 				}
-			} else {
+			case m.showConnect:
+				if m.connectCursor > 0 {
+					m.connectCursor--
+				}
+			default:
 				m.vp.LineUp(3)
 			}
 		case tea.MouseButtonWheelDown:
-			if m.showSelector {
+			switch {
+			case m.showSelector:
 				if m.selCursor < len(m.selItems)-1 {
 					m.selCursor++
 				}
-			} else {
+			case m.showConnect:
+				if m.connectCursor < len(m.connectItems)-1 {
+					m.connectCursor++
+				}
+			default:
 				m.vp.LineDown(3)
 			}
 		}
@@ -303,6 +331,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		// Dialogs get priority
+		if m.showConnect {
+			return m.updateConnect(msg)
+		}
 		if m.showSelector {
 			return m.updateSelector(msg)
 		}
@@ -313,7 +344,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Pass remaining input to textarea and viewport when no dialog
-	if !m.showSelector && !m.showSetup {
+	if !m.showSelector && !m.showSetup && !m.showConnect {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)
@@ -366,8 +397,11 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "f2":
-		// Cycle to next model (opencode model_cycle_recent pattern)
-		models := m.providers.Models()
+		// Cycle to next model among connected providers
+		models := m.providers.ConnectedModels(m.cfg.APIKeys)
+		if len(models) == 0 {
+			models = m.providers.Models()
+		}
 		if len(models) > 0 {
 			current := -1
 			for i, mod := range models {
@@ -385,8 +419,11 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "shift+f2":
-		// Cycle to previous model
-		models := m.providers.Models()
+		// Cycle to previous model among connected providers
+		models := m.providers.ConnectedModels(m.cfg.APIKeys)
+		if len(models) == 0 {
+			models = m.providers.Models()
+		}
 		if len(models) > 0 {
 			current := -1
 			for i, mod := range models {
@@ -465,6 +502,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			plines = append(plines, fmt.Sprintf("  %d) %s", i+1, id))
 		}
 		m.pushSystemMsg("setup wizard — choose provider:\n" + strings.Join(plines, "\n"))
+	case "/connect":
+		m = m.openConnect()
 	case "/models":
 		if len(fields) >= 2 {
 			if strings.Contains(fields[1], ":") {
@@ -751,6 +790,100 @@ func (m Model) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ── Connect provider dialog ───────────────────────────────────────────────────
+
+func (m Model) openConnect() Model {
+	m.showConnect = true
+	m.connectFilter = ""
+	m.connectCursor = 0
+	m.connectStep = 0
+	m.connectProvider = ""
+	m.connectItems = m.filterProviders("")
+	return m
+}
+
+func (m Model) filterProviders(filter string) []provider.ProviderInfo {
+	all := m.providers.AllProviderInfos()
+	if filter == "" {
+		return all
+	}
+	q := strings.ToLower(filter)
+	var out []provider.ProviderInfo
+	for _, pi := range all {
+		if strings.Contains(strings.ToLower(pi.ID), q) || strings.Contains(strings.ToLower(pi.Name), q) {
+			out = append(out, pi)
+		}
+	}
+	return out
+}
+
+func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.connectStep {
+	case 0: // pick provider from list
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			m.showConnect = false
+			return m, nil
+		case "up", "ctrl+p", "shift+tab":
+			if m.connectCursor > 0 {
+				m.connectCursor--
+			}
+		case "down", "ctrl+n", "tab":
+			if m.connectCursor < len(m.connectItems)-1 {
+				m.connectCursor++
+			}
+		case "enter":
+			if len(m.connectItems) > 0 {
+				m.connectProvider = m.connectItems[m.connectCursor].ID
+				m.connectStep = 1
+				m.ta.Reset()
+				m.ta.Focus()
+			}
+		case "backspace":
+			if len(m.connectFilter) > 0 {
+				m.connectFilter = m.connectFilter[:len(m.connectFilter)-1]
+				m.connectItems = m.filterProviders(m.connectFilter)
+				m.connectCursor = 0
+			}
+		default:
+			if len(msg.String()) == 1 {
+				m.connectFilter += msg.String()
+				m.connectItems = m.filterProviders(m.connectFilter)
+				m.connectCursor = 0
+			}
+		}
+
+	case 1: // enter API key
+		switch msg.String() {
+		case "esc":
+			m.connectStep = 0
+			m.ta.Reset()
+		case "enter":
+			key := strings.TrimSpace(m.ta.Value())
+			if key == "" {
+				m.showBanner("key cannot be empty", "error")
+				return m, nil
+			}
+			_ = config.SaveAPIKey(m.connectProvider, key)
+			if m.cfg.APIKeys == nil {
+				m.cfg.APIKeys = map[string]string{}
+			}
+			m.cfg.APIKeys[m.connectProvider] = key
+			m.showConnect = false
+			m.ta.Reset()
+			m.ta.Focus()
+			m.showBanner(fmt.Sprintf("connected %s ✓", m.connectProvider), "success")
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.ta, cmd = m.ta.Update(msg)
+			return m, cmd
+		}
+	}
+
+	return m, nil
+}
+
 // ── Model selector ────────────────────────────────────────────────────────────
 
 func (m Model) openSelector(prefix string) Model {
@@ -761,22 +894,49 @@ func (m Model) openSelector(prefix string) Model {
 	return m
 }
 
-// filterModels returns the model list for the selector.
-// Always searches within the curated ~20-model pool so the list stays short.
+// filterModels returns connected models with favorites sorted to the top.
 func (m Model) filterModels(prefix string) []provider.Model {
-	curated := m.providers.CuratedModels()
+	all := m.providers.ConnectedModels(m.cfg.APIKeys)
+	// Fall back to full list when nothing is connected yet
+	if len(all) == 0 {
+		all = nil // keep nil so selector shows the "no providers" message
+	}
+
+	// Favorites first
+	var favs, rest []provider.Model
+	for _, mod := range all {
+		if m.favorites[mod.Provider+":"+mod.Name] {
+			favs = append(favs, mod)
+		} else {
+			rest = append(rest, mod)
+		}
+	}
+	combined := append(favs, rest...)
+
 	if prefix == "" {
-		return curated
+		return combined
 	}
 	q := strings.ToLower(prefix)
 	var out []provider.Model
-	for _, mod := range curated {
+	for _, mod := range combined {
 		hay := strings.ToLower(mod.Provider + " " + mod.ProviderName + " " + mod.Name + " " + mod.DisplayName)
 		if strings.Contains(hay, q) {
 			out = append(out, mod)
 		}
 	}
 	return out
+}
+
+// saveFavorites persists the favorites set back to config.
+func (m *Model) saveFavorites() {
+	favList := make([]string, 0, len(m.favorites))
+	for k, v := range m.favorites {
+		if v {
+			favList = append(favList, k)
+		}
+	}
+	m.cfg.Favorites = favList
+	_ = config.Save(m.cfg)
 }
 
 // syncCommandPalette refreshes the command palette whenever the textarea changes.
@@ -820,6 +980,32 @@ func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showBanner(fmt.Sprintf("model → %s:%s", sel.Provider, sel.Name), "success")
 		}
 
+	case "f":
+		// Toggle favorite for the highlighted model
+		if len(m.selItems) > 0 {
+			sel := m.selItems[m.selCursor]
+			key := sel.Provider + ":" + sel.Name
+			if m.favorites == nil {
+				m.favorites = map[string]bool{}
+			}
+			m.favorites[key] = !m.favorites[key]
+			m.saveFavorites()
+			m.selItems = m.filterModels(m.selFilter)
+			// keep cursor in bounds
+			if m.selCursor >= len(m.selItems) {
+				m.selCursor = len(m.selItems) - 1
+			}
+			if m.selCursor < 0 {
+				m.selCursor = 0
+			}
+		}
+
+	case "c":
+		// Switch to connect provider dialog
+		m.showSelector = false
+		m = m.openConnect()
+		return m, nil
+
 	case "backspace":
 		if len(m.selFilter) > 0 {
 			m.selFilter = m.selFilter[:len(m.selFilter)-1]
@@ -843,6 +1029,10 @@ func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	if !m.ready {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("\n  loading…")
+	}
+
+	if m.showConnect {
+		return m.viewConnect()
 	}
 
 	if m.showSelector {
@@ -1020,6 +1210,7 @@ func (m Model) viewStatusBar() string {
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("f2: cycle model"),
 		styleMuted.Render("/models: selector"),
+		styleMuted.Render("/connect: providers"),
 		styleMuted.Render("/help"),
 		styleMuted.Render("ctrl+c ×2: quit"),
 	}
@@ -1031,13 +1222,36 @@ func (m Model) viewStatusBar() string {
 		Render(bar)
 }
 
-// viewSelector renders the model selector dialog as a full-screen overlay.
-// Layout is inspired by opencode's dialog-model: provider sections, fuzzy
-// search, tag badges (img / think / ctx size).
+// viewSelector renders the model selector dialog.
+// Only shows models from connected providers (those with an API key set).
 func (m Model) viewSelector() string {
 	mc := modeColor(m.mode)
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ select model")
+
+	// No connected providers — prompt to connect
+	if len(m.providers.ConnectedModels(m.cfg.APIKeys)) == 0 {
+		msg := lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			"",
+			styleMuted.Render("no providers connected yet"),
+			"",
+			styleSuccess.Render("press c to connect a provider"),
+			styleMuted.Render("or use /connect from the main screen"),
+		)
+		dialog := lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(mc).
+			Width(50).
+			Padding(2, 4).
+			Render(msg)
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(colorDim),
+		)
+	}
 
 	// Search bar
 	cursor := lipgloss.NewStyle().Foreground(mc).Render("_")
@@ -1064,9 +1278,9 @@ func (m Model) viewSelector() string {
 				Render("  ─ "+provLabel))
 		}
 
-		// Selected vs normal row
 		isSelected := i == m.selCursor
 		isCurrent := mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel
+		isFav := m.favorites[mod.Provider+":"+mod.Name]
 
 		var prefix string
 		var nameStyle, tagStyle lipgloss.Style
@@ -1084,12 +1298,17 @@ func (m Model) viewSelector() string {
 		if displayName == "" {
 			displayName = mod.Name
 		}
+
+		var badges string
+		if isFav {
+			badges += lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("★ ")
+		}
 		if isCurrent {
-			displayName += lipgloss.NewStyle().Foreground(mc).Render(" ●")
+			badges += lipgloss.NewStyle().Foreground(mc).Render("● ")
 		}
 
 		tag := tagStyle.Render(mod.Tag())
-		row := prefix + nameStyle.Render(displayName)
+		row := prefix + badges + nameStyle.Render(displayName)
 		if tag != "" {
 			row += "  " + tag
 		}
@@ -1099,7 +1318,7 @@ func (m Model) viewSelector() string {
 		rows = append(rows, styleMuted.Render("  no matches"))
 	}
 
-	hint := styleMuted.Render("↑↓ navigate  enter select  esc close  f2 cycle")
+	hint := styleMuted.Render("↑↓ navigate  enter select  f favorite  c connect  esc close")
 
 	dialogWidth := 70
 	if m.width < dialogWidth+4 {
@@ -1109,12 +1328,10 @@ func (m Model) viewSelector() string {
 		dialogWidth = 30
 	}
 
-	// Cap visible rows to avoid overflowing the screen
 	maxRows := m.height - 12
 	if maxRows < 4 {
 		maxRows = 4
 	}
-	// Scroll window around cursor
 	start := 0
 	if len(rows) > maxRows {
 		start = m.selCursor - maxRows/2
@@ -1137,6 +1354,139 @@ func (m Model) viewSelector() string {
 			"",
 			filterLine,
 			"",
+			strings.Join(rows, "\n"),
+			"",
+			hint,
+		))
+
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		dialog,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(colorDim),
+	)
+}
+
+// viewConnect renders the connect-provider dialog.
+// Step 0: searchable list of ALL providers from the catalog.
+// Step 1: API key input for the chosen provider.
+func (m Model) viewConnect() string {
+	mc := modeColor(m.mode)
+
+	dialogWidth := 60
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
+
+	if m.connectStep == 1 {
+		// ── API key entry ─────────────────────────────────────────────────────
+		provName := m.connectProvider
+		envHint := ""
+		for _, pi := range m.providers.AllProviderInfos() {
+			if pi.ID == m.connectProvider {
+				if pi.Name != "" {
+					provName = pi.Name
+				}
+				if pi.Env != "" {
+					envHint = styleMuted.Render("env var: " + pi.Env)
+				}
+				break
+			}
+		}
+
+		title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ connect " + provName)
+
+		inner := lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			envHint,
+			styleMuted.Render("paste your API key and press enter:"),
+			"",
+			m.ta.View(),
+			"",
+			styleMuted.Render("esc: back  ctrl+c: cancel"),
+		)
+		dialog := lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(mc).
+			Width(dialogWidth).
+			Padding(1, 2).
+			Render(inner)
+
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(colorDim),
+		)
+	}
+
+	// ── Provider picker ───────────────────────────────────────────────────────
+	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ connect provider")
+	cursor := lipgloss.NewStyle().Foreground(mc).Render("_")
+	filterLine := styleMuted.Render("search  ") +
+		lipgloss.NewStyle().Foreground(colorText).Render(m.connectFilter) +
+		cursor
+
+	var rows []string
+	for i, pi := range m.connectItems {
+		isSelected := i == m.connectCursor
+		isConnected := m.cfg.APIKeys[pi.ID] != ""
+
+		name := pi.Name
+		if name == "" {
+			name = pi.ID
+		}
+
+		var prefix string
+		var nameStyle lipgloss.Style
+		if isSelected {
+			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
+			nameStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+		} else {
+			prefix = "  "
+			nameStyle = lipgloss.NewStyle().Foreground(colorMuted)
+		}
+
+		suffix := ""
+		if isConnected {
+			suffix = "  " + lipgloss.NewStyle().Foreground(colorSuccess).Render("✓ connected")
+		}
+
+		rows = append(rows, prefix+nameStyle.Render(name)+suffix)
+	}
+	if len(m.connectItems) == 0 {
+		rows = append(rows, styleMuted.Render("  no matches"))
+	}
+
+	hint := styleMuted.Render("↑↓ navigate  enter connect  esc close")
+
+	maxRows := m.height - 12
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	start := 0
+	if len(rows) > maxRows {
+		start = m.connectCursor - maxRows/2
+		if start < 0 {
+			start = 0
+		}
+		if start+maxRows > len(rows) {
+			start = len(rows) - maxRows
+		}
+		rows = rows[start : start+maxRows]
+	}
+
+	dialog := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(mc).
+		Width(dialogWidth).
+		Padding(1, 2).
+		Render(lipgloss.JoinVertical(lipgloss.Left,
+			title, "",
+			filterLine, "",
 			strings.Join(rows, "\n"),
 			"",
 			hint,
@@ -1260,8 +1610,9 @@ const helpText = `commands:
   /exit /quit    quit spettro  (or ctrl+c twice)
   /mode          cycle to next mode  (or shift+tab)
   /setup         run setup wizard
-  /models        open model selector dialog
+  /models        open model selector (connected providers only)
   /models p:m    set model directly
+  /connect       connect a provider (shows all available providers)
   /permission    set permission: yolo | restricted | ask-first
   /approve       approve and execute pending plan (coding mode)
   /image <path>  queue image for next chat message
@@ -1272,4 +1623,8 @@ const helpText = `commands:
 keys:
   shift+tab      cycle mode (planning → coding → chat)
   f2             cycle to next model
-  shift+f2       cycle to previous model`
+  shift+f2       cycle to previous model
+
+in model selector:
+  f              toggle favorite (★) for highlighted model
+  c              open connect provider dialog`

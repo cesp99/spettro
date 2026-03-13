@@ -58,6 +58,13 @@ func (m Model) Tag() string {
 	return strings.Join(parts, "  ")
 }
 
+// ProviderInfo holds lightweight display info for the connect-provider dialog.
+type ProviderInfo struct {
+	ID   string
+	Name string
+	Env  string // primary env var name
+}
+
 type Request struct {
 	Prompt      string
 	Images      []string
@@ -73,31 +80,6 @@ type Response struct {
 
 type Adapter interface {
 	Send(context.Context, string, Request) (Response, error)
-}
-
-// curatedProviderIDs is the whitelist of 20 providers shown in the model selector.
-// Models within each are fetched dynamically from models.dev.
-var curatedProviderIDs = []string{
-	"anthropic",
-	"openai",
-	"google",
-	"x-ai",
-	"groq",
-	"cerebras",
-	"qwen",
-	"zai",
-	"mistral",
-	"deepseek",
-	"cohere",
-	"together",
-	"perplexity",
-	"fireworks",
-	"cloudflare",
-	"amazon",
-	"openrouter",
-	"ollama",
-	"replicate",
-	"vertex",
 }
 
 // fallbackModels is shown only when models.dev hasn't loaded yet (first run, no cache).
@@ -148,6 +130,58 @@ func (m *Manager) Models() []Model {
 	return append([]Model(nil), fallbackModels...)
 }
 
+// ConnectedModels returns only models whose provider has an API key set.
+// Providers without a key are hidden from the model selector.
+func (m *Manager) ConnectedModels(apiKeys map[string]string) []Model {
+	if len(apiKeys) == 0 {
+		return nil
+	}
+	var out []Model
+	for _, mod := range m.Models() {
+		if key, ok := apiKeys[mod.Provider]; ok && key != "" {
+			out = append(out, mod)
+		}
+	}
+	return out
+}
+
+// AllProviderInfos returns lightweight info for every provider in the catalog,
+// sorted alphabetically (anthropic first). Used by the connect-provider dialog.
+func (m *Manager) AllProviderInfos() []ProviderInfo {
+	m.mu.RLock()
+	cat := m.catalog
+	m.mu.RUnlock()
+
+	src := cat
+	if len(src) == 0 {
+		src = fallbackModels
+	}
+
+	seen := map[string]bool{}
+	var out []ProviderInfo
+	for _, mod := range src {
+		if seen[mod.Provider] {
+			continue
+		}
+		seen[mod.Provider] = true
+		out = append(out, ProviderInfo{
+			ID:   mod.Provider,
+			Name: mod.ProviderName,
+			Env:  mod.EnvKey,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID == "anthropic" {
+			return true
+		}
+		if out[j].ID == "anthropic" {
+			return false
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
 // ProviderEnvKey returns the primary env var name for a provider.
 func (m *Manager) ProviderEnvKey(providerID string) string {
 	for _, mod := range m.Models() {
@@ -156,52 +190,6 @@ func (m *Manager) ProviderEnvKey(providerID string) string {
 		}
 	}
 	return ""
-}
-
-// CuratedModels returns all models that belong to the 20 curated providers,
-// sourced entirely from the live models.dev catalog (already built into []Model).
-// Falls back to a small hardcoded set only when the catalog hasn't loaded yet.
-func (m *Manager) CuratedModels() []Model {
-	m.mu.RLock()
-	cat := m.catalog
-	m.mu.RUnlock()
-
-	if len(cat) == 0 {
-		return append([]Model(nil), fallbackModels...)
-	}
-
-	// Build a set for O(1) lookup.
-	allowed := make(map[string]bool, len(curatedProviderIDs))
-	for _, pid := range curatedProviderIDs {
-		allowed[pid] = true
-	}
-
-	// Preserve the provider order defined in curatedProviderIDs.
-	// cat is already sorted by provider+model from buildModels; we just filter.
-	order := make(map[string]int, len(curatedProviderIDs))
-	for i, pid := range curatedProviderIDs {
-		order[pid] = i
-	}
-
-	var out []Model
-	for _, mod := range cat {
-		if allowed[mod.Provider] {
-			out = append(out, mod)
-		}
-	}
-
-	// Re-sort by the curated provider order (buildModels sorts alphabetically,
-	// but curatedProviderIDs puts anthropic first, etc.).
-	sort.SliceStable(out, func(i, j int) bool {
-		oi := order[out[i].Provider]
-		oj := order[out[j].Provider]
-		return oi < oj
-	})
-
-	if len(out) == 0 {
-		return append([]Model(nil), fallbackModels...)
-	}
-	return out
 }
 
 // ProviderNames returns the deduplicated list of provider IDs present in the

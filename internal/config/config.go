@@ -21,6 +21,7 @@ type UserConfig struct {
 	ActiveModel    string            `json:"active_model"`
 	Permission     PermissionLevel   `json:"permission"`
 	APIKeys        map[string]string `json:"api_keys,omitempty"`
+	Favorites      []string          `json:"favorites,omitempty"` // "provider:model"
 }
 
 func Default() UserConfig {
