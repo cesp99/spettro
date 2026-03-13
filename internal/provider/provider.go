@@ -132,6 +132,64 @@ func (m *Manager) ProviderEnvKey(providerID string) string {
 	return ""
 }
 
+// CuratedModels returns a short, hand-picked list of popular models.
+// This is shown by default in the selector (no search query) so the user
+// isn't overwhelmed by hundreds of models.dev entries.
+// Typing in the selector searches the full catalog.
+func (m *Manager) CuratedModels() []Model {
+	wanted := map[string][]string{
+		"anthropic": {
+			"claude-opus-4",
+			"claude-sonnet-4-5",
+			"claude-3-7-sonnet-20250219",
+			"claude-3-7-sonnet",
+			"claude-3-5-haiku-20241022",
+		},
+		"openai": {
+			"o3",
+			"o4-mini",
+			"gpt-4.1",
+			"gpt-4o",
+		},
+		"google": {
+			"gemini-2.5-pro",
+			"gemini-2.0-flash",
+		},
+		"groq": {
+			"llama-3.3-70b-versatile",
+		},
+		"xai": {
+			"grok-3",
+			"grok-3-mini",
+		},
+	}
+
+	all := m.Models()
+	// Index all models for fast lookup
+	byKey := make(map[string]Model, len(all))
+	for _, mod := range all {
+		byKey[mod.Provider+":"+mod.Name] = mod
+	}
+
+	// Collect matching curated entries in defined order
+	providerOrder := []string{"anthropic", "openai", "google", "groq", "xai"}
+	var out []Model
+	for _, pid := range providerOrder {
+		ids := wanted[pid]
+		for _, id := range ids {
+			if mod, ok := byKey[pid+":"+id]; ok {
+				out = append(out, mod)
+			}
+		}
+	}
+
+	// If catalog hasn't loaded yet, fallback models are already curated
+	if len(out) == 0 {
+		return append([]Model(nil), fallbackModels...)
+	}
+	return out
+}
+
 // ProviderNames returns the deduplicated list of provider IDs present in the
 // current model list, in alphabetical order (anthropic first).
 func (m *Manager) ProviderNames() []string {

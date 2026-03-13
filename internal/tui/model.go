@@ -894,8 +894,21 @@ func (m Model) viewHeader() string {
 	}
 	center := strings.Join(tabs, " ")
 
-	// Right: model + permission
-	modelStr := styleMuted.Render(m.cfg.ActiveProvider + ":" + m.cfg.ActiveModel)
+	// Right: model display name · provider name · permission
+	modelLabel := m.cfg.ActiveModel
+	provLabel := m.cfg.ActiveProvider
+	for _, mod := range m.providers.Models() {
+		if mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel {
+			if mod.DisplayName != "" {
+				modelLabel = mod.DisplayName
+			}
+			if mod.ProviderName != "" {
+				provLabel = mod.ProviderName
+			}
+			break
+		}
+	}
+	modelStr := styleMuted.Render(modelLabel + "  " + provLabel)
 	permStr := lipgloss.NewStyle().Foreground(mc).Render(string(m.cfg.Permission))
 	right := modelStr + "  " + permStr
 
@@ -932,6 +945,32 @@ func (m Model) viewSep() string {
 		Render(strings.Repeat("─", m.width))
 }
 
+// viewCommandPalette renders the command autocomplete overlay.
+func (m Model) viewCommandPalette() string {
+	if len(m.cmdItems) == 0 {
+		return ""
+	}
+	mc := modeColor(m.mode)
+	var rows []string
+	for i, cmd := range m.cmdItems {
+		var nameStyle, descStyle lipgloss.Style
+		if i == m.cmdCursor {
+			nameStyle = lipgloss.NewStyle().Foreground(mc).Bold(true)
+			descStyle = lipgloss.NewStyle().Foreground(colorText)
+		} else {
+			nameStyle = lipgloss.NewStyle().Foreground(colorText)
+			descStyle = lipgloss.NewStyle().Foreground(colorMuted)
+		}
+		rows = append(rows, nameStyle.Render(fmt.Sprintf("%-14s", cmd.name))+"  "+descStyle.Render(cmd.desc))
+	}
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(colorBorder).
+		Width(m.width - 4).
+		PaddingLeft(2).PaddingRight(2).
+		Render(strings.Join(rows, "\n"))
+}
+
 // viewInput renders the input area with prompt prefix.
 func (m Model) viewInput() string {
 	mc := modeColor(m.mode)
@@ -966,7 +1005,13 @@ func (m Model) viewInput() string {
 		PaddingLeft(1).PaddingRight(1)
 
 	inner := label + "\n" + m.ta.View() + thinkingLine + bannerLine
-	return boxStyle.Render(inner)
+	inputBox := boxStyle.Render(inner)
+
+	palette := m.viewCommandPalette()
+	if palette == "" {
+		return inputBox
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, palette, inputBox)
 }
 
 // viewStatusBar renders the bottom help bar.
