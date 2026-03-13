@@ -79,3 +79,21 @@ Spettro validates at startup:
 - Keep IDs stable; rename labels, not IDs, to avoid breaking references.
 - Use narrow `allowed_tools` and `permitted_actions` by default.
 - Keep one responsibility per agent (`planning`, `coding`, `chat`, etc.).
+
+## Prompt file folder
+
+This repository ships a ready-to-edit prompt folder:
+
+- `agents/`
+
+The default pack includes specialized roles for day-to-day CLI/TUI work:
+
+- planning
+- coding
+- chat
+- research
+- git expert
+- reviewer
+- debugger
+- tester
+- docs writer
