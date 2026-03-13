@@ -75,37 +75,40 @@ type Adapter interface {
 	Send(context.Context, string, Request) (Response, error)
 }
 
-// fallbackModels is the curated list shown in the selector.
-// These are always present regardless of whether models.dev has loaded.
-// The catalog enriches them with live metadata (context size, etc.) when available.
+// curatedProviderIDs is the whitelist of 20 providers shown in the model selector.
+// Models within each are fetched dynamically from models.dev.
+var curatedProviderIDs = []string{
+	"anthropic",
+	"openai",
+	"google",
+	"x-ai",
+	"groq",
+	"cerebras",
+	"qwen",
+	"zai",
+	"mistral",
+	"deepseek",
+	"cohere",
+	"together",
+	"perplexity",
+	"fireworks",
+	"cloudflare",
+	"amazon",
+	"openrouter",
+	"ollama",
+	"replicate",
+	"vertex",
+}
+
+// fallbackModels is shown only when models.dev hasn't loaded yet (first run, no cache).
 var fallbackModels = []Model{
-	// Anthropic
 	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-opus-4", DisplayName: "Claude Opus 4", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
 	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
-	{Provider: "anthropic", ProviderName: "Anthropic", Name: "claude-3-5-haiku-20241022", DisplayName: "Claude 3.5 Haiku", Vision: true, ToolCall: true, EnvKey: "ANTHROPIC_API_KEY"},
-	// OpenAI
 	{Provider: "openai", ProviderName: "OpenAI", Name: "gpt-4.1", DisplayName: "GPT-4.1", Vision: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
-	{Provider: "openai", ProviderName: "OpenAI", Name: "gpt-4o", DisplayName: "GPT-4o", Vision: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
 	{Provider: "openai", ProviderName: "OpenAI", Name: "o3", DisplayName: "o3", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
-	{Provider: "openai", ProviderName: "OpenAI", Name: "o4-mini", DisplayName: "o4-mini", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "OPENAI_API_KEY"},
-	// Google
 	{Provider: "google", ProviderName: "Google", Name: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Vision: true, Reasoning: true, ToolCall: true, EnvKey: "GOOGLE_API_KEY"},
-	{Provider: "google", ProviderName: "Google", Name: "gemini-2.0-flash", DisplayName: "Gemini 2.0 Flash", Vision: true, ToolCall: true, EnvKey: "GOOGLE_API_KEY"},
-	// xAI
 	{Provider: "x-ai", ProviderName: "xAI", Name: "grok-3", DisplayName: "Grok 3", Vision: true, ToolCall: true, EnvKey: "XAI_API_KEY"},
-	{Provider: "x-ai", ProviderName: "xAI", Name: "grok-3-mini", DisplayName: "Grok 3 Mini", Reasoning: true, ToolCall: true, EnvKey: "XAI_API_KEY"},
-	// Groq
 	{Provider: "groq", ProviderName: "Groq", Name: "llama-3.3-70b-versatile", DisplayName: "Llama 3.3 70B", ToolCall: true, EnvKey: "GROQ_API_KEY"},
-	{Provider: "groq", ProviderName: "Groq", Name: "qwen-qwq-32b", DisplayName: "QwQ 32B", Reasoning: true, ToolCall: true, EnvKey: "GROQ_API_KEY"},
-	// Cerebras
-	{Provider: "cerebras", ProviderName: "Cerebras", Name: "llama-3.3-70b", DisplayName: "Llama 3.3 70B", ToolCall: true, EnvKey: "CEREBRAS_API_KEY"},
-	{Provider: "cerebras", ProviderName: "Cerebras", Name: "llama-4-scout-17b-16e-instruct", DisplayName: "Llama 4 Scout", ToolCall: true, EnvKey: "CEREBRAS_API_KEY"},
-	// Qwen
-	{Provider: "qwen", ProviderName: "Qwen", Name: "qwen-max", DisplayName: "Qwen Max", Vision: true, ToolCall: true, EnvKey: "QWEN_API_KEY"},
-	{Provider: "qwen", ProviderName: "Qwen", Name: "qwen3-coder-plus", DisplayName: "Qwen3 Coder Plus", ToolCall: true, EnvKey: "QWEN_API_KEY"},
-	// Z.AI
-	{Provider: "zai", ProviderName: "Z.AI", Name: "glm-4-flash", DisplayName: "GLM-4 Flash", Vision: true, ToolCall: true, EnvKey: "ZAI_API_KEY"},
-	{Provider: "zai", ProviderName: "Z.AI", Name: "glm-4.5", DisplayName: "GLM-4.5", Vision: true, ToolCall: true, EnvKey: "ZAI_API_KEY"},
 }
 
 type Manager struct {
@@ -155,26 +158,48 @@ func (m *Manager) ProviderEnvKey(providerID string) string {
 	return ""
 }
 
-// CuratedModels returns the fixed ~20-model curated list, optionally enriched
-// with live metadata (context size, status, etc.) from the models.dev catalog.
-// This is the only pool used in the selector — both the default view and search.
+// CuratedModels returns all models that belong to the 20 curated providers,
+// sourced entirely from the live models.dev catalog (already built into []Model).
+// Falls back to a small hardcoded set only when the catalog hasn't loaded yet.
 func (m *Manager) CuratedModels() []Model {
-	// Build a lookup from the live catalog for enrichment.
-	byKey := make(map[string]Model)
-	for _, mod := range m.Models() {
-		byKey[mod.Provider+":"+mod.Name] = mod
+	m.mu.RLock()
+	cat := m.catalog
+	m.mu.RUnlock()
+
+	if len(cat) == 0 {
+		return append([]Model(nil), fallbackModels...)
 	}
 
-	out := make([]Model, len(fallbackModels))
-	for i, base := range fallbackModels {
-		if live, ok := byKey[base.Provider+":"+base.Name]; ok {
-			// Prefer live metadata but keep our hardcoded display names.
-			live.DisplayName = base.DisplayName
-			live.EnvKey = base.EnvKey
-			out[i] = live
-		} else {
-			out[i] = base
+	// Build a set for O(1) lookup.
+	allowed := make(map[string]bool, len(curatedProviderIDs))
+	for _, pid := range curatedProviderIDs {
+		allowed[pid] = true
+	}
+
+	// Preserve the provider order defined in curatedProviderIDs.
+	// cat is already sorted by provider+model from buildModels; we just filter.
+	order := make(map[string]int, len(curatedProviderIDs))
+	for i, pid := range curatedProviderIDs {
+		order[pid] = i
+	}
+
+	var out []Model
+	for _, mod := range cat {
+		if allowed[mod.Provider] {
+			out = append(out, mod)
 		}
+	}
+
+	// Re-sort by the curated provider order (buildModels sorts alphabetically,
+	// but curatedProviderIDs puts anthropic first, etc.).
+	sort.SliceStable(out, func(i, j int) bool {
+		oi := order[out[i].Provider]
+		oj := order[out[j].Provider]
+		return oi < oj
+	})
+
+	if len(out) == 0 {
+		return append([]Model(nil), fallbackModels...)
 	}
 	return out
 }
