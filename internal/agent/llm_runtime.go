@@ -1,15 +1,19 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"spettro/internal/budget"
@@ -34,7 +38,22 @@ type LLMCoder struct {
 	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
 	RequiredReads   []string
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
+	ShellApproval   ShellApprovalCallback
 }
+
+type ShellApprovalDecision string
+
+const (
+	ShellApprovalAllowOnce   ShellApprovalDecision = "allow-once"
+	ShellApprovalAllowAlways ShellApprovalDecision = "allow-always"
+	ShellApprovalDeny        ShellApprovalDecision = "deny"
+)
+
+type ShellApprovalRequest struct {
+	Command string
+}
+
+type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
 
 func (c LLMCoder) Execute(ctx context.Context, plan string, level config.PermissionLevel, approved bool) (RunResult, error) {
 	if strings.TrimSpace(plan) == "" {
@@ -51,13 +70,15 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		CWD:             c.CWD,
 		MaxSteps:        24,
 		RequireToolCall: true,
-		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec"},
+		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep"},
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
 		ModelName:       c.ModelName,
 		MaxTokens:       c.MaxTokens,
 		RequiredReads:   c.RequiredReads,
 		ToolCallback:    c.ToolCallback,
+		Permission:      level,
+		ShellApproval:   c.ShellApproval,
 	})
 	if err != nil {
 		return RunResult{}, err
@@ -82,6 +103,8 @@ type toolLoopConfig struct {
 	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
 	RequiredReads   []string
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
+	Permission      config.PermissionLevel
+	ShellApproval   ShellApprovalCallback
 }
 
 type toolCall struct {
@@ -91,9 +114,22 @@ type toolCall struct {
 
 type toolRuntime struct {
 	cwd           string
+	mu            sync.Mutex
+	shellMu       sync.Mutex
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
 	searcher      RepoSearcher
+	permission    config.PermissionLevel
+	shellApproval ShellApprovalCallback
+	allowedShell  map[string]struct{}
+}
+
+// parallelResult holds the outcome of a single tool execution in a parallel batch.
+type parallelResult struct {
+	name   string
+	args   string
+	output string
+	status string
 }
 
 func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, error) {
@@ -118,7 +154,15 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		cwd:           cfg.CWD,
 		readSet:       map[string]struct{}{},
 		requiredReads: map[string]struct{}{},
+		permission:    cfg.Permission,
+		shellApproval: cfg.ShellApproval,
+		allowedShell:  map[string]struct{}{},
 	}
+	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
+	if err != nil {
+		return "", nil, err
+	}
+	runtime.allowedShell = allowedShell
 	for _, p := range cfg.RequiredReads {
 		p = filepath.ToSlash(strings.TrimSpace(p))
 		if p != "" {
@@ -151,37 +195,23 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		}
 		lastContent = main
 
-		call, hasCall, err := parseToolCall(main)
-		if err != nil {
-			// Malformed tool call JSON: feed the error back so the LLM can correct it.
+		calls, parseErrs := parseAllToolCalls(main)
+		if len(calls) > 0 || len(parseErrs) > 0 {
+			if len(calls) > 0 {
+				usedTool = true
+			}
+			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
+			// build history entry
 			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
-			history.WriteString(fmt.Sprintf("tool(%d): error: %s — fix the JSON and retry\n\n", step, err.Error()))
-			continue
-		}
-		if hasCall {
-			usedTool = true
-			callArgs := singleLine(string(call.Args))
-			if cfg.ToolCallback != nil {
-				cfg.ToolCallback(ToolTrace{Name: call.Tool, Args: callArgs, Status: "running"})
+			for _, res := range results {
+				trace := ToolTrace{Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
+				traces = append(traces, trace)
+				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, truncate(res.output, 6000)))
 			}
-			result, err := runtime.execute(ctx, call, allowed)
-			status := "success"
-			if err != nil {
-				status = "error"
-				result = "error: " + err.Error()
+			for _, perr := range parseErrs {
+				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
 			}
-			trace := ToolTrace{
-				Name:   call.Tool,
-				Status: status,
-				Args:   callArgs,
-				Output: truncate(result, 600),
-			}
-			traces = append(traces, trace)
-			if cfg.ToolCallback != nil {
-				cfg.ToolCallback(trace)
-			}
-			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
-			history.WriteString(fmt.Sprintf("tool(%d): %s\n\n", step, truncate(result, 6000)))
+			history.WriteString("\n")
 			continue
 		}
 
@@ -246,8 +276,9 @@ You can use tools iteratively.
 Allowed tools: %s
 
 Output protocol (strict):
-1) To call one tool, output exactly:
+1) To call tools (all executed in parallel), output one TOOL_CALL per line:
 TOOL_CALL {"tool":"<tool-name>","args":{...}}
+TOOL_CALL {"tool":"<another>","args":{...}}
 2) When done, output exactly:
 FINAL
 <your final answer>
@@ -273,11 +304,44 @@ Previous tool interaction log:
 %s`, base, toolList, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
 }
 
+// parallelExec fires one goroutine per call and collects results in original order.
+func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowed map[string]struct{}, callback func(ToolTrace)) []parallelResult {
+	results := make([]parallelResult, len(calls))
+	var wg sync.WaitGroup
+	for i, call := range calls {
+		wg.Add(1)
+		go func(idx int, c toolCall) {
+			defer wg.Done()
+			callArgs := singleLine(string(c.Args))
+			if callback != nil {
+				callback(ToolTrace{Name: c.Tool, Args: callArgs, Status: "running"})
+			}
+			output, err := r.execute(ctx, c, allowed)
+			status := "success"
+			if err != nil {
+				status = "error"
+				output = "error: " + err.Error()
+			}
+			results[idx] = parallelResult{
+				name:   c.Tool,
+				args:   callArgs,
+				output: output,
+				status: status,
+			}
+			if callback != nil {
+				callback(ToolTrace{Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600)})
+			}
+		}(i, call)
+	}
+	wg.Wait()
+	return results
+}
+
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
 	if _, ok := allowed[call.Tool]; !ok {
 		return "", fmt.Errorf("tool %q not allowed", call.Tool)
 	}
-	if call.Tool != "file-read" {
+	if call.Tool != "file-read" && call.Tool != "glob" && call.Tool != "grep" {
 		if next, ok := r.nextRequiredRead(); ok {
 			return "", fmt.Errorf("must read %q with file-read first", next)
 		}
@@ -313,8 +377,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err != nil {
 			return "", err
 		}
+		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
 		delete(r.requiredReads, rel)
+		r.mu.Unlock()
 		content := string(data)
 		if args.StartLine > 0 {
 			content = sliceLines(content, args.StartLine, args.EndLine)
@@ -339,7 +405,10 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		_, statErr := os.Stat(abs)
 		exists := statErr == nil
 		if exists {
-			if _, ok := r.readSet[rel]; !ok {
+			r.mu.Lock()
+			_, alreadyRead := r.readSet[rel]
+			r.mu.Unlock()
+			if !alreadyRead {
 				return "", fmt.Errorf("refusing write: read %q first", rel)
 			}
 		}
@@ -360,7 +429,9 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				return "", err
 			}
 		}
+		r.mu.Lock()
 		r.readSet[rel] = struct{}{}
+		r.mu.Unlock()
 		if exists {
 			return fmt.Sprintf("updated %s", rel), nil
 		}
@@ -376,8 +447,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if cmdText == "" {
 			return "", fmt.Errorf("shell-exec command is required")
 		}
-		if isBlockedCommand(cmdText) {
-			return "", fmt.Errorf("blocked dangerous command")
+		if err := r.authorizeShellCommand(ctx, cmdText); err != nil {
+			return "", err
 		}
 		cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
@@ -389,12 +460,345 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return text, fmt.Errorf("command failed: %w", err)
 		}
 		return text, nil
+	case "glob":
+		var args struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"` // optional subdirectory
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("glob args: %w", err)
+		}
+		return r.runGlob(args.Pattern, args.Path)
+	case "grep":
+		var gargs grepArgs
+		if err := json.Unmarshal(call.Args, &gargs); err != nil {
+			return "", fmt.Errorf("grep args: %w", err)
+		}
+		return r.runGrep(ctx, gargs)
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}
 }
 
+// skipDirs are directories to skip when walking the workspace.
+var skipDirs = map[string]bool{
+	".git":         true,
+	".spettro":     true,
+	"vendor":       true,
+	"node_modules": true,
+	"dist":         true,
+	"build":        true,
+}
+
+// runGlob implements the glob tool using filepath.WalkDir with ** support.
+func (r *toolRuntime) runGlob(pattern, subPath string) (string, error) {
+	if strings.TrimSpace(pattern) == "" {
+		return "", fmt.Errorf("glob: pattern is required")
+	}
+	root := r.cwd
+	if strings.TrimSpace(subPath) != "" {
+		abs, _, err := r.resolvePath(subPath)
+		if err != nil {
+			return "", fmt.Errorf("glob path: %w", err)
+		}
+		root = abs
+	}
+
+	var matches []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, relErr := filepath.Rel(r.cwd, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if matchGlobPattern(pattern, rel) {
+			matches = append(matches, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("glob walk: %w", err)
+	}
+	sort.Strings(matches)
+	if len(matches) == 0 {
+		return fmt.Sprintf("no files match %q", pattern), nil
+	}
+	return fmt.Sprintf("%d files:\n%s", len(matches), strings.Join(matches, "\n")), nil
+}
+
+// matchGlobPattern matches a slash-separated path against a glob pattern with ** support.
+func matchGlobPattern(pattern, rel string) bool {
+	patParts := strings.Split(pattern, "/")
+	pathParts := strings.Split(rel, "/")
+	return globMatch(patParts, pathParts)
+}
+
+func globMatch(patParts, pathParts []string) bool {
+	if len(patParts) == 0 && len(pathParts) == 0 {
+		return true
+	}
+	if len(patParts) == 0 {
+		return false
+	}
+	if patParts[0] == "**" {
+		// ** can match zero or more path components
+		// Try matching rest of pattern against every suffix of path
+		restPat := patParts[1:]
+		// Zero-component match: skip ** entirely
+		if globMatch(restPat, pathParts) {
+			return true
+		}
+		// One or more components match
+		for i := 1; i <= len(pathParts); i++ {
+			if globMatch(restPat, pathParts[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(pathParts) == 0 {
+		return false
+	}
+	matched, err := filepath.Match(patParts[0], pathParts[0])
+	if err != nil || !matched {
+		return false
+	}
+	return globMatch(patParts[1:], pathParts[1:])
+}
+
+// typeExtensions maps type names to file extensions.
+func typeExtensions(t string) []string {
+	switch strings.ToLower(t) {
+	case "go":
+		return []string{".go"}
+	case "ts":
+		return []string{".ts", ".tsx"}
+	case "js":
+		return []string{".js", ".jsx", ".mjs"}
+	case "py":
+		return []string{".py"}
+	case "rs":
+		return []string{".rs"}
+	case "md":
+		return []string{".md"}
+	case "toml":
+		return []string{".toml"}
+	case "json":
+		return []string{".json"}
+	case "yaml", "yml":
+		return []string{".yaml", ".yml"}
+	case "sh":
+		return []string{".sh", ".bash"}
+	default:
+		return nil
+	}
+}
+
+type grepArgs struct {
+	Pattern         string `json:"pattern"`
+	Glob            string `json:"glob"`
+	Type            string `json:"type"`
+	CaseInsensitive bool   `json:"case_insensitive"`
+	Context         int    `json:"context"`
+	OutputMode      string `json:"output_mode"`
+	MaxResults      int    `json:"max_results"`
+}
+
+// runGrep implements the grep tool.
+func (r *toolRuntime) runGrep(_ context.Context, args grepArgs) (string, error) {
+	if strings.TrimSpace(args.Pattern) == "" {
+		return "", fmt.Errorf("grep: pattern is required")
+	}
+	regexPattern := args.Pattern
+	if args.CaseInsensitive {
+		regexPattern = "(?i)" + regexPattern
+	}
+	re, err := regexp.Compile(regexPattern)
+	if err != nil {
+		return "", fmt.Errorf("grep: invalid pattern: %w", err)
+	}
+	if args.MaxResults <= 0 {
+		args.MaxResults = 200
+	}
+	outputMode := args.OutputMode
+	if outputMode == "" {
+		outputMode = "content"
+	}
+
+	exts := typeExtensions(args.Type)
+
+	type fileResult struct {
+		path   string
+		count  int
+		blocks []string // for content mode
+	}
+
+	var results []fileResult
+	totalMatches := 0
+	truncated := false
+
+	walkErr := filepath.WalkDir(r.cwd, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if truncated {
+			return nil
+		}
+
+		// Filter by type
+		if len(exts) > 0 {
+			ext := strings.ToLower(filepath.Ext(d.Name()))
+			found := false
+			for _, e := range exts {
+				if ext == e {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil
+			}
+		}
+		// Filter by glob
+		if args.Glob != "" {
+			matched, mErr := filepath.Match(args.Glob, d.Name())
+			if mErr != nil || !matched {
+				return nil
+			}
+		}
+
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(r.cwd, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+
+		lines := strings.Split(string(data), "\n")
+		matchLines := make([]int, 0)
+		for i, line := range lines {
+			if re.MatchString(line) {
+				matchLines = append(matchLines, i)
+			}
+		}
+		if len(matchLines) == 0 {
+			return nil
+		}
+
+		// Mark as read from search
+		r.mu.Lock()
+		r.readSet[rel] = struct{}{}
+		r.mu.Unlock()
+
+		fr := fileResult{path: rel, count: len(matchLines)}
+
+		if outputMode == "content" {
+			// Build context blocks
+			included := make([]bool, len(lines))
+			for _, mi := range matchLines {
+				start := mi - args.Context
+				if start < 0 {
+					start = 0
+				}
+				end := mi + args.Context
+				if end >= len(lines) {
+					end = len(lines) - 1
+				}
+				for j := start; j <= end; j++ {
+					included[j] = true
+				}
+			}
+
+			var blockBuf bytes.Buffer
+			prevIncluded := false
+			for i, line := range lines {
+				if included[i] {
+					if !prevIncluded && blockBuf.Len() > 0 {
+						blockBuf.WriteString("--\n")
+					}
+					fmt.Fprintf(&blockBuf, "%s:%d: %s\n", rel, i+1, line)
+					prevIncluded = true
+				} else {
+					prevIncluded = false
+				}
+			}
+			fr.blocks = []string{blockBuf.String()}
+		}
+
+		results = append(results, fr)
+		totalMatches += len(matchLines)
+		if totalMatches >= args.MaxResults {
+			truncated = true
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return "", fmt.Errorf("grep walk: %w", walkErr)
+	}
+
+	if len(results) == 0 {
+		return fmt.Sprintf("no matches for %q", args.Pattern), nil
+	}
+
+	var sb strings.Builder
+	switch outputMode {
+	case "files_with_matches":
+		for _, fr := range results {
+			sb.WriteString(fr.path)
+			sb.WriteString("\n")
+		}
+		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
+		out := header + sb.String()
+		if truncated {
+			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
+		}
+		return strings.TrimRight(out, "\n"), nil
+	case "count":
+		for _, fr := range results {
+			fmt.Fprintf(&sb, "%s: %d\n", fr.path, fr.count)
+		}
+		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
+		out := header + sb.String()
+		if truncated {
+			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
+		}
+		return strings.TrimRight(out, "\n"), nil
+	default: // "content"
+		for _, fr := range results {
+			for _, block := range fr.blocks {
+				sb.WriteString(block)
+			}
+		}
+		header := fmt.Sprintf("%d matches in %d files:\n", totalMatches, len(results))
+		out := header + sb.String()
+		if truncated {
+			out += fmt.Sprintf("(truncated at %d matches)\n", args.MaxResults)
+		}
+		return strings.TrimRight(out, "\n"), nil
+	}
+}
+
 func (r *toolRuntime) nextRequiredRead() (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if len(r.requiredReads) == 0 {
 		return "", false
 	}
@@ -437,8 +841,30 @@ func (r *toolRuntime) markReadFromSearch(out string) {
 		if !regexp.MustCompile(`^\d+$`).MatchString(parts[1]) {
 			continue
 		}
+		r.mu.Lock()
 		r.readSet[strings.TrimSpace(parts[0])] = struct{}{}
+		r.mu.Unlock()
 	}
+}
+
+// parseAllToolCalls scans all lines of s and collects every TOOL_CALL entry.
+func parseAllToolCalls(s string) (calls []toolCall, parseErrs []error) {
+	scanner := bufio.NewScanner(strings.NewReader(s))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(strings.TrimSpace(line), toolCallPrefix) {
+			continue
+		}
+		call, hasCall, err := parseToolCall(strings.TrimSpace(line))
+		if err != nil {
+			parseErrs = append(parseErrs, err)
+			continue
+		}
+		if hasCall {
+			calls = append(calls, call)
+		}
+	}
+	return calls, parseErrs
 }
 
 func parseToolCall(s string) (toolCall, bool, error) {
@@ -566,4 +992,140 @@ func isBlockedCommand(cmd string) bool {
 		}
 	}
 	return false
+}
+
+type allowedCommandsFile struct {
+	AllowedCommands []string `json:"allowed_commands"`
+}
+
+var alwaysAllowedCommandPrefixes = []string{
+	"ls",
+	"pwd",
+	"cat",
+	"head",
+	"tail",
+	"wc",
+	"grep",
+	"rg",
+	"find",
+	"stat",
+	"git status",
+	"git diff",
+	"go test",
+	"go build",
+	"go vet",
+	"make test",
+	"make build",
+}
+
+func (r *toolRuntime) authorizeShellCommand(ctx context.Context, command string) error {
+	normalized := normalizeCommand(command)
+	if normalized == "" {
+		return fmt.Errorf("shell-exec command is required")
+	}
+	if isBlockedCommand(normalized) {
+		return fmt.Errorf("blocked dangerous command")
+	}
+	if isAlwaysAllowedCommand(normalized) {
+		return nil
+	}
+
+	r.shellMu.Lock()
+	defer r.shellMu.Unlock()
+
+	r.mu.Lock()
+	_, preapproved := r.allowedShell[normalized]
+	r.mu.Unlock()
+	if preapproved {
+		return nil
+	}
+	if r.permission == config.PermissionYOLO {
+		return nil
+	}
+	if r.shellApproval == nil {
+		return fmt.Errorf("shell-exec requires approval outside yolo mode")
+	}
+
+	decision, err := r.shellApproval(ctx, ShellApprovalRequest{Command: command})
+	if err != nil {
+		return fmt.Errorf("shell approval failed: %w", err)
+	}
+	switch decision {
+	case ShellApprovalAllowOnce:
+		return nil
+	case ShellApprovalAllowAlways:
+		r.mu.Lock()
+		r.allowedShell[normalized] = struct{}{}
+		r.mu.Unlock()
+		if err := saveAllowedCommandSet(r.cwd, r.allowedShell); err != nil {
+			return fmt.Errorf("persist allowed command: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("shell-exec denied by user")
+	}
+}
+
+func normalizeCommand(command string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
+}
+
+func isAlwaysAllowedCommand(command string) bool {
+	for _, prefix := range alwaysAllowedCommandPrefixes {
+		if command == prefix || strings.HasPrefix(command, prefix+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedCommandsPath(cwd string) string {
+	return filepath.Join(cwd, ".spettro", "allowed_commands.json")
+}
+
+func loadAllowedCommandSet(cwd string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	data, err := os.ReadFile(allowedCommandsPath(cwd))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, fmt.Errorf("read allowed commands: %w", err)
+	}
+	var parsed allowedCommandsFile
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, fmt.Errorf("decode allowed commands: %w", err)
+	}
+	for _, cmd := range parsed.AllowedCommands {
+		norm := normalizeCommand(cmd)
+		if norm != "" {
+			out[norm] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+func saveAllowedCommandSet(cwd string, set map[string]struct{}) error {
+	cmds := make([]string, 0, len(set))
+	for cmd := range set {
+		if strings.TrimSpace(cmd) != "" {
+			cmds = append(cmds, cmd)
+		}
+	}
+	sort.Strings(cmds)
+	payload := allowedCommandsFile{AllowedCommands: cmds}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode allowed commands: %w", err)
+	}
+
+	path := allowedCommandsPath(cwd)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create .spettro dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return fmt.Errorf("write allowed commands temp: %w", err)
+	}
+	return os.Rename(tmp, path)
 }

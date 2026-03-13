@@ -38,6 +38,9 @@
 
 - `/approve` requires a pending plan and coding mode.
 - In `ask-first`, coding prompts without approval return guidance instead of executing.
+- When coding asks to run a non-default shell command outside `yolo`, approve with:
+  `1) yes`, `2) yes and don't ask again`, `3) no`.
+- Approval choice `2` persists command approval in `.spettro/allowed_commands.json` for the current project.
 - `/connect` includes a `Local endpoint (LM Studio/Ollama)` option: enter `localhost:1234` (or another host) and Spettro probes `/v1/models` automatically.
 - `F2`/`Shift+F2` cycle only through favorited models (toggle favorite with `f` in `/models`).
 - Type `@` in the input box to open repository file suggestions and insert mentions.

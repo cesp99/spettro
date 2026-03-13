@@ -1,9 +1,11 @@
-package indexer
+package indexer_test
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"spettro/internal/indexer"
 )
 
 func TestBuildSkipsGitAndSpettro(t *testing.T) {
@@ -13,7 +15,7 @@ func TestBuildSkipsGitAndSpettro(t *testing.T) {
 	mustWrite(t, filepath.Join(root, ".git", "x.txt"), "nope")
 	mustWrite(t, filepath.Join(root, ".spettro", "index.json"), "{}")
 
-	snap, err := Build(root)
+	snap, err := indexer.Build(root)
 	if err != nil {
 		t.Fatalf("build index: %v", err)
 	}

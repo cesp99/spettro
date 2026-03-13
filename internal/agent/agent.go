@@ -24,6 +24,11 @@ type ChatAgent interface {
 
 // CommitAgent is defined in committer.go.
 // SearchAgent is defined in searcher.go.
+// ExploreAgent is defined in explorer.go.
+
+type ExploreAgent interface {
+	Explore(context.Context, string) (RunResult, error)
+}
 
 type ToolTrace struct {
 	Name   string

@@ -1,16 +1,66 @@
-Analyze this codebase and create a SPETTRO.md file in the repository root.
+Analyze this codebase and create (or improve) a SPETTRO.md file in the repository root.
 
 SPETTRO.md will be loaded by future Spettro sessions to give the coding and planning agents immediate context about this project — its architecture, conventions, and how to work with it effectively.
 
-## What to include
+## Tools available
 
-1. **Build, test, and run commands** — how to build, run tests (including a single test), lint, and start the application. Only include commands that actually exist in this repo.
+You have: `glob`, `grep`, `file-read`, `file-write`. Use them in parallel for speed.
 
-2. **High-level architecture** — the "big picture" that requires reading multiple files to understand: how components connect, data flow, key abstractions. Not a file listing.
+## Output protocol (strict)
 
-3. **Conventions and patterns** — naming conventions, code organization patterns, things that are non-obvious from reading a single file.
+Every response must be exactly one of:
 
-4. **Key types and entry points** — the most important structs, interfaces, and functions a coding agent would need to know about to be productive immediately.
+**A) One or more parallel tool calls — one TOOL_CALL per line:**
+```
+TOOL_CALL {"tool":"glob","args":{"pattern":"**/*.go"}}
+TOOL_CALL {"tool":"file-read","args":{"path":"go.mod"}}
+TOOL_CALL {"tool":"grep","args":{"pattern":"^type [A-Z]","type":"go","output_mode":"files_with_matches"}}
+```
+
+**B) The final answer:**
+```
+FINAL
+SPETTRO.md created.
+```
+
+Rules:
+- Multiple TOOL_CALL lines in one response = parallel execution. Use this!
+- No prose before TOOL_CALL or FINAL.
+- Always end with FINAL after writing the file.
+
+## Exploration strategy
+
+### Step 1 — check for existing SPETTRO.md and scan structure (parallel)
+```
+TOOL_CALL {"tool":"file-read","args":{"path":"SPETTRO.md"}}
+TOOL_CALL {"tool":"glob","args":{"pattern":"**/*.go"}}
+TOOL_CALL {"tool":"file-read","args":{"path":"go.mod"}}
+TOOL_CALL {"tool":"glob","args":{"pattern":"*.md"}}
+```
+If SPETTRO.md exists, read it first and improve it rather than replacing it wholesale.
+
+### Step 2 — find entry points and key types (parallel)
+```
+TOOL_CALL {"tool":"grep","args":{"pattern":"^func main","type":"go"}}
+TOOL_CALL {"tool":"grep","args":{"pattern":"^type [A-Z]","type":"go","output_mode":"files_with_matches"}}
+TOOL_CALL {"tool":"grep","args":{"pattern":"^package ","type":"go","output_mode":"files_with_matches"}}
+```
+
+### Step 3 — read key files (parallel)
+Read the main entry point, top-level packages, and any Makefile or config files.
+
+### Step 4 — write SPETTRO.md
+Use `file-write` with path `SPETTRO.md`.
+
+## What to include in SPETTRO.md
+
+1. **Build, test, and run commands** — only commands that actually exist in this repo.
+
+2. **High-level architecture** — how components connect, data flow, key abstractions. Not a file listing.
+
+3. **Conventions and patterns** — naming conventions, code organization, non-obvious things.
+
+4. **Key types and entry points** — the most important structs, interfaces, and functions.
 
 ## Rules
 
@@ -18,7 +68,6 @@ SPETTRO.md will be loaded by future Spettro sessions to give the coding and plan
 - Do not list every file or directory — only what requires explanation.
 - Do not include generic advice ("write tests", "handle errors", "use descriptive names").
 - Do not make up information. Only include what you verified by reading the actual code.
-- Read at minimum: go.mod, the main entry point, and the top-level packages. Read more as needed.
 - Be concise. The file should be scannable in 30 seconds, not exhaustive.
 
 ## Output format

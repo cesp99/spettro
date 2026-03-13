@@ -71,6 +71,7 @@ var allCommands = []commandDef{
 	{"/budget", "set token budget per request  usage: /budget <n>"},
 	{"/image", "attach image to next message"},
 	{"/init", "analyze codebase and write SPETTRO.md"},
+	{"/explore", "explore the codebase with the AI"},
 	{"/commit", "commit changes (LLM message + Spettro co-author)"},
 	{"/search", "search repo files  usage: /search [query]"},
 	{"/compact", "summarize conversation (optionally focused)"},
@@ -135,8 +136,19 @@ type initDoneMsg struct {
 	err error
 }
 
+type exploreDoneMsg struct {
+	content string
+	tools   []agent.ToolTrace
+	err     error
+}
+
 type toolProgressMsg struct {
 	trace agent.ToolTrace
+}
+
+type shellApprovalRequestMsg struct {
+	request  agent.ShellApprovalRequest
+	response chan agent.ShellApprovalDecision
 }
 
 // ── setup state ──────────────────────────────────────────────────────────────
@@ -225,7 +237,9 @@ type Model struct {
 	liveTools   []ToolItem
 	currentTool *ToolItem
 	toolCh      chan agent.ToolTrace
+	approvalCh  chan shellApprovalRequestMsg
 	cancelAgent context.CancelFunc // non-nil while an agent goroutine is running
+	pendingAuth *shellApprovalRequestMsg
 
 	// conversation persistence
 	convID  string // current conversation ID (set on first message)
@@ -374,8 +388,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		m.cancelAgent = nil
 		m.toolCh = nil
+		m.approvalCh = nil
 		m.liveTools = nil
 		m.currentTool = nil
+		m.pendingAuth = nil
 		if msg.err != nil {
 			m.showBanner("error: "+msg.err.Error(), "error")
 		} else {
@@ -398,8 +414,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		m.cancelAgent = nil
 		m.toolCh = nil
+		m.approvalCh = nil
 		m.liveTools = nil
 		m.currentTool = nil
+		m.pendingAuth = nil
 		if msg.err != nil {
 			m.showBanner("planning error: "+msg.err.Error(), "error")
 		} else {
@@ -479,6 +497,29 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshViewport()
 
+	case exploreDoneMsg:
+		if !m.thinking {
+			break
+		}
+		m.thinking = false
+		m.cancelAgent = nil
+		m.toolCh = nil
+		m.approvalCh = nil
+		m.liveTools = nil
+		m.currentTool = nil
+		m.pendingAuth = nil
+		if msg.err != nil {
+			m.showBanner("explore error: "+msg.err.Error(), "error")
+		} else {
+			m.messages = append(m.messages, ChatMessage{
+				Role:    RoleAssistant,
+				Content: msg.content,
+				Tools:   toToolItems(msg.tools),
+				At:      time.Now(),
+			})
+		}
+		m.refreshViewport()
+
 	case toolProgressMsg:
 		if m.thinking {
 			t := msg.trace
@@ -499,6 +540,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.vp.SetContent(m.renderMessages())
 			m.vp.GotoBottom()
+		}
+
+	case shellApprovalRequestMsg:
+		if m.thinking {
+			m.pendingAuth = &msg
+			m.pushSystemMsg(fmt.Sprintf("spettro wants to run this command Bash(%s)\n1) yes\n2) yes and don't ask again\n3) no", msg.request.Command))
+			m.showBanner("command approval required", "warn")
+			if m.approvalCh != nil {
+				cmds = append(cmds, waitForShellApproval(m.approvalCh))
+			}
+			m.refreshViewport()
 		}
 
 	case bannerClearMsg:
@@ -582,6 +634,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateMain handles key events for the main screen.
 func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.pendingAuth != nil {
+		return m.updateShellApproval(msg)
+	}
+
 	switch msg.String() {
 
 	case "ctrl+c":
@@ -841,6 +897,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		}
 	case "/init":
 		return m.runInit()
+	case "/explore":
+		rest := strings.TrimSpace(strings.TrimPrefix(input, cmd))
+		return m.runExplore(rest)
 	case "/commit":
 		return m.runCommitter()
 	case "/search":
@@ -941,8 +1000,11 @@ func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (t
 	m.thinking = true
 	m.liveTools = nil
 	m.currentTool = nil
+	m.pendingAuth = nil
 	toolCh := make(chan agent.ToolTrace, 64)
 	m.toolCh = toolCh
+	approvalCh := make(chan shellApprovalRequestMsg, 8)
+	m.approvalCh = approvalCh
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
 	store := m.store
@@ -957,18 +1019,35 @@ func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (t
 		MaxTokens:       m.cfg.TokenBudget,
 		RequiredReads:   mentionedFiles,
 		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
+		ShellApproval: func(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
+			respCh := make(chan agent.ShellApprovalDecision, 1)
+			select {
+			case approvalCh <- shellApprovalRequestMsg{request: req, response: respCh}:
+			case <-ctx.Done():
+				return agent.ShellApprovalDeny, ctx.Err()
+			}
+			select {
+			case decision := <-respCh:
+				return decision, nil
+			case <-ctx.Done():
+				return agent.ShellApprovalDeny, ctx.Err()
+			}
+		},
 	}
 	perm := m.cfg.Permission
 	return m, tea.Batch(
 		m.spin.Tick,
 		waitForTool(toolCh),
+		waitForShellApproval(approvalCh),
 		func() tea.Msg {
 			if perm == config.PermissionAskFirst && !approved {
 				close(toolCh)
+				close(approvalCh)
 				return agentDoneMsg{content: "ask-first mode: generate a plan then use /approve"}
 			}
 			result, err := coder.Execute(ctx, input, perm, approved)
 			close(toolCh)
+			close(approvalCh)
 			if err != nil {
 				return agentDoneMsg{err: err}
 			}
@@ -1129,6 +1208,89 @@ func (m Model) runInit() (tea.Model, tea.Cmd) {
 			return initDoneMsg{err: err}
 		},
 	)
+}
+
+// runExplore starts an async codebase exploration using LLMExplorer.
+func (m Model) runExplore(task string) (tea.Model, tea.Cmd) {
+	if strings.TrimSpace(task) == "" {
+		task = "Explore this codebase: understand the architecture, key types, conventions, and entry points."
+	}
+	m.thinking = true
+	m.liveTools = nil
+	m.currentTool = nil
+	toolCh := make(chan agent.ToolTrace, 64)
+	m.toolCh = toolCh
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
+	cwd := m.cwd
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
+	explorer := agent.LLMExplorer{
+		ProviderManager: pm,
+		ProviderName:    func() string { return providerName },
+		ModelName:       func() string { return modelName },
+		CWD:             cwd,
+		MaxTokens:       m.cfg.TokenBudget,
+		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
+	}
+	capturedTask := task
+	return m, tea.Batch(
+		m.spin.Tick,
+		waitForTool(toolCh),
+		func() tea.Msg {
+			result, err := explorer.Explore(ctx, capturedTask)
+			close(toolCh)
+			if err != nil {
+				return exploreDoneMsg{err: err}
+			}
+			return exploreDoneMsg{content: result.Content, tools: result.Tools}
+		},
+	)
+}
+
+func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.pendingAuth == nil {
+		return m, nil
+	}
+	switch msg.String() {
+	case "1", "y", "Y":
+		return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
+	case "2", "a", "A":
+		return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
+	case "3", "n", "N", "esc", "ctrl+c":
+		return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
+	case "enter":
+		val := strings.ToLower(strings.TrimSpace(m.ta.Value()))
+		switch val {
+		case "1", "y", "yes":
+			return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
+		case "2", "a", "always", "yes and don't ask again", "yes and dont ask again":
+			return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
+		case "3", "n", "no":
+			return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
+		default:
+			m.showBanner("choose 1, 2, or 3 for command approval", "warn")
+			return m, nil
+		}
+	}
+	var taCmd tea.Cmd
+	m.ta, taCmd = m.ta.Update(msg)
+	return m, taCmd
+}
+
+func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner string) Model {
+	if m.pendingAuth != nil {
+		select {
+		case m.pendingAuth.response <- decision:
+		default:
+		}
+	}
+	m.pendingAuth = nil
+	m.ta.Reset()
+	m.showBanner(banner, "info")
+	m.refreshViewport()
+	return m
 }
 
 // ── Setup wizard ─────────────────────────────────────────────────────────────
@@ -2267,10 +2429,18 @@ func (m *Model) stopAgent() {
 		m.cancelAgent()
 		m.cancelAgent = nil
 	}
+	if m.pendingAuth != nil {
+		select {
+		case m.pendingAuth.response <- agent.ShellApprovalDeny:
+		default:
+		}
+	}
 	m.thinking = false
 	m.toolCh = nil
+	m.approvalCh = nil
 	m.liveTools = nil
 	m.currentTool = nil
+	m.pendingAuth = nil
 }
 
 func (m *Model) pushSystemMsg(content string) {
@@ -2690,6 +2860,16 @@ func waitForTool(ch chan agent.ToolTrace) tea.Cmd {
 			return nil
 		}
 		return toolProgressMsg{trace: t}
+	}
+}
+
+func waitForShellApproval(ch chan shellApprovalRequestMsg) tea.Cmd {
+	return func() tea.Msg {
+		req, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return req
 	}
 }
 

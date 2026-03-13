@@ -314,13 +314,16 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 	if providerName == "anthropic" {
 		adapter = AnthropicAdapter{APIKey: apiKey}
 	} else {
-		if baseURL == "" {
+		if known, ok := knownBaseURLs[providerName]; ok {
+			// Prefer known OpenAI-compatible endpoints over models.dev when available.
+			baseURL = known
+		} else if baseURL == "" {
 			if strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://") {
 				// Local server: provider ID is the URL itself.
 				baseURL = strings.TrimRight(providerName, "/") + "/v1"
-			} else if known, ok := knownBaseURLs[providerName]; ok {
-				// Well-known provider whose URL wasn't in the catalog yet (e.g. first run).
-				baseURL = known
+			} else if providerName != "openai" && providerName != "openai-compatible" {
+				// Avoid silently routing third-party providers to OpenAI.
+				return Response{}, fmt.Errorf("no API endpoint configured for provider %q", providerName)
 			}
 		}
 		if apiKey == "" {
@@ -405,17 +408,20 @@ func buildModels(cat models.Catalog) []Model {
 // Used as a fallback when the models.dev catalog hasn't been loaded yet or
 // didn't include the API field for that provider.
 var knownBaseURLs = map[string]string{
-	"groq":        "https://api.groq.com/openai/v1",
-	"mistral":     "https://api.mistral.ai/v1",
-	"x-ai":        "https://api.x.ai/v1",
-	"together":    "https://api.together.xyz/v1",
-	"fireworks":   "https://api.fireworks.ai/inference/v1",
-	"openrouter":  "https://openrouter.ai/api/v1",
-	"google":      "https://generativelanguage.googleapis.com/v1beta/openai",
-	"cohere":      "https://api.cohere.com/compatibility/v1",
-	"deepseek":    "https://api.deepseek.com/v1",
-	"perplexity":  "https://api.perplexity.ai",
-	"zai":         "https://api.zai.ai/v1",
+	"groq":         "https://api.groq.com/openai/v1",
+	"mistral":      "https://api.mistral.ai/v1",
+	"xai":          "https://api.x.ai/v1",
+	"x-ai":         "https://api.x.ai/v1",
+	"together":     "https://api.together.xyz/v1",
+	"togetherai":   "https://api.together.xyz/v1",
+	"fireworks":    "https://api.fireworks.ai/inference/v1",
+	"fireworks-ai": "https://api.fireworks.ai/inference/v1",
+	"openrouter":   "https://openrouter.ai/api/v1",
+	"google":       "https://generativelanguage.googleapis.com/v1beta/openai",
+	"cohere":       "https://api.cohere.com/compatibility/v1",
+	"deepseek":     "https://api.deepseek.com/v1",
+	"perplexity":   "https://api.perplexity.ai",
+	"zai":          "https://api.zai.ai/v1",
 }
 
 // ── adapters ─────────────────────────────────────────────────────────────────

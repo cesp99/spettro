@@ -1,20 +1,24 @@
-package config
+package config_test
 
-import "testing"
+import (
+	"testing"
+
+	"spettro/internal/config"
+)
 
 func TestEncryptedAPIKeyRoundTrip(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("SPETTRO_MASTER_KEY", "test-master-key")
 
-	if err := SaveAPIKey("anthropic", "sk-ant-secret"); err != nil {
+	if err := config.SaveAPIKey("anthropic", "sk-ant-secret"); err != nil {
 		t.Fatalf("save encrypted key: %v", err)
 	}
-	if err := SaveAPIKey("openai-compatible", "sk-openai-secret"); err != nil {
+	if err := config.SaveAPIKey("openai-compatible", "sk-openai-secret"); err != nil {
 		t.Fatalf("save encrypted key: %v", err)
 	}
 
-	keys, err := LoadAPIKeys()
+	keys, err := config.LoadAPIKeys()
 	if err != nil {
 		t.Fatalf("load encrypted keys: %v", err)
 	}

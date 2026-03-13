@@ -1,27 +1,31 @@
-package app
+package app_test
 
-import "testing"
+import (
+	"testing"
+
+	"spettro/internal/app"
+)
 
 func TestModeNextCycle(t *testing.T) {
-	got := ModePlanning.Next()
-	if got != ModeCoding {
+	got := app.ModePlanning.Next()
+	if got != app.ModeCoding {
 		t.Fatalf("expected coding, got %s", got)
 	}
 
 	got = got.Next()
-	if got != ModeChat {
+	if got != app.ModeChat {
 		t.Fatalf("expected chat, got %s", got)
 	}
 
 	got = got.Next()
-	if got != ModePlanning {
+	if got != app.ModePlanning {
 		t.Fatalf("expected planning, got %s", got)
 	}
 }
 
 func TestShiftTabInputs(t *testing.T) {
 	for _, in := range []string{"/next", "shift+tab", ":next", "\x1b[Z"} {
-		if !IsModeSwitchInput(in) {
+		if !app.IsModeSwitchInput(in) {
 			t.Fatalf("expected shift-tab switch match for %q", in)
 		}
 	}

@@ -34,6 +34,7 @@ type App struct {
 	ui          *ui.Renderer
 	setup       *setupWizard
 	modelPicker *modelPicker
+	reader      *bufio.Reader
 }
 
 type setupWizard struct {
@@ -104,7 +105,8 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		ModelName: func() string {
 			return app.cfg.ActiveModel
 		},
-		CWD: cwd,
+		CWD:           cwd,
+		ShellApproval: app.promptShellApproval,
 	}
 	app.chatter = agent.Chatter{
 		ProviderManager: pm,
@@ -119,7 +121,8 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 }
 
 func (a *App) Run(ctx context.Context) error {
-	reader := bufio.NewReader(a.in)
+	a.reader = bufio.NewReader(a.in)
+	reader := a.reader
 	a.printLine(a.ui.Welcome())
 	a.printLine(a.ui.Info(a.ui.Stage(string(a.mode))))
 	a.printStatus()
@@ -492,4 +495,32 @@ func (a *App) printStatus() {
 
 func (a *App) printLine(s string) {
 	fmt.Fprintln(a.out, s)
+}
+
+func (a *App) promptShellApproval(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
+	if a.reader == nil {
+		a.reader = bufio.NewReader(a.in)
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return agent.ShellApprovalDeny, err
+		}
+		a.printLine(fmt.Sprintf("spettro wants to run this command Bash(%s)", req.Command))
+		a.printLine("Allow? 1) yes  2) yes and don't ask again  3) no")
+		fmt.Fprint(a.out, "> ")
+		line, err := a.reader.ReadString('\n')
+		if err != nil {
+			return agent.ShellApprovalDeny, err
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "1", "y", "yes":
+			return agent.ShellApprovalAllowOnce, nil
+		case "2", "a", "always", "yes and don't ask again", "yes and dont ask again":
+			return agent.ShellApprovalAllowAlways, nil
+		case "3", "n", "no":
+			return agent.ShellApprovalDeny, nil
+		default:
+			a.printLine("invalid choice; use 1, 2, or 3")
+		}
+	}
 }

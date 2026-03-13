@@ -1,12 +1,14 @@
-package config
+package config_test
 
 import (
 	"strings"
 	"testing"
+
+	"spettro/internal/config"
 )
 
 func TestDefaultAgentManifestIsValid(t *testing.T) {
-	m := DefaultAgentManifest()
+	m := config.DefaultAgentManifest()
 	if err := m.Validate(); err != nil {
 		t.Fatalf("default manifest should validate: %v", err)
 	}
@@ -80,11 +82,10 @@ max_steps = 8
 handoffs = ["planning"]
 enabled = true
 `
-	m, err := DecodeAgentManifest(strings.NewReader(raw))
+	m, err := config.DecodeAgentManifest(strings.NewReader(raw))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-
 	if len(m.Agents) != 2 {
 		t.Fatalf("expected 2 agents, got %d", len(m.Agents))
 	}
@@ -125,7 +126,7 @@ max_steps = 5
 handoffs = []
 enabled = true
 `
-	_, err := DecodeAgentManifest(strings.NewReader(raw))
+	_, err := config.DecodeAgentManifest(strings.NewReader(raw))
 	if err == nil {
 		t.Fatal("expected validation error")
 	}

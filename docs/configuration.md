@@ -19,6 +19,7 @@ Spettro uses both project-local and user-global storage.
 | `PLAN.md` | Last generated implementation plan. |
 | `AGENT.md` | Coding outputs appended over time. |
 | `index.json` | Optional project snapshot (when indexer path is used). |
+| `allowed_commands.json` | Commands approved with "yes and don't ask again" for this project. |
 
 ## Security model
 
@@ -32,8 +33,15 @@ Spettro uses both project-local and user-global storage.
 | Level | Behavior |
 | --- | --- |
 | `ask-first` | Requires explicit approval flow for coding execution. |
-| `restricted` | Allows coding execution with policy restrictions. |
+| `restricted` | Allows coding execution with policy restrictions; shell commands request approval unless pre-approved/always-allowed. |
 | `yolo` | Least restrictive execution policy. |
+
+### Shell command approvals
+
+- Agents run shell commands through `shell-exec` (`bash -lc`).
+- A safe read-only command set is always allowed (for example: `pwd`, `ls`, `cat`, `rg`, `grep`, `git status`, `git diff`, `go test`, `go build`).
+- In non-`yolo` permissions, non-default commands require approval.
+- Choosing **"yes and don't ask again"** stores the normalized command in `.spettro/allowed_commands.json`.
 
 ## Agent manifest
 

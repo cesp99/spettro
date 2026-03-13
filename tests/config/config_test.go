@@ -1,28 +1,30 @@
-package config
+package config_test
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"spettro/internal/config"
 )
 
 func TestLoadOrCreateRoundTrip(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	cfg, err := LoadOrCreate()
+	cfg, err := config.LoadOrCreate()
 	if err != nil {
 		t.Fatalf("load/create: %v", err)
 	}
 
 	cfg.ActiveProvider = "anthropic"
 	cfg.ActiveModel = "claude-3-7-sonnet"
-	if err := Save(cfg); err != nil {
+	if err := config.Save(cfg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	reloaded, err := LoadOrCreate()
+	reloaded, err := config.LoadOrCreate()
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
