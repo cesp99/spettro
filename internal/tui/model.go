@@ -802,19 +802,55 @@ func (m Model) openConnect() Model {
 	return m
 }
 
+// suggestedProviderIDs are pinned to the top of the connect dialog.
+var suggestedProviderIDs = []string{"anthropic", "openai", "mistral", "x-ai", "zai"}
+
+func isSuggested(id string) bool {
+	for _, s := range suggestedProviderIDs {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) filterProviders(filter string) []provider.ProviderInfo {
 	all := m.providers.AllProviderInfos()
-	if filter == "" {
-		return all
+
+	if filter != "" {
+		q := strings.ToLower(filter)
+		var out []provider.ProviderInfo
+		for _, pi := range all {
+			if strings.Contains(strings.ToLower(pi.ID), q) || strings.Contains(strings.ToLower(pi.Name), q) {
+				out = append(out, pi)
+			}
+		}
+		all = out
 	}
-	q := strings.ToLower(filter)
-	var out []provider.ProviderInfo
+
+	// Partition into suggested (in declared order) then the rest (already alpha-sorted).
+	suggOrder := make(map[string]int, len(suggestedProviderIDs))
+	for i, id := range suggestedProviderIDs {
+		suggOrder[id] = i
+	}
+	sugg := make([]provider.ProviderInfo, len(suggestedProviderIDs))
+	suggFilled := make([]bool, len(suggestedProviderIDs))
+	var rest []provider.ProviderInfo
 	for _, pi := range all {
-		if strings.Contains(strings.ToLower(pi.ID), q) || strings.Contains(strings.ToLower(pi.Name), q) {
+		if idx, ok := suggOrder[pi.ID]; ok {
+			sugg[idx] = pi
+			suggFilled[idx] = true
+		} else {
+			rest = append(rest, pi)
+		}
+	}
+	var out []provider.ProviderInfo
+	for i, pi := range sugg {
+		if suggFilled[i] {
 			out = append(out, pi)
 		}
 	}
-	return out
+	return append(out, rest...)
 }
 
 func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1431,7 +1467,23 @@ func (m Model) viewConnect() string {
 		cursor
 
 	var rows []string
+	inSuggested := true // first items are suggested (if any)
 	for i, pi := range m.connectItems {
+		// Section header transitions
+		nowSugg := isSuggested(pi.ID)
+		if i == 0 {
+			if nowSugg {
+				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  ─ suggested"))
+			} else {
+				rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  ─ all providers"))
+				inSuggested = false
+			}
+		} else if inSuggested && !nowSugg {
+			inSuggested = false
+			rows = append(rows, "")
+			rows = append(rows, lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  ─ all providers"))
+		}
+
 		isSelected := i == m.connectCursor
 		isConnected := m.cfg.APIKeys[pi.ID] != ""
 
