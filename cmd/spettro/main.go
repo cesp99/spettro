@@ -1,22 +1,51 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 
-	"spettro/internal/app"
+	tea "github.com/charmbracelet/bubbletea"
+
+	"spettro/internal/config"
+	"spettro/internal/provider"
+	"spettro/internal/storage"
+	"spettro/internal/tui"
 )
 
 func main() {
-	a, err := app.New(os.Stdin, os.Stdout, os.Getwd)
+	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "startup error: %v\n", err)
-		os.Exit(1)
+		fatal("cwd error: %v", err)
 	}
 
-	if err := a.Run(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime error: %v\n", err)
-		os.Exit(1)
+	store, err := storage.New(cwd)
+	if err != nil {
+		fatal("storage error: %v", err)
 	}
+
+	cfg, err := config.LoadOrCreate()
+	if err != nil {
+		fatal("config error: %v", err)
+	}
+	keys, err := config.LoadAPIKeys()
+	if err != nil {
+		fatal("keys error: %v", err)
+	}
+	cfg.APIKeys = keys
+
+	pm := provider.NewManager()
+	m := tui.New(cwd, cfg, store, pm)
+
+	p := tea.NewProgram(m,
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	)
+	if _, err := p.Run(); err != nil {
+		fatal("runtime error: %v", err)
+	}
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
 }
