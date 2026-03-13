@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,9 +17,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
+	"spettro/internal/budget"
 	"spettro/internal/config"
 	"spettro/internal/conversation"
-	"spettro/internal/indexer"
 	"spettro/internal/provider"
 	"spettro/internal/storage"
 )
@@ -66,17 +68,18 @@ var allCommands = []commandDef{
 	{"/mode", "cycle mode"},
 	{"/approve", "execute pending plan"},
 	{"/permission", "set permission level"},
+	{"/budget", "set token budget per request  usage: /budget <n>"},
 	{"/image", "attach image to next message"},
-	{"/images", "list queued images"},
+	{"/init", "analyze codebase and write SPETTRO.md"},
 	{"/commit", "commit changes (LLM message + Spettro co-author)"},
 	{"/search", "search repo files  usage: /search [query]"},
-	{"/index", "index project files"},
-	{"/coauthor", "show co-author git trailer"},
-	{"/compact", "summarize conversation to save context"},
+	{"/compact", "summarize conversation (optionally focused)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/exit", "exit spettro"},
 }
+
+const localConnectProviderID = "__local_endpoint__"
 
 func filterCommands(query string) []commandDef {
 	if query == "" {
@@ -99,12 +102,14 @@ type tickMsg time.Time
 type agentDoneMsg struct {
 	content string
 	meta    string // hint shown below the message
+	tools   []agent.ToolTrace
 	err     error
 }
 
 type planDoneMsg struct {
-	plan string
-	err  error
+	plan  string
+	tools []agent.ToolTrace
+	err   error
 }
 
 type commitDoneMsg struct {
@@ -124,6 +129,14 @@ type quitWarningMsg struct{}
 type compactDoneMsg struct {
 	summary string
 	err     error
+}
+
+type initDoneMsg struct {
+	err error
+}
+
+type toolProgressMsg struct {
+	trace agent.ToolTrace
 }
 
 // ── setup state ──────────────────────────────────────────────────────────────
@@ -171,12 +184,17 @@ type Model struct {
 	connectItems    []provider.ProviderInfo
 	connectFilter   string
 	connectCursor   int
-	connectStep     int    // 0 = pick provider, 1 = enter key
+	connectStep     int    // 0 = pick provider, 1 = enter key/endpoint
 	connectProvider string // provider ID chosen in step 0
 
 	// command palette (shown when textarea starts with "/")
 	cmdItems  []commandDef
 	cmdCursor int
+
+	// file mentions (shown when typing @path)
+	repoFiles     []string
+	mentionItems  []string
+	mentionCursor int
 
 	// setup wizard
 	showSetup bool
@@ -200,8 +218,14 @@ type Model struct {
 	showTrust   bool
 	trustCursor int
 
-	// thinking block visibility (toggled with ctrl+o)
-	showThinking bool
+	// tool/thinking detail visibility (toggled with ctrl+o)
+	showTools bool
+
+	// live tool stream (populated while agent is running)
+	liveTools   []ToolItem
+	currentTool *ToolItem
+	toolCh      chan agent.ToolTrace
+	cancelAgent context.CancelFunc // non-nil while an agent goroutine is running
 
 	// conversation persistence
 	convID  string // current conversation ID (set on first message)
@@ -246,6 +270,8 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		favs[f] = true
 	}
 
+	repoFiles, _ := scanRepoFiles(cwd)
+
 	return Model{
 		mode:      "planning",
 		cfg:       cfg,
@@ -255,6 +281,7 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		ta:        ta,
 		spin:      sp,
 		favorites: favs,
+		repoFiles: repoFiles,
 		convDir:   conversation.ProjectDir(store.GlobalDir, cwd),
 		planner: agent.LLMPlanner{
 			ProviderManager: pm,
@@ -262,7 +289,12 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 			ModelName:       func() string { return cfg.ActiveModel },
 			CWD:             cwd,
 		},
-		coder: agent.Coder{},
+		coder: agent.LLMCoder{
+			ProviderManager: pm,
+			ProviderName:    func() string { return cfg.ActiveProvider },
+			ModelName:       func() string { return cfg.ActiveModel },
+			CWD:             cwd,
+		},
 		chatter: agent.Chatter{
 			ProviderManager: pm,
 			ProviderName:    func() string { return cfg.ActiveProvider },
@@ -336,7 +368,14 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case agentDoneMsg:
+		if !m.thinking {
+			break // already cancelled by the user
+		}
 		m.thinking = false
+		m.cancelAgent = nil
+		m.toolCh = nil
+		m.liveTools = nil
+		m.currentTool = nil
 		if msg.err != nil {
 			m.showBanner("error: "+msg.err.Error(), "error")
 		} else {
@@ -346,13 +385,21 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content:  main,
 				Thinking: thinking,
 				Meta:     msg.meta,
+				Tools:    toToolItems(msg.tools),
 				At:       time.Now(),
 			})
 		}
 		m.refreshViewport()
 
 	case planDoneMsg:
+		if !m.thinking {
+			break // already cancelled by the user
+		}
 		m.thinking = false
+		m.cancelAgent = nil
+		m.toolCh = nil
+		m.liveTools = nil
+		m.currentTool = nil
 		if msg.err != nil {
 			m.showBanner("planning error: "+msg.err.Error(), "error")
 		} else {
@@ -360,13 +407,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleAssistant,
 				Content: "Plan generated. Saved to .spettro/PLAN.md\nSwitch to coding mode (/mode) then /approve to execute.",
+				Tools:   toToolItems(msg.tools),
 				At:      time.Now(),
 			})
 		}
 		m.refreshViewport()
 
 	case commitDoneMsg:
+		if !m.thinking {
+			break
+		}
 		m.thinking = false
+		m.cancelAgent = nil
 		if msg.err != nil {
 			m.showBanner("commit error: "+msg.err.Error(), "error")
 		} else {
@@ -379,7 +431,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 
 	case searchDoneMsg:
+		if !m.thinking {
+			break
+		}
 		m.thinking = false
+		m.cancelAgent = nil
 		if msg.err != nil {
 			m.showBanner("search error: "+msg.err.Error(), "error")
 		} else {
@@ -392,11 +448,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 
 	case compactDoneMsg:
+		if !m.thinking {
+			break
+		}
 		m.thinking = false
+		m.cancelAgent = nil
 		if msg.err != nil {
 			m.showBanner("compact error: "+msg.err.Error(), "error")
 		} else {
-			m.autoSave() // save full history before compacting
+			m.autoSave()  // save full history before compacting
 			m.convID = "" // new conversation after compact
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
@@ -405,6 +465,41 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}}
 		}
 		m.refreshViewport()
+
+	case initDoneMsg:
+		if !m.thinking {
+			break
+		}
+		m.thinking = false
+		m.cancelAgent = nil
+		if msg.err != nil {
+			m.showBanner("init error: "+msg.err.Error(), "error")
+		} else {
+			m.showBanner("SPETTRO.md written", "success")
+		}
+		m.refreshViewport()
+
+	case toolProgressMsg:
+		if m.thinking {
+			t := msg.trace
+			if t.Status == "running" {
+				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
+				m.currentTool = &item
+			} else {
+				m.liveTools = append(m.liveTools, ToolItem{
+					Name:   t.Name,
+					Status: t.Status,
+					Args:   t.Args,
+					Output: t.Output,
+				})
+				m.currentTool = nil
+			}
+			if m.toolCh != nil {
+				cmds = append(cmds, waitForTool(m.toolCh))
+			}
+			m.vp.SetContent(m.renderMessages())
+			m.vp.GotoBottom()
+		}
 
 	case bannerClearMsg:
 		m.banner = ""
@@ -475,7 +570,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var taCmd tea.Cmd
 		m.ta, taCmd = m.ta.Update(msg)
 		cmds = append(cmds, taCmd)
-		m.syncCommandPalette()
+		m.syncInputSuggestions()
 
 		var vpCmd tea.Cmd
 		m.vp, vpCmd = m.vp.Update(msg)
@@ -503,17 +598,23 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "up", "ctrl+p":
-		if len(m.cmdItems) > 0 {
+		if len(m.cmdItems) > 0 || len(m.mentionItems) > 0 {
 			if m.cmdCursor > 0 {
 				m.cmdCursor--
+			}
+			if m.mentionCursor > 0 {
+				m.mentionCursor--
 			}
 			return m, nil
 		}
 
 	case "down", "ctrl+n":
-		if len(m.cmdItems) > 0 {
+		if len(m.cmdItems) > 0 || len(m.mentionItems) > 0 {
 			if m.cmdCursor < len(m.cmdItems)-1 {
 				m.cmdCursor++
+			}
+			if m.mentionCursor < len(m.mentionItems)-1 {
+				m.mentionCursor++
 			}
 			return m, nil
 		}
@@ -523,6 +624,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cmdCursor = (m.cmdCursor + 1) % len(m.cmdItems)
 			return m, nil
 		}
+		if len(m.mentionItems) > 0 {
+			m.mentionCursor = (m.mentionCursor + 1) % len(m.mentionItems)
+			return m, nil
+		}
 
 	case "shift+tab":
 		m.mode = nextMode(m.mode)
@@ -530,16 +635,12 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+o":
-		m.showThinking = !m.showThinking
+		m.showTools = !m.showTools
 		m.refreshViewport()
 		return m, nil
 
 	case "f2":
-		// Cycle to next model among connected providers
-		models := m.providers.ConnectedModels(m.cfg.APIKeys)
-		if len(models) == 0 {
-			models = m.providers.Models()
-		}
+		models := m.favoriteModels()
 		if len(models) > 0 {
 			current := -1
 			for i, mod := range models {
@@ -553,15 +654,13 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cfg.ActiveModel = next.Name
 			_ = config.Save(m.cfg)
 			m.showBanner(fmt.Sprintf("model → %s:%s", next.Provider, next.Name), "success")
+		} else {
+			m.showBanner("no favorite models — mark one with f in /models", "info")
 		}
 		return m, nil
 
 	case "shift+f2":
-		// Cycle to previous model among connected providers
-		models := m.providers.ConnectedModels(m.cfg.APIKeys)
-		if len(models) == 0 {
-			models = m.providers.Models()
-		}
+		models := m.favoriteModels()
 		if len(models) > 0 {
 			current := -1
 			for i, mod := range models {
@@ -575,6 +674,8 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cfg.ActiveModel = models[prev].Name
 			_ = config.Save(m.cfg)
 			m.showBanner(fmt.Sprintf("model → %s:%s", models[prev].Provider, models[prev].Name), "success")
+		} else {
+			m.showBanner("no favorite models — mark one with f in /models", "info")
 		}
 		return m, nil
 
@@ -582,13 +683,20 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.thinking {
 			return m, nil
 		}
-		// If command palette is open and has a selection, run that command
+		// If command palette is open, insert selection into the input first.
 		if len(m.cmdItems) > 0 {
 			chosen := m.cmdItems[m.cmdCursor].name
-			m.ta.Reset()
+			m.ta.SetValue(chosen + " ")
 			m.cmdItems = nil
 			m.cmdCursor = 0
-			return m.handleCommand(chosen)
+			m.syncInputSuggestions()
+			return m, nil
+		}
+		// File mention autocomplete: insert mention into input first.
+		if len(m.mentionItems) > 0 {
+			m = m.acceptMention()
+			m.syncInputSuggestions()
+			return m, nil
 		}
 		input := strings.TrimSpace(m.ta.Value())
 		if input == "" {
@@ -596,16 +704,29 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.ta.Reset()
 		m.cmdItems = nil
+		m.mentionItems = nil
 		if strings.HasPrefix(input, "/") {
 			return m.handleCommand(input)
 		}
 		return m.handlePrompt(input)
 
 	case "esc":
+		if m.thinking {
+			m.stopAgent()
+			m.showBanner("stopped", "warn")
+			m.refreshViewport()
+			return m, nil
+		}
 		if len(m.cmdItems) > 0 {
 			m.ta.Reset()
 			m.cmdItems = nil
 			m.cmdCursor = 0
+			return m, nil
+		}
+		if len(m.mentionItems) > 0 {
+			m.mentionItems = nil
+			m.mentionCursor = 0
+			m.syncInputSuggestions()
 			return m, nil
 		}
 		m.ta.Reset()
@@ -615,6 +736,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var taCmd tea.Cmd
 	m.ta, taCmd = m.ta.Update(msg)
+	m.syncInputSuggestions()
 	return m, taCmd
 }
 
@@ -677,13 +799,30 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				m.showBanner("invalid permission: use yolo, restricted, or ask-first", "error")
 			}
 		}
+	case "/budget":
+		if len(fields) < 2 {
+			current := m.cfg.TokenBudget
+			if current == 0 {
+				current = budget.DefaultMax
+			}
+			m.showBanner(fmt.Sprintf("token budget: %d  usage: /budget <n>", current), "info")
+		} else {
+			var n int
+			if _, err := fmt.Sscanf(fields[1], "%d", &n); err != nil || n < 1000 {
+				m.showBanner("usage: /budget <n>  (minimum 1000)", "error")
+			} else {
+				m.cfg.TokenBudget = n
+				_ = config.Save(m.cfg)
+				m.showBanner(fmt.Sprintf("token budget set to %d", n), "success")
+			}
+		}
 	case "/approve":
 		if m.pendingPlan == "" {
 			m.showBanner("no pending plan — run a planning prompt first", "info")
 		} else if m.mode != "coding" {
 			m.showBanner("switch to coding mode first (shift+tab)", "info")
 		} else {
-			return m.runCoder(m.pendingPlan, true)
+			return m.runCoder(m.pendingPlan, true, nil)
 		}
 	case "/image":
 		if len(fields) < 2 {
@@ -700,24 +839,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				m.showBanner("image queued for next message", "success")
 			}
 		}
-	case "/images":
-		if len(m.pendingImgs) == 0 {
-			m.pushSystemMsg("no queued images")
-		} else {
-			m.pushSystemMsg("queued images:\n" + strings.Join(m.pendingImgs, "\n"))
-		}
-	case "/index":
-		snap, err := indexer.Build(m.cwd)
-		if err != nil {
-			m.showBanner("index error: "+err.Error(), "error")
-		} else {
-			dst := filepath.Join(m.store.ProjectDir, "index.json")
-			if err := indexer.WriteJSON(snap, dst); err != nil {
-				m.showBanner("index write error: "+err.Error(), "error")
-			} else {
-				m.showBanner(fmt.Sprintf("indexed %d files → .spettro/index.json", len(snap.Entries)), "success")
-			}
-		}
+	case "/init":
+		return m.runInit()
 	case "/commit":
 		return m.runCommitter()
 	case "/search":
@@ -726,10 +849,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			query = strings.Join(fields[1:], " ")
 		}
 		return m.runSearcher(query)
-	case "/coauthor":
-		m.pushSystemMsg("spettro co-author trailer:\n  " + coAuthorInfo + "\n\nThis trailer is appended automatically by /commit.")
 	case "/compact":
-		return m.runCompact()
+		focus := strings.TrimSpace(strings.TrimPrefix(input, cmd))
+		return m.runCompact(focus)
 	case "/clear":
 		m.autoSave()
 		m.messages = nil
@@ -755,6 +877,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 
 // handlePrompt dispatches to the correct agent based on mode.
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
+	mentionedFiles := m.extractMentionedFiles(input)
+	prompt := injectMentionGuidance(input, mentionedFiles)
+
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleUser,
 		Content: input,
@@ -764,18 +889,24 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 
 	switch m.mode {
 	case "planning":
-		return m.runPlanner(input)
+		return m.runPlanner(prompt, mentionedFiles)
 	case "coding":
-		return m.runCoder(input, false)
+		return m.runCoder(prompt, false, mentionedFiles)
 	case "chat":
-		return m.runChatter(input)
+		return m.runChatter(prompt)
 	}
 	return m, nil
 }
 
-// runPlanner starts an async planning call.
-func (m Model) runPlanner(prompt string) (tea.Model, tea.Cmd) {
+// runPlanner starts an async planning call with live tool streaming.
+func (m Model) runPlanner(prompt string, mentionedFiles []string) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.liveTools = nil
+	m.currentTool = nil
+	toolCh := make(chan agent.ToolTrace, 64)
+	m.toolCh = toolCh
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
 	store := m.store
 	cwd := m.cwd
 	pm := m.providers
@@ -786,38 +917,63 @@ func (m Model) runPlanner(prompt string) (tea.Model, tea.Cmd) {
 		ProviderName:    func() string { return providerName },
 		ModelName:       func() string { return modelName },
 		CWD:             cwd,
+		MaxTokens:       m.cfg.TokenBudget,
+		RequiredReads:   mentionedFiles,
+		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
 	}
 	return m, tea.Batch(
 		m.spin.Tick,
+		waitForTool(toolCh),
 		func() tea.Msg {
-			plan, err := planner.Plan(context.Background(), prompt)
+			plan, err := planner.Plan(ctx, prompt)
+			close(toolCh)
 			if err != nil {
 				return planDoneMsg{err: err}
 			}
-			_ = store.WriteProjectFile("PLAN.md", plan)
-			return planDoneMsg{plan: plan}
+			_ = store.WriteProjectFile("PLAN.md", plan.Content)
+			return planDoneMsg{plan: plan.Content, tools: plan.Tools}
 		},
 	)
 }
 
-// runCoder starts an async coding call.
-func (m Model) runCoder(input string, approved bool) (tea.Model, tea.Cmd) {
+// runCoder starts an async coding call with live tool streaming.
+func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.liveTools = nil
+	m.currentTool = nil
+	toolCh := make(chan agent.ToolTrace, 64)
+	m.toolCh = toolCh
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
 	store := m.store
-	coder := m.coder
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
+	coder := agent.LLMCoder{
+		ProviderManager: pm,
+		ProviderName:    func() string { return providerName },
+		ModelName:       func() string { return modelName },
+		CWD:             m.cwd,
+		MaxTokens:       m.cfg.TokenBudget,
+		RequiredReads:   mentionedFiles,
+		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
+	}
 	perm := m.cfg.Permission
 	return m, tea.Batch(
 		m.spin.Tick,
+		waitForTool(toolCh),
 		func() tea.Msg {
 			if perm == config.PermissionAskFirst && !approved {
+				close(toolCh)
 				return agentDoneMsg{content: "ask-first mode: generate a plan then use /approve"}
 			}
-			result, err := coder.Execute(context.Background(), input, perm, approved)
+			result, err := coder.Execute(ctx, input, perm, approved)
+			close(toolCh)
 			if err != nil {
 				return agentDoneMsg{err: err}
 			}
-			_ = store.AppendProjectFile("AGENT.md", result+"\n\n"+coAuthorInfo+"\n")
-			return agentDoneMsg{content: result}
+			_ = store.AppendProjectFile("AGENT.md", result.Content+"\n\n"+coAuthorInfo+"\n")
+			return agentDoneMsg{content: result.Content, tools: result.Tools}
 		},
 	)
 }
@@ -827,13 +983,15 @@ func (m Model) runChatter(input string) (tea.Model, tea.Cmd) {
 	m.thinking = true
 	imgs := append([]string(nil), m.pendingImgs...)
 	m.pendingImgs = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
-			resp, err := pm.Send(context.Background(), providerName, modelName, provider.Request{
+			resp, err := pm.Send(ctx, providerName, modelName, provider.Request{
 				Prompt: input,
 				Images: imgs,
 			})
@@ -842,7 +1000,7 @@ func (m Model) runChatter(input string) (tea.Model, tea.Cmd) {
 			}
 			return agentDoneMsg{
 				content: resp.Content,
-				meta:    "ctrl+o for details",
+				meta:    "",
 			}
 		},
 	)
@@ -851,6 +1009,8 @@ func (m Model) runChatter(input string) (tea.Model, tea.Cmd) {
 // runCommitter starts an async commit using the LLMCommitter.
 func (m Model) runCommitter() (tea.Model, tea.Cmd) {
 	m.thinking = true
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
 	cwd := m.cwd
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
@@ -863,7 +1023,7 @@ func (m Model) runCommitter() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
-			msg, err := committer.Commit(context.Background(), cwd)
+			msg, err := committer.Commit(ctx, cwd)
 			return commitDoneMsg{commitMsg: msg, err: err}
 		},
 	)
@@ -872,19 +1032,21 @@ func (m Model) runCommitter() (tea.Model, tea.Cmd) {
 // runSearcher starts an async repo search.
 func (m Model) runSearcher(query string) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
 	searcher := m.searcher
 	cwd := m.cwd
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
-			result, err := searcher.Search(context.Background(), cwd, query)
+			result, err := searcher.Search(ctx, cwd, query)
 			return searchDoneMsg{result: result, err: err}
 		},
 	)
 }
 
 // runCompact sends the conversation transcript to the LLM and replaces messages with a summary.
-func (m Model) runCompact() (tea.Model, tea.Cmd) {
+func (m Model) runCompact(focus string) (tea.Model, tea.Cmd) {
 	if len(m.messages) == 0 {
 		m.showBanner("nothing to compact", "info")
 		return m, nil
@@ -905,16 +1067,66 @@ func (m Model) runCompact() (tea.Model, tea.Cmd) {
 		sb.WriteString("\n\n")
 	}
 	transcript := sb.String()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
 	return m, tea.Batch(
 		m.spin.Tick,
 		func() tea.Msg {
-			resp, err := pm.Send(context.Background(), providerName, modelName, provider.Request{
-				Prompt: "Summarize the following conversation concisely, preserving all key decisions, facts, code snippets, and action items. Output only the summary, no preamble.\n\n" + transcript,
+			compactPrompt := "Summarize the following conversation concisely, preserving all key decisions, facts, code snippets, and action items. Output only the summary, no preamble."
+			if focus != "" {
+				compactPrompt += " Focus especially on: " + focus + "."
+			}
+			resp, err := pm.Send(ctx, providerName, modelName, provider.Request{
+				Prompt: compactPrompt + "\n\n" + transcript,
 			})
 			if err != nil {
 				return compactDoneMsg{err: err}
 			}
 			return compactDoneMsg{summary: resp.Content}
+		},
+	)
+}
+
+// runInit runs the /init agent: explores the codebase and writes SPETTRO.md.
+func (m Model) runInit() (tea.Model, tea.Cmd) {
+	initPromptPath := filepath.Join(m.cwd, "agents/init.md")
+	raw, err := os.ReadFile(initPromptPath)
+	if err != nil {
+		m.showBanner("agents/init.md not found", "error")
+		return m, nil
+	}
+	initPrompt := strings.TrimSpace(string(raw))
+	if initPrompt == "" {
+		m.showBanner("agents/init.md is empty", "error")
+		return m, nil
+	}
+
+	m.thinking = true
+	m.liveTools = nil
+	m.currentTool = nil
+	toolCh := make(chan agent.ToolTrace, 64)
+	m.toolCh = toolCh
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelAgent = cancel
+	cwd := m.cwd
+	pm := m.providers
+	providerName := m.cfg.ActiveProvider
+	modelName := m.cfg.ActiveModel
+	coder := agent.LLMCoder{
+		ProviderManager: pm,
+		ProviderName:    func() string { return providerName },
+		ModelName:       func() string { return modelName },
+		CWD:             cwd,
+		MaxTokens:       m.cfg.TokenBudget,
+		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
+	}
+	return m, tea.Batch(
+		m.spin.Tick,
+		waitForTool(toolCh),
+		func() tea.Msg {
+			_, err := coder.Execute(ctx, initPrompt, config.PermissionYOLO, true)
+			close(toolCh)
+			return initDoneMsg{err: err}
 		},
 	)
 }
@@ -1049,7 +1261,7 @@ func (m Model) openConnect() Model {
 }
 
 // suggestedProviderIDs are pinned to the top of the connect dialog.
-var suggestedProviderIDs = []string{"anthropic", "openai", "mistral", "x-ai", "zai"}
+var suggestedProviderIDs = []string{localConnectProviderID, "anthropic", "openai", "mistral", "x-ai", "zai"}
 
 func isSuggested(id string) bool {
 	for _, s := range suggestedProviderIDs {
@@ -1062,6 +1274,10 @@ func isSuggested(id string) bool {
 
 func (m Model) filterProviders(filter string) []provider.ProviderInfo {
 	all := m.providers.AllProviderInfos()
+	all = append([]provider.ProviderInfo{{
+		ID:   localConnectProviderID,
+		Name: "Local endpoint (LM Studio/Ollama)",
+	}}, all...)
 
 	if filter != "" {
 		q := strings.ToLower(filter)
@@ -1097,6 +1313,19 @@ func (m Model) filterProviders(filter string) []provider.ProviderInfo {
 		}
 	}
 	return append(out, rest...)
+}
+
+func (m Model) localEndpointConnected() bool {
+	return len(m.cfg.LocalEndpoints) > 0
+}
+
+func (m Model) hasLocalEndpoint(endpoint string) bool {
+	for _, existing := range m.cfg.LocalEndpoints {
+		if existing == endpoint {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1141,6 +1370,29 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.connectStep = 0
 			m.ta.Reset()
 		case "enter":
+			if m.connectProvider == localConnectProviderID {
+				endpoint := strings.TrimSpace(m.ta.Value())
+				if endpoint == "" {
+					m.showBanner("endpoint cannot be empty", "error")
+					return m, nil
+				}
+				localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
+				if err != nil {
+					m.showBanner("local endpoint error: "+err.Error(), "error")
+					return m, nil
+				}
+				m.providers.AddLocalModels(localModels)
+				normalized := localModels[0].Provider
+				if !m.hasLocalEndpoint(normalized) {
+					m.cfg.LocalEndpoints = append(m.cfg.LocalEndpoints, normalized)
+				}
+				_ = config.Save(m.cfg)
+				m.showConnect = false
+				m.ta.Reset()
+				m.ta.Focus()
+				m.showBanner(fmt.Sprintf("connected %s ✓", provider.LocalProviderName(normalized)), "success")
+				return m, nil
+			}
 			key := strings.TrimSpace(m.ta.Value())
 			if key == "" {
 				m.showBanner("key cannot be empty", "error")
@@ -1210,6 +1462,17 @@ func (m Model) filterModels(prefix string) []provider.Model {
 	return out
 }
 
+func (m Model) favoriteModels() []provider.Model {
+	all := m.providers.ConnectedModels(m.cfg.APIKeys)
+	out := make([]provider.Model, 0, len(all))
+	for _, mod := range all {
+		if m.favorites[mod.Provider+":"+mod.Name] {
+			out = append(out, mod)
+		}
+	}
+	return out
+}
+
 // saveFavorites persists the favorites set back to config.
 func (m *Model) saveFavorites() {
 	favList := make([]string, 0, len(m.favorites))
@@ -1222,8 +1485,8 @@ func (m *Model) saveFavorites() {
 	_ = config.Save(m.cfg)
 }
 
-// syncCommandPalette refreshes the command palette whenever the textarea changes.
-func (m *Model) syncCommandPalette() {
+// syncInputSuggestions refreshes command or file-mention suggestions.
+func (m *Model) syncInputSuggestions() {
 	val := m.ta.Value()
 	if strings.HasPrefix(val, "/") {
 		query := val[1:] // text after the /
@@ -1231,10 +1494,159 @@ func (m *Model) syncCommandPalette() {
 		if m.cmdCursor >= len(m.cmdItems) {
 			m.cmdCursor = 0
 		}
-	} else {
-		m.cmdItems = nil
-		m.cmdCursor = 0
+		m.mentionItems = nil
+		m.mentionCursor = 0
+		return
 	}
+
+	m.cmdItems = nil
+	m.cmdCursor = 0
+
+	query, ok := activeMentionQuery(val)
+	if !ok {
+		m.mentionItems = nil
+		m.mentionCursor = 0
+		return
+	}
+
+	m.mentionItems = filterMentionFiles(m.repoFiles, query, 8)
+	if m.mentionCursor >= len(m.mentionItems) {
+		m.mentionCursor = 0
+	}
+}
+
+func activeMentionQuery(input string) (string, bool) {
+	lastSpace := strings.LastIndexAny(input, " \n\t")
+	token := input
+	if lastSpace >= 0 {
+		token = input[lastSpace+1:]
+	}
+	if !strings.HasPrefix(token, "@") {
+		return "", false
+	}
+	return strings.TrimPrefix(token, "@"), true
+}
+
+func filterMentionFiles(files []string, query string, limit int) []string {
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]string, 0, limit)
+	for _, f := range files {
+		if q == "" || strings.Contains(strings.ToLower(f), q) {
+			out = append(out, f)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (m Model) acceptMention() Model {
+	if len(m.mentionItems) == 0 {
+		return m
+	}
+	chosen := m.mentionItems[m.mentionCursor]
+	current := m.ta.Value()
+	lastSpace := strings.LastIndexAny(current, " \n\t")
+	prefix := ""
+	if lastSpace >= 0 {
+		prefix = current[:lastSpace+1]
+	}
+	m.ta.SetValue(prefix + "@" + chosen + " ")
+	m.mentionItems = nil
+	m.mentionCursor = 0
+	return m
+}
+
+func scanRepoFiles(root string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".spettro":
+				return filepath.SkipDir
+			}
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func (m Model) extractMentionedFiles(input string) []string {
+	seen := map[string]struct{}{}
+	for _, part := range strings.Fields(input) {
+		if !strings.HasPrefix(part, "@") {
+			continue
+		}
+		p := strings.TrimPrefix(part, "@")
+		p = strings.TrimSpace(strings.Trim(p, `"'.,;:!?()[]{}<>`))
+		if p == "" {
+			continue
+		}
+		rel, ok := resolveMentionPath(m.cwd, p)
+		if !ok {
+			continue
+		}
+		seen[rel] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for rel := range seen {
+		out = append(out, rel)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func resolveMentionPath(cwd, p string) (string, bool) {
+	var abs string
+	if filepath.IsAbs(p) {
+		abs = filepath.Clean(p)
+	} else {
+		abs = filepath.Clean(filepath.Join(cwd, p))
+	}
+	rel, err := filepath.Rel(cwd, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func injectMentionGuidance(input string, mentionedFiles []string) string {
+	if len(mentionedFiles) == 0 {
+		return input
+	}
+	var sb strings.Builder
+	sb.WriteString(input)
+	sb.WriteString("\n\nReferenced files from @mentions:\n")
+	for _, p := range mentionedFiles {
+		sb.WriteString("- ")
+		sb.WriteString(p)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("Inspect these files before making decisions.")
+	return sb.String()
 }
 
 func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1389,32 +1801,31 @@ func (m Model) viewHeader() string {
 			break
 		}
 	}
-	modelStr := styleMuted.Render(modelLabel + "  " + provLabel)
-	permStr := lipgloss.NewStyle().Foreground(mc).Render(string(m.cfg.Permission))
-	right := modelStr + "  " + permStr
-
-	// Layout using widths
-	totalWidth := m.width
+	permText := string(m.cfg.Permission)
 	logoW := lipgloss.Width(logo)
-	rightW := lipgloss.Width(right)
-	centerW := lipgloss.Width(center)
-	padLeft := (totalWidth/2 - centerW/2) - logoW
-	if padLeft < 1 {
-		padLeft = 1
+	permW := lipgloss.Width(permText)
+	maxMetaWidth := m.width - logoW - permW - 8
+	if maxMetaWidth < 0 {
+		maxMetaWidth = 0
 	}
-	padRight := totalWidth - logoW - padLeft - centerW - rightW
-	if padRight < 1 {
-		padRight = 1
+	metaText := truncateLabel(modelLabel+"  "+provLabel, maxMetaWidth)
+	right := lipgloss.NewStyle().Foreground(mc).Render(permText)
+	if metaText != "" {
+		right = styleMuted.Render(metaText) + "  " + right
 	}
 
-	row := logo +
-		strings.Repeat(" ", padLeft) +
-		center +
-		strings.Repeat(" ", padRight) +
-		right
+	rightW := lipgloss.Width(right)
+	availableCenter := m.width - logoW - rightW - 2
+	if availableCenter < 0 {
+		availableCenter = 0
+	}
+	centerBlock := lipgloss.PlaceHorizontal(availableCenter, lipgloss.Center, center)
+
+	row := logo + " " + centerBlock + " " + right
 
 	return lipgloss.NewStyle().
 		Width(m.width).
+		MaxWidth(m.width).
 		Background(lipgloss.Color("#0D0D0D")).
 		Render(row)
 }
@@ -1444,12 +1855,39 @@ func (m Model) viewCommandPalette() string {
 		}
 		rows = append(rows, nameStyle.Render(fmt.Sprintf("%-14s", cmd.name))+"  "+descStyle.Render(cmd.desc))
 	}
+	body := strings.Join(rows, "\n")
+	hint := styleMuted.Render("enter inserts  enter again runs")
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
 		Width(m.width - 4).
 		PaddingLeft(2).PaddingRight(2).
-		Render(strings.Join(rows, "\n"))
+		Render(body + "\n\n" + hint)
+}
+
+func (m Model) viewMentionPalette() string {
+	if len(m.mentionItems) == 0 {
+		return ""
+	}
+	mc := modeColor(m.mode)
+	var rows []string
+	for i, item := range m.mentionItems {
+		style := lipgloss.NewStyle().Foreground(colorMuted)
+		prefix := "  "
+		if i == m.mentionCursor {
+			prefix = lipgloss.NewStyle().Foreground(mc).Bold(true).Render("› ")
+			style = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+		}
+		rows = append(rows, prefix+style.Render(item))
+	}
+	title := lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("available files")
+	hint := styleMuted.Render("↑↓ navigate  enter inserts mention")
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(colorBorder).
+		Width(m.width - 4).
+		PaddingLeft(2).PaddingRight(2).
+		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
 
 // viewInput renders the input area with prompt prefix.
@@ -1489,21 +1927,27 @@ func (m Model) viewInput() string {
 	inputBox := boxStyle.Render(inner)
 
 	palette := m.viewCommandPalette()
-	if palette == "" {
+	mentionPalette := m.viewMentionPalette()
+	if palette == "" && mentionPalette == "" {
 		return inputBox
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, palette, inputBox)
+	var blocks []string
+	if palette != "" {
+		blocks = append(blocks, palette)
+	}
+	if mentionPalette != "" {
+		blocks = append(blocks, mentionPalette)
+	}
+	blocks = append(blocks, inputBox)
+	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
 }
 
 // viewStatusBar renders the bottom help bar.
 func (m Model) viewStatusBar() string {
 	parts := []string{
 		styleMuted.Render("shift+tab: mode"),
-		styleMuted.Render("f2: cycle model"),
-		styleMuted.Render("/models: selector"),
-		styleMuted.Render("/connect: providers"),
+		styleMuted.Render("f2: model"),
 		styleMuted.Render("/help"),
-		styleMuted.Render("ctrl+c ×2: quit"),
 	}
 	bar := strings.Join(parts, styleDim.Render("  ·  "))
 	return lipgloss.NewStyle().
@@ -1676,6 +2120,11 @@ func (m Model) viewConnect() string {
 		// ── API key entry ─────────────────────────────────────────────────────
 		provName := m.connectProvider
 		envHint := ""
+		prompt := "paste your API key and press enter:"
+		if m.connectProvider == localConnectProviderID {
+			provName = "Local endpoint"
+			prompt = "enter local endpoint (e.g. localhost:1234) and press enter:"
+		}
 		for _, pi := range m.providers.AllProviderInfos() {
 			if pi.ID == m.connectProvider {
 				if pi.Name != "" {
@@ -1693,11 +2142,11 @@ func (m Model) viewConnect() string {
 		inner := lipgloss.JoinVertical(lipgloss.Left,
 			title, "",
 			envHint,
-			styleMuted.Render("paste your API key and press enter:"),
+			styleMuted.Render(prompt),
 			"",
 			m.ta.View(),
 			"",
-			styleMuted.Render("esc: back  ctrl+c: cancel"),
+			styleMuted.Render("esc: back"),
 		)
 		dialog := lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
@@ -1741,6 +2190,9 @@ func (m Model) viewConnect() string {
 
 		isSelected := i == m.connectCursor
 		isConnected := m.cfg.APIKeys[pi.ID] != ""
+		if pi.ID == localConnectProviderID {
+			isConnected = m.localEndpointConnected()
+		}
 
 		name := pi.Name
 		if name == "" {
@@ -1809,6 +2261,18 @@ func (m Model) viewConnect() string {
 
 // ── viewport helpers ──────────────────────────────────────────────────────────
 
+// stopAgent cancels any running agent goroutine and clears all live-tool state.
+func (m *Model) stopAgent() {
+	if m.cancelAgent != nil {
+		m.cancelAgent()
+		m.cancelAgent = nil
+	}
+	m.thinking = false
+	m.toolCh = nil
+	m.liveTools = nil
+	m.currentTool = nil
+}
+
 func (m *Model) pushSystemMsg(content string) {
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleSystem,
@@ -1876,17 +2340,23 @@ func (m Model) renderMessages() string {
 			parts = append(parts, prefix+text)
 
 		case RoleAssistant:
-			label := lipgloss.NewStyle().Foreground(mc).Render("  ◈ ")
+			bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
 			body := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
-			entry := label + "\n" + body
-			if m.showThinking && msg.Thinking != "" {
+			var entryLines []string
+			if strings.TrimSpace(msg.Content) != "" {
+				entryLines = append(entryLines, bullet+" "+body)
+			}
+			if len(msg.Tools) > 0 {
+				entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
+			}
+			if m.showTools && msg.Thinking != "" {
 				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
-				entry += "\n" + thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘")
+				entryLines = append(entryLines, thinkStyle.Render("  ┌─ thinking ─┐\n"+indent(msg.Thinking, "  │ ")+"\n  └────────────┘"))
 			}
 			if msg.Meta != "" {
-				entry += "\n" + styleMuted.Render("  "+msg.Meta)
+				entryLines = append(entryLines, styleMuted.Render("  "+msg.Meta))
 			}
-			parts = append(parts, entry)
+			parts = append(parts, strings.Join(entryLines, "\n"))
 
 		case RoleSystem:
 			s := lipgloss.NewStyle().
@@ -1898,6 +2368,30 @@ func (m Model) renderMessages() string {
 		}
 	}
 
+	// Live tool activity shown at the bottom while the agent is running
+	if m.thinking && (len(m.liveTools) > 0 || m.currentTool != nil) {
+		bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
+		var liveLines []string
+		for _, t := range m.liveTools {
+			label := formatToolLabel(t.Name, t.Args)
+			suffix := lipgloss.NewStyle().Foreground(colorSuccess).Render(" ✓")
+			if t.Status == "error" {
+				suffix = lipgloss.NewStyle().Foreground(colorError).Render(" ✗")
+			}
+			liveLines = append(liveLines, bullet+" "+styleMuted.Render(label)+suffix)
+		}
+		if m.currentTool != nil {
+			label := formatRunningLabel(m.currentTool.Name, m.currentTool.Args)
+			liveLines = append(liveLines, bullet+" "+styleMuted.Render(label)+" "+m.spin.View())
+			if p := extractToolPath(m.currentTool.Name, m.currentTool.Args); p != "" {
+				liveLines = append(liveLines, styleMuted.Render("    ⎿  "+p))
+			}
+		}
+		if len(liveLines) > 0 {
+			parts = append(parts, strings.Join(liveLines, "\n"))
+		}
+	}
+
 	return strings.Join(parts, "\n\n")
 }
 
@@ -1906,7 +2400,7 @@ func (m Model) renderMessages() string {
 func (m Model) recalcLayout() Model {
 	eyesH := len(eyesActing) // 9 lines
 	headerH := 1
-	sepH := 2    // two separators
+	sepH := 2 // two separators
 	statusH := 1
 
 	// Input box: border top(1) + label(1) + textarea(3) + border bottom(1) = 6 base
@@ -1917,9 +2411,13 @@ func (m Model) recalcLayout() Model {
 	if m.banner != "" {
 		inputH++ // banner line
 	}
-	// Command palette above input box: border(2) + items
+	// Command palette above input box: border(2) + title/hint(2) + items
 	if len(m.cmdItems) > 0 {
-		inputH += 2 + len(m.cmdItems)
+		inputH += 4 + len(m.cmdItems)
+	}
+	// Mention palette above input box: border(2) + title/hint(3) + items
+	if len(m.mentionItems) > 0 {
+		inputH += 5 + len(m.mentionItems)
 	}
 
 	fixed := headerH + eyesH + sepH + inputH + statusH
@@ -2184,6 +2682,240 @@ func stripThinking(content string) (main, thinking string) {
 	return strings.TrimSpace(sb.String()), strings.TrimSpace(tb.String())
 }
 
+// waitForTool returns a tea.Cmd that blocks until a tool trace arrives on ch.
+func waitForTool(ch chan agent.ToolTrace) tea.Cmd {
+	return func() tea.Msg {
+		t, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return toolProgressMsg{trace: t}
+	}
+}
+
+// formatToolLabel returns a human-readable label for a completed tool call.
+func formatToolLabel(name, argsJSON string) string {
+	switch name {
+	case "file-read":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
+			return "Read " + args.Path
+		}
+		return "Read file"
+	case "file-write":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
+			return "Write " + args.Path
+		}
+		return "Write file"
+	case "repo-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
+			q := args.Query
+			if len(q) > 50 {
+				q = q[:47] + "..."
+			}
+			return fmt.Sprintf("Search %q", q)
+		}
+		return "Search"
+	case "shell-exec":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
+			cmd := args.Command
+			if len(cmd) > 60 {
+				cmd = cmd[:57] + "..."
+			}
+			return "$ " + cmd
+		}
+		return "Run command"
+	}
+	return name
+}
+
+// formatRunningLabel returns the in-progress version of the tool label.
+func formatRunningLabel(name, argsJSON string) string {
+	switch name {
+	case "file-read":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
+			return "Reading " + args.Path + "…"
+		}
+		return "Reading…"
+	case "file-write":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
+			return "Writing " + args.Path + "…"
+		}
+		return "Writing…"
+	case "repo-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
+			q := args.Query
+			if len(q) > 50 {
+				q = q[:47] + "..."
+			}
+			return fmt.Sprintf("Searching %q…", q)
+		}
+		return "Searching…"
+	case "shell-exec":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
+			cmd := args.Command
+			if len(cmd) > 60 {
+				cmd = cmd[:57] + "..."
+			}
+			return "Running $ " + cmd + "…"
+		}
+		return "Running…"
+	}
+	return name + "…"
+}
+
+// extractToolPath returns the primary file path for path-based tools.
+func extractToolPath(name, argsJSON string) string {
+	switch name {
+	case "file-read", "file-write":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil {
+			return args.Path
+		}
+	}
+	return ""
+}
+
+// toolActionVerb returns the action verb for a tool ("Read", "Write", etc.).
+func toolActionVerb(name string) string {
+	switch name {
+	case "file-read":
+		return "Read"
+	case "file-write":
+		return "Write"
+	case "repo-search":
+		return "Search"
+	case "shell-exec":
+		return "Run"
+	}
+	return name
+}
+
+// toolNounCount returns a count noun phrase like "4 files" or "2 searches".
+func toolNounCount(name string, count int) string {
+	switch name {
+	case "file-read", "file-write":
+		if count == 1 {
+			return "1 file"
+		}
+		return fmt.Sprintf("%d files", count)
+	case "repo-search":
+		if count == 1 {
+			return "1 search"
+		}
+		return fmt.Sprintf("%d searches", count)
+	case "shell-exec":
+		if count == 1 {
+			return "1 command"
+		}
+		return fmt.Sprintf("%d commands", count)
+	}
+	if count == 1 {
+		return "1 call"
+	}
+	return fmt.Sprintf("%d calls", count)
+}
+
+// renderToolGroups renders tool traces grouped by consecutive same-type tools.
+func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
+	var lines []string
+
+	i := 0
+	for i < len(tools) {
+		// Find consecutive same-name tools
+		j := i
+		for j < len(tools) && tools[j].Name == tools[i].Name {
+			j++
+		}
+		group := tools[i:j]
+		count := len(group)
+		name := group[0].Name
+
+		if count == 1 {
+			label := formatToolLabel(name, group[0].Args)
+			if group[0].Status == "error" {
+				label = lipgloss.NewStyle().Foreground(colorError).Render(label)
+			} else {
+				label = styleMuted.Render(label)
+			}
+			lines = append(lines, bullet+" "+label)
+			if p := extractToolPath(name, group[0].Args); p != "" && showTools {
+				lines = append(lines, styleMuted.Render("    ⎿  "+p))
+			}
+		} else {
+			noun := toolNounCount(name, count)
+			label := fmt.Sprintf("%s %s", toolActionVerb(name), noun)
+			if !showTools {
+				label += styleMuted.Render(" (ctrl+o to expand)")
+			}
+			lines = append(lines, bullet+" "+styleMuted.Render(label))
+			if showTools {
+				for _, gt := range group {
+					var detail string
+					if p := extractToolPath(gt.Name, gt.Args); p != "" {
+						icon := "✓"
+						if gt.Status == "error" {
+							icon = "✗"
+						}
+						detail = fmt.Sprintf("    ⎿  %s %s", p, icon)
+					} else {
+						detail = "    ⎿  " + formatToolLabel(gt.Name, gt.Args)
+					}
+					lines = append(lines, styleMuted.Render(detail))
+				}
+			}
+		}
+
+		i = j
+	}
+	return strings.Join(lines, "\n")
+}
+
+func toToolItems(traces []agent.ToolTrace) []ToolItem {
+	if len(traces) == 0 {
+		return nil
+	}
+	out := make([]ToolItem, 0, len(traces))
+	for _, t := range traces {
+		out = append(out, ToolItem{
+			Name:   t.Name,
+			Status: t.Status,
+			Args:   t.Args,
+			Output: t.Output,
+		})
+	}
+	return out
+}
+
 // indent prefixes each line of s with the given prefix string.
 func indent(s, prefix string) string {
 	lines := strings.Split(s, "\n")
@@ -2191,6 +2923,20 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+func truncateLabel(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 1 {
+		return string(r[:max])
+	}
+	return string(r[:max-1]) + "…"
 }
 
 func nextMode(mode string) string {
@@ -2222,21 +2968,21 @@ const helpText = `commands:
   /setup         run setup wizard
   /models        open model selector (connected providers only)
   /models p:m    set model directly
-  /connect       connect a provider (shows all available providers)
+  /connect       connect a provider or local endpoint
   /permission    set permission: yolo | restricted | ask-first
   /approve       approve and execute pending plan (coding mode)
   /image <path>  queue image for next chat message
   /images        list queued images
   /index         index project files → .spettro/index.json
   /coauthor      show co-author info for git commits
-  /compact       summarize conversation to save context
+  /compact [x]   summarize conversation (optional focus instruction)
   /clear         clear conversation history (auto-saves first)
   /resume        resume a previous saved conversation
 
 keys:
   shift+tab      cycle mode (planning → coding → chat)
-  f2             cycle to next model
-  shift+f2       cycle to previous model
+  f2             cycle to next favorite model
+  shift+f2       cycle to previous favorite model
 
 in model selector:
   f              toggle favorite (★) for highlighted model

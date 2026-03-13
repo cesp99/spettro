@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -46,6 +47,13 @@ func main() {
 	// the background – exactly like opencode's ModelsDev pattern.
 	if cat, err := models.Load(); err == nil {
 		pm.SetCatalog(cat)
+	}
+	for _, endpoint := range cfg.LocalEndpoints {
+		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
+		if err != nil {
+			continue
+		}
+		pm.AddLocalModels(localModels)
 	}
 	models.RefreshBackground(pm.SetCatalog)
 

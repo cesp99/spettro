@@ -5,21 +5,49 @@ import (
 	"fmt"
 	"strings"
 
-	"spettro/internal/budget"
 	"spettro/internal/provider"
 )
 
-const planSystemPrompt = `You are a software architect and planning agent.
-Given a task description, create a detailed, actionable implementation plan.
+const planSystemPrompt = `You are a software planning agent. Explore the repository thoroughly with tools, then produce a precise implementation plan.
 
-Format your response as a markdown document with:
-- ## Objective — one-sentence summary of what needs to be done
-- ## Analysis — what must be understood before coding starts
-- ## Steps — numbered list of concrete steps, each specifying file paths and what to change
-- ## Notes — edge cases, gotchas, or follow-up work
+Every response must be exactly one of:
 
-Be specific about file names, function signatures, and data structures.
-Do not write implementation code — only plan.`
+A) One tool call:
+TOOL_CALL {"tool":"<name>","args":{...}}
+
+B) The final plan (only after you have read all relevant files):
+FINAL
+<plan in markdown>
+
+Rules:
+- ONE tool call per response. Never two TOOL_CALL lines.
+- Never write TOOL_CALL inside the FINAL block.
+- No reasoning text, no filler before TOOL_CALL or FINAL.
+- FINAL is mandatory — always end with a FINAL block.
+- Do not reference file paths or function names you have not verified with tools.
+
+Plan format (inside FINAL):
+
+## Context
+Why this change is needed.
+
+## Current state
+Specific files, exported types, function signatures. No invented names.
+
+## Proposed changes
+Numbered list: each item has the exact file path and what to change.
+
+## Reuse
+Existing utilities or patterns to reuse, with file paths.
+
+## Validation
+Exact commands to verify: go build ./..., go test ./..., manual checks.
+
+## Critical files
+3-5 most important files for this change.
+
+## Risks
+Edge cases, breaking changes, things to watch out for.`
 
 // LLMPlanner uses the active provider to generate an implementation plan.
 type LLMPlanner struct {
@@ -27,35 +55,49 @@ type LLMPlanner struct {
 	ProviderName    func() string
 	ModelName       func() string
 	CWD             string
+	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
+	RequiredReads   []string
+	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 }
 
-func (p LLMPlanner) Plan(ctx context.Context, userPrompt string) (string, error) {
+func (p LLMPlanner) Plan(ctx context.Context, userPrompt string) (RunResult, error) {
 	prompt := strings.TrimSpace(userPrompt)
 	if prompt == "" {
-		return "", fmt.Errorf("empty planning prompt")
+		return RunResult{}, fmt.Errorf("empty planning prompt")
 	}
 
-	full := planSystemPrompt + "\n\n## Task\n" + prompt
-	if p.CWD != "" {
-		full += "\n\n## Working Directory\n" + p.CWD
-	}
-
-	if err := budget.Validate(full); err != nil {
-		return "", err
-	}
-
-	resp, err := p.ProviderManager.Send(ctx, p.ProviderName(), p.ModelName(), provider.Request{
-		Prompt: full,
+	systemPrompt := loadPromptOrFallback(p.CWD, "agents/planning.md", planSystemPrompt)
+	plan, traces, err := runToolLoop(ctx, toolLoopConfig{
+		SystemPrompt:    systemPrompt,
+		UserTask:        prompt,
+		CWD:             p.CWD,
+		MaxSteps:        30,
+		RequireToolCall: true,
+		AllowedTools:    []string{"repo-search", "file-read"},
+		ProviderManager: p.ProviderManager,
+		ProviderName:    p.ProviderName,
+		ModelName:       p.ModelName,
+		MaxTokens:       p.MaxTokens,
+		RequiredReads:   p.RequiredReads,
+		ToolCallback:    p.ToolCallback,
 	})
 	if err != nil {
-		return "", fmt.Errorf("llm planner: %w", err)
+		return RunResult{}, fmt.Errorf("llm planner: %w", err)
 	}
 
-	plan := strings.TrimSpace(resp.Content)
+	plan = strings.TrimSpace(plan)
 	if plan == "" {
-		return "", fmt.Errorf("LLM returned empty plan")
+		return RunResult{}, fmt.Errorf("LLM returned empty plan")
 	}
-
-	return fmt.Sprintf("# Plan\n\n%s\n\n---\n*planned by %s / %s*\n",
-		plan, p.ProviderName(), p.ModelName()), nil
+	plan = stripLeakedToolCalls(plan)
+	plan = strings.TrimSpace(plan)
+	if plan == "" {
+		return RunResult{}, fmt.Errorf("LLM returned empty plan after stripping tool calls")
+	}
+	main, _ := stripThinkTags(plan)
+	return RunResult{
+		Content: fmt.Sprintf("# Plan\n\n%s\n\n---\n*planned by %s / %s*\n",
+			strings.TrimSpace(main), p.ProviderName(), p.ModelName()),
+		Tools: traces,
+	}, nil
 }

@@ -81,6 +81,6 @@ func LocalProviderName(baseURL string) string {
 	case strings.HasSuffix(s, ":11434"):
 		return "Ollama"
 	default:
-		return "Local (" + s + ")"
+		return "Local endpoint"
 	}
 }

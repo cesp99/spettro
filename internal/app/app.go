@@ -69,6 +69,13 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 	cfg.APIKeys = keys
 
 	pm := provider.NewManager()
+	for _, endpoint := range cfg.LocalEndpoints {
+		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
+		if err != nil {
+			continue
+		}
+		pm.AddLocalModels(localModels)
+	}
 	app := &App{
 		in:        in,
 		out:       out,
@@ -77,9 +84,27 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		cfg:       cfg,
 		store:     store,
 		providers: pm,
-		planner:   agent.Planner{},
-		coder:     agent.Coder{},
 		ui:        ui.NewRenderer(),
+	}
+	app.planner = agent.LLMPlanner{
+		ProviderManager: pm,
+		ProviderName: func() string {
+			return app.cfg.ActiveProvider
+		},
+		ModelName: func() string {
+			return app.cfg.ActiveModel
+		},
+		CWD: cwd,
+	}
+	app.coder = agent.LLMCoder{
+		ProviderManager: pm,
+		ProviderName: func() string {
+			return app.cfg.ActiveProvider
+		},
+		ModelName: func() string {
+			return app.cfg.ActiveModel
+		},
+		CWD: cwd,
 	}
 	app.chatter = agent.Chatter{
 		ProviderManager: pm,
@@ -230,7 +255,7 @@ func (a *App) handleCommand(line string) error {
 		if err != nil {
 			return err
 		}
-		if err := a.store.AppendProjectFile("AGENT.md", result+"\n"); err != nil {
+		if err := a.store.AppendProjectFile("AGENT.md", result.Content+"\n"); err != nil {
 			return err
 		}
 		a.printLine("approved and executed. output stored in .spettro/AGENT.md")
@@ -364,10 +389,10 @@ func (a *App) handlePlanning(ctx context.Context, prompt string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.store.WriteProjectFile("PLAN.md", plan); err != nil {
+	if err := a.store.WriteProjectFile("PLAN.md", plan.Content); err != nil {
 		return err
 	}
-	a.pendingPlan = plan
+	a.pendingPlan = plan.Content
 	a.printLine(a.ui.Panel(string(a.mode), "Plan Generated", "Saved to .spettro/PLAN.md.\nUse /approve in coding flow to execute."))
 	return nil
 }
@@ -381,7 +406,7 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.store.AppendProjectFile("AGENT.md", result+"\n"); err != nil {
+	if err := a.store.AppendProjectFile("AGENT.md", result.Content+"\n"); err != nil {
 		return err
 	}
 	a.printLine(a.ui.Panel(string(a.mode), "Coding Action", "Logged output to .spettro/AGENT.md"))
