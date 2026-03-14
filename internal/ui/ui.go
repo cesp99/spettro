@@ -6,15 +6,16 @@ import (
 )
 
 const (
-	reset  = "\033[0m"
-	bold   = "\033[1m"
-	dim    = "\033[2m"
-	blue   = "\033[38;5;39m"
-	cyan   = "\033[38;5;45m"
-	green  = "\033[38;5;42m"
-	yellow = "\033[38;5;220m"
-	gray   = "\033[38;5;246m"
-	red    = "\033[38;5;203m"
+	reset   = "\033[0m"
+	bold    = "\033[1m"
+	dim     = "\033[2m"
+	blue    = "\033[38;5;39m"
+	cyan    = "\033[38;5;45m"
+	green   = "\033[38;5;42m"
+	yellow  = "\033[38;5;220m"
+	gray    = "\033[38;5;246m"
+	red     = "\033[38;5;203m"
+	magenta = "\033[38;5;201m"
 )
 
 type Theme struct {
@@ -34,6 +35,7 @@ func NewRenderer() *Renderer {
 		themes: map[string]Theme{
 			"planning":    {Label: "Planning Agent", Accent: blue, Prompt: "◈", Icon: "🧠", Stage: "planning (planning agent)"},
 			"coding":      {Label: "Coding Agent", Accent: green, Prompt: "◆", Icon: "⚙", Stage: "acting (coding agent)"},
+			"architect":   {Label: "Architect", Accent: magenta, Prompt: "▲", Icon: "🏛", Stage: "orchestrate (architect)"},
 			"chat":        {Label: "Chat Agent", Accent: yellow, Prompt: "●", Icon: "💬", Stage: "chat (chat agent)"},
 			"research":    {Label: "Research Agent", Accent: blue, Prompt: "◉", Icon: "🔍", Stage: "research (research agent)"},
 			"reviewer":    {Label: "Code Review Agent", Accent: red, Prompt: "◈", Icon: "👁", Stage: "review (reviewer agent)"},

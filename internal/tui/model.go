@@ -49,6 +49,7 @@ type ChatMessage struct {
 	Content  string
 	Thinking string // content from <think>...</think> blocks, hidden by default
 	Meta     string // muted footer hint shown below assistant messages
+	Kind     string // "plan" for plan messages — rendered differently
 	Tools    []ToolItem
 	At       time.Time
 }
@@ -244,13 +245,17 @@ type Model struct {
 	showTools bool
 
 	// live tool stream (populated while agent is running)
-	liveTools   []ToolItem
-	currentTool *ToolItem
-	toolCh      chan agent.ToolTrace
-	approvalCh  chan shellApprovalRequestMsg
-	cancelAgent context.CancelFunc // non-nil while an agent goroutine is running
-	pendingAuth *shellApprovalRequestMsg
-	approvalAltMode bool
+	liveTools      []ToolItem
+	currentTool    *ToolItem
+	toolCh         chan agent.ToolTrace
+	approvalCh     chan shellApprovalRequestMsg
+	cancelAgent    context.CancelFunc // non-nil while an agent goroutine is running
+	pendingAuth    *shellApprovalRequestMsg
+	approvalCursor int // arrow-key cursor for shell/plan approval dialogs
+
+	// plan approval dialog (shown after plan generation)
+	showPlanApproval   bool
+	planApprovalCursor int
 
 	// parallel agent tracking
 	parallelAgents []parallelAgentEntry
@@ -459,10 +464,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingPlan = msg.plan
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleAssistant,
-				Content: "Plan generated. Saved to .spettro/PLAN.md\nSwitch to coding mode (/mode) then /approve to execute.",
+				Kind:    "plan",
+				Content: msg.plan,
 				Tools:   toToolItems(msg.tools),
 				At:      time.Now(),
 			})
+			m.showPlanApproval = true
+			m.planApprovalCursor = 0
 		}
 		m.refreshViewport()
 		// Auto-compact when approaching context limit (85% threshold)
@@ -513,8 +521,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.showBanner("compact error: "+msg.err.Error(), "error")
 		} else {
-			m.autoSave()  // save full history before compacting
-			m.convID = "" // new conversation after compact
+			m.autoSave()          // save full history before compacting
+			m.convID = ""         // new conversation after compact
 			m.totalTokensUsed = 0 // reset context counter after compaction
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
@@ -598,7 +606,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellApprovalRequestMsg:
 		if m.thinking {
 			m.pendingAuth = &msg
-			m.approvalAltMode = false
+			m.approvalCursor = 0
 			m.ta.Reset()
 			m.showBanner("command approval required", "warn")
 			if m.approvalCh != nil {
@@ -688,6 +696,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateMain handles key events for the main screen.
 func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.showPlanApproval {
+		return m.updatePlanApproval(msg)
+	}
 	if m.pendingAuth != nil {
 		return m.updateShellApproval(msg)
 	}
@@ -823,6 +834,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ta.Reset()
 		m.cmdItems = nil
 		m.mentionItems = nil
+		// If plan edit is pending (user chose "edit" in plan approval dialog), route to plan edit
+		if m.pendingPlan != "" && !strings.HasPrefix(input, "/") {
+			return m.handlePlanEdit(input)
+		}
 		if strings.HasPrefix(input, "/") {
 			return m.handleCommand(input)
 		}
@@ -871,15 +886,6 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/mode", "/next":
 		m.mode = nextAgent(m.manifest, m.mode)
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
-	case "/setup":
-		m.showSetup = true
-		m.setup = setupState{}
-		providerIDs := m.providers.ProviderNames()
-		var plines []string
-		for i, id := range providerIDs {
-			plines = append(plines, fmt.Sprintf("  %d) %s", i+1, id))
-		}
-		m.pushSystemMsg("setup wizard — choose provider:\n" + strings.Join(plines, "\n"))
 	case "/connect":
 		m = m.openConnect()
 	case "/models":
@@ -942,7 +948,9 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			if !ok {
 				m.showBanner("coding agent not found in manifest", "error")
 			} else {
-				return m.runAgent(spec, m.pendingPlan, nil, nil)
+				plan := m.pendingPlan
+				m.pendingPlan = ""
+				return m.runAgentApproved(spec, plan, nil, nil, true)
 			}
 		}
 	case "/image":
@@ -962,15 +970,6 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		}
 	case "/init":
 		return m.runInit()
-	case "/explore":
-		rest := strings.TrimSpace(strings.TrimPrefix(input, cmd))
-		return m.runExplore(rest)
-	case "/search":
-		query := ""
-		if len(fields) >= 2 {
-			query = strings.Join(fields[1:], " ")
-		}
-		return m.runSearcher(query)
 	case "/compact":
 		focus := strings.TrimSpace(strings.TrimPrefix(input, cmd))
 		return m.runCompact(focus)
@@ -1020,7 +1019,12 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 }
 
 // runAgent is the unified agent runner for the TUI.
+// approved=true bypasses the ask-first guard (used when user explicitly approved the plan).
 func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []string, images []string) (tea.Model, tea.Cmd) {
+	return m.runAgentApproved(spec, input, mentionedFiles, images, false)
+}
+
+func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFiles []string, images []string, approved bool) (tea.Model, tea.Cmd) {
 	m.thinking = true
 	m.liveTools = nil
 	m.currentTool = nil
@@ -1075,16 +1079,14 @@ func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []st
 		waitForTool(toolCh),
 		waitForShellApproval(approvalCh),
 		func() tea.Msg {
-			// For ask-first + coding agents: require approval
-			if perm == config.PermissionAskFirst && spec.Mode == "coding" {
-				close(toolCh)
-				close(approvalCh)
-				return agentDoneMsg{content: "ask-first mode: generate a plan then use /approve"}
-			}
-			// Override permission from global config if more permissive
+			// ask-first means the agent asks before running shell commands,
+			// not that it refuses to run. Never block execution here.
 			runSpec := spec
-			if perm != config.PermissionAskFirst {
-				runSpec.Permission = perm
+			if approved || perm != config.PermissionAskFirst {
+				// Use the configured or inherited permission level
+				if perm != config.PermissionAskFirst {
+					runSpec.Permission = perm
+				}
 			}
 			a.Spec = runSpec
 			result, err := a.Run(ctx, input)
@@ -1208,58 +1210,138 @@ func (m Model) runExplore(task string) (tea.Model, tea.Cmd) {
 	return m.runAgent(spec, task, nil, nil)
 }
 
+// planApprovalOptions defines the choices shown after plan generation.
+var planApprovalOptions = []string{
+	"Execute plan  (switch to coding agent)",
+	"Don't execute",
+	"Edit — tell me what to change",
+}
+
+func (m Model) updatePlanApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	n := len(planApprovalOptions)
+	switch msg.String() {
+	case "up", "ctrl+p":
+		if m.planApprovalCursor > 0 {
+			m.planApprovalCursor--
+		}
+		return m, nil
+	case "down", "ctrl+n":
+		if m.planApprovalCursor < n-1 {
+			m.planApprovalCursor++
+		}
+		return m, nil
+	case "enter":
+		choice := m.planApprovalCursor
+		m.showPlanApproval = false
+		m.planApprovalCursor = 0
+		switch choice {
+		case 0: // Execute — user explicitly approved, bypass ask-first
+			spec, ok := m.manifest.AgentByID("coding")
+			if !ok {
+				m.showBanner("coding agent not found", "error")
+				return m, nil
+			}
+			m.mode = "coding"
+			plan := m.pendingPlan
+			m.pendingPlan = ""
+			return m.runAgentApproved(spec, plan, nil, nil, true)
+		case 1: // Don't execute
+			m.pendingPlan = ""
+			m.showBanner("plan saved to .spettro/PLAN.md — use /approve later to execute", "info")
+			return m, nil
+		case 2: // Edit
+			m.showBanner("describe your changes and press enter", "info")
+			m.ta.Focus()
+			return m, nil
+		}
+		return m, nil
+	case "esc":
+		m.showPlanApproval = false
+		m.planApprovalCursor = 0
+		m.showBanner("plan saved — use /approve to execute later", "info")
+		return m, nil
+	}
+	return m, nil
+}
+
+// handlePlanEdit is called when user submits text while plan approval is in "edit" mode.
+// It re-runs the planning agent with the edit instructions appended to the original prompt.
+func (m Model) handlePlanEdit(editInstruction string) (tea.Model, tea.Cmd) {
+	if m.pendingPlan == "" {
+		m.showBanner("no pending plan to edit", "warn")
+		return m, nil
+	}
+	spec, ok := m.manifest.AgentByID("planning")
+	if !ok {
+		m.showBanner("planning agent not found", "error")
+		return m, nil
+	}
+	task := m.pendingPlan + "\n\n---\nUser requested the following changes to the plan:\n" + editInstruction
+	m.pendingPlan = ""
+	return m.runAgent(spec, task, nil, nil)
+}
+
+// shellApprovalOptions lists the choices for the bash approval dialog.
+var shellApprovalOptions = []string{
+	"Allow once",
+	"Allow always  (remember this command)",
+	"Deny",
+	"Tell the agent what to do instead",
+}
+
 func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingAuth == nil {
 		return m, nil
 	}
-	shortcutAllowed := !m.approvalAltMode && strings.TrimSpace(m.ta.Value()) == ""
-	if shortcutAllowed {
+	// "Tell agent instead" mode: capture free text then submit
+	if m.approvalCursor == 3 {
 		switch msg.String() {
-		case "1", "y", "Y":
-			return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
-		case "2", "a", "A":
-			return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
-		case "3", "n", "N", "esc", "ctrl+c":
-			return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
-		case "4":
-			m.approvalAltMode = true
-			m.ta.Reset()
-			m.showBanner("type what the agent should do instead, then press enter", "info")
-			return m, nil
-		}
-	}
-	switch msg.String() {
-	case "enter":
-		raw := strings.TrimSpace(m.ta.Value())
-		val := strings.ToLower(raw)
-		if m.approvalAltMode {
+		case "enter":
+			raw := strings.TrimSpace(m.ta.Value())
 			if raw == "" {
 				m.showBanner("type what the agent should do instead, then press enter", "warn")
 				return m, nil
 			}
 			return m.resolveShellApprovalAlternative(raw), nil
-		}
-		switch val {
-		case "1", "y", "yes":
-			return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
-		case "2", "a", "always", "yes and don't ask again", "yes and dont ask again":
-			return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
-		case "3", "n", "no":
-			return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
-		case "4":
-			m.showBanner("type what the agent should do instead, then press enter", "info")
+		case "esc":
+			m.approvalCursor = 0
+			m.ta.Reset()
 			return m, nil
 		default:
-			if raw == "" {
-				m.showBanner("choose 1, 2, 3, or type an alternative instruction", "warn")
-				return m, nil
-			}
-			return m.resolveShellApprovalAlternative(raw), nil
+			var taCmd tea.Cmd
+			m.ta, taCmd = m.ta.Update(msg)
+			return m, taCmd
 		}
 	}
-	var taCmd tea.Cmd
-	m.ta, taCmd = m.ta.Update(msg)
-	return m, taCmd
+	n := len(shellApprovalOptions)
+	switch msg.String() {
+	case "up", "ctrl+p":
+		if m.approvalCursor > 0 {
+			m.approvalCursor--
+		}
+		return m, nil
+	case "down", "ctrl+n":
+		if m.approvalCursor < n-1 {
+			m.approvalCursor++
+		}
+		return m, nil
+	case "enter":
+		switch m.approvalCursor {
+		case 0:
+			return m.resolveShellApproval(agent.ShellApprovalAllowOnce, "command approved once"), nil
+		case 1:
+			return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
+		case 2:
+			return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
+		case 3:
+			m.ta.Reset()
+			m.showBanner("type what the agent should do instead, then press enter", "info")
+			return m, nil
+		}
+	case "esc":
+		return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
+	}
+	return m, nil
 }
 
 func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner string) Model {
@@ -1270,7 +1352,7 @@ func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner
 		}
 	}
 	m.pendingAuth = nil
-	m.approvalAltMode = false
+	m.approvalCursor = 0
 	m.ta.Reset()
 	m.showBanner(banner, "info")
 	m.refreshViewport()
@@ -1288,7 +1370,7 @@ func (m Model) resolveShellApprovalAlternative(instruction string) Model {
 		}
 	}
 	m.pendingAuth = nil
-	m.approvalAltMode = false
+	m.approvalCursor = 0
 	m.ta.Reset()
 	m.showBanner("alternative instruction sent", "info")
 	m.refreshViewport()
@@ -1653,6 +1735,24 @@ func (m *Model) saveFavorites() {
 func (m *Model) syncInputSuggestions() {
 	val := m.ta.Value()
 	if strings.HasPrefix(val, "/") {
+		// When typing "/permission" with optional trailing filter, show permission sub-options
+		if strings.HasPrefix(val, "/permission") && len(val) > len("/permission") {
+			filter := strings.TrimPrefix(val, "/permission")
+			filter = strings.TrimPrefix(filter, " ")
+			var items []commandDef
+			for _, c := range permissionCommands {
+				if filter == "" || strings.Contains(c.name, filter) || strings.Contains(c.desc, filter) {
+					items = append(items, c)
+				}
+			}
+			m.cmdItems = items
+			if m.cmdCursor >= len(m.cmdItems) {
+				m.cmdCursor = 0
+			}
+			m.mentionItems = nil
+			m.mentionCursor = 0
+			return
+		}
 		query := val[1:] // text after the /
 		m.cmdItems = filterCommands(query)
 		if m.cmdCursor >= len(m.cmdItems) {
@@ -1693,14 +1793,21 @@ func activeMentionQuery(input string) (string, bool) {
 
 func filterMentionFiles(files []string, query string, limit int) []string {
 	q := strings.ToLower(strings.TrimSpace(query))
-	out := make([]string, 0, limit)
+	// Collect dirs first, then files — both filtered by query
+	var dirs, regular []string
 	for _, f := range files {
-		if q == "" || strings.Contains(strings.ToLower(f), q) {
-			out = append(out, f)
-			if len(out) >= limit {
-				break
-			}
+		if q != "" && !strings.Contains(strings.ToLower(f), q) {
+			continue
 		}
+		if strings.HasSuffix(f, "/") {
+			dirs = append(dirs, f)
+		} else {
+			regular = append(regular, f)
+		}
+	}
+	out := append(dirs, regular...)
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out
 }
@@ -1723,32 +1830,45 @@ func (m Model) acceptMention() Model {
 }
 
 func scanRepoFiles(root string) ([]string, error) {
-	var files []string
+	gi := newGitignoreMatcher(root)
+	var entries []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+		// Always skip these regardless of .gitignore
 		if d.IsDir() {
 			switch d.Name() {
 			case ".git", ".spettro":
 				return filepath.SkipDir
 			}
 		}
-		if d.IsDir() {
-			return nil
-		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return nil
 		}
-		files = append(files, filepath.ToSlash(rel))
+		if rel == "." {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		if gi.Ignored(relSlash, d.IsDir()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			entries = append(entries, relSlash+"/")
+		} else {
+			entries = append(entries, relSlash)
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(files)
-	return files, nil
+	sort.Strings(entries)
+	return entries, nil
 }
 
 func (m Model) extractMentionedFiles(input string) []string {
@@ -1762,11 +1882,10 @@ func (m Model) extractMentionedFiles(input string) []string {
 		if p == "" {
 			continue
 		}
-		rel, ok := resolveMentionPath(m.cwd, p)
-		if !ok {
-			continue
+		resolved := resolveMentionPaths(m.cwd, p)
+		for _, rel := range resolved {
+			seen[rel] = struct{}{}
 		}
-		seen[rel] = struct{}{}
 	}
 	if len(seen) == 0 {
 		return nil
@@ -1779,22 +1898,53 @@ func (m Model) extractMentionedFiles(input string) []string {
 	return out
 }
 
-func resolveMentionPath(cwd, p string) (string, bool) {
+// resolveMentionPaths returns the file paths a mention expands to.
+// For a file it returns a single path; for a directory it returns all files within it.
+func resolveMentionPaths(cwd, p string) []string {
 	var abs string
 	if filepath.IsAbs(p) {
 		abs = filepath.Clean(p)
 	} else {
-		abs = filepath.Clean(filepath.Join(cwd, p))
+		abs = filepath.Clean(filepath.Join(cwd, strings.TrimSuffix(p, "/")))
 	}
 	rel, err := filepath.Rel(cwd, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false
+		return nil
 	}
 	info, err := os.Stat(abs)
-	if err != nil || info.IsDir() {
-		return "", false
+	if err != nil {
+		return nil
 	}
-	return filepath.ToSlash(rel), true
+	if !info.IsDir() {
+		return []string{filepath.ToSlash(rel)}
+	}
+	// Expand directory: collect all files within it, respecting .gitignore
+	gi := newGitignoreMatcher(cwd)
+	var files []string
+	_ = filepath.WalkDir(abs, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		frel, err := filepath.Rel(cwd, path)
+		if err != nil {
+			return nil
+		}
+		relSlash := filepath.ToSlash(frel)
+		if gi.Ignored(relSlash, d.IsDir()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
+			files = append(files, relSlash)
+		}
+		return nil
+	})
+	return files
 }
 
 func injectMentionGuidance(input string, mentionedFiles []string) string {
@@ -1803,13 +1953,12 @@ func injectMentionGuidance(input string, mentionedFiles []string) string {
 	}
 	var sb strings.Builder
 	sb.WriteString(input)
-	sb.WriteString("\n\nReferenced files from @mentions:\n")
+	sb.WriteString("\n\nReferenced paths from @mentions (read these before making decisions):\n")
 	for _, p := range mentionedFiles {
 		sb.WriteString("- ")
 		sb.WriteString(p)
 		sb.WriteString("\n")
 	}
-	sb.WriteString("Inspect these files before making decisions.")
 	return sb.String()
 }
 
@@ -2078,10 +2227,36 @@ func (m Model) viewInput() string {
 	label := lipgloss.NewStyle().Foreground(mc).Bold(true).Render(prompt + " " + agentLabel)
 
 	lines := []string{label}
-	if m.pendingAuth != nil {
-		lines = append(lines, styleWarn.Render(formatShellApprovalPrompt(m.pendingAuth.request.Command)))
+	if m.showPlanApproval {
+		lines = append(lines, m.renderApprovalPicker(
+			"Execute this plan?",
+			planApprovalOptions,
+			m.planApprovalCursor,
+			mc,
+		))
+		// No textarea in plan approval mode (unless editing)
+		if m.pendingPlan != "" {
+			// "edit" mode: show textarea for instructions
+			lines = append(lines, m.ta.View())
+		}
+	} else if m.pendingAuth != nil {
+		cmd := m.pendingAuth.request.Command
+		lines = append(lines, styleWarn.Render("  $ "+cmd))
+		if m.approvalCursor == 3 {
+			// "tell agent instead" free text mode
+			lines = append(lines, styleMuted.Render("  type what to do instead, then press enter:"))
+			lines = append(lines, m.ta.View())
+		} else {
+			lines = append(lines, m.renderApprovalPicker(
+				"allow this command?",
+				shellApprovalOptions,
+				m.approvalCursor,
+				lipgloss.Color("#F59E0B"),
+			))
+		}
+	} else {
+		lines = append(lines, m.ta.View())
 	}
-	lines = append(lines, m.ta.View())
 	if m.thinking {
 		lines = append(lines, "  "+m.spin.View()+styleMuted.Render(" thinking…"))
 	}
@@ -2590,7 +2765,7 @@ func (m *Model) stopAgent() {
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
-	m.approvalAltMode = false
+	m.approvalCursor = 0
 }
 
 func (m *Model) pushSystemMsg(content string) {
@@ -2644,6 +2819,45 @@ func (m *Model) refreshViewport() {
 	m.vp.GotoBottom()
 }
 
+// renderPlanMessage renders a plan ChatMessage as a distinct bordered block.
+func (m Model) renderPlanMessage(msg ChatMessage, mc lipgloss.Color) string {
+	innerW := m.width - 8 // account for indent + border
+	if innerW < 10 {
+		innerW = 10
+	}
+
+	// Header label
+	header := lipgloss.NewStyle().
+		Foreground(mc).Bold(true).
+		Render("◈ plan")
+
+	// Tools (if any) above the plan body
+	var bodyParts []string
+	if len(msg.Tools) > 0 {
+		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, m.showTools, mc))
+	}
+
+	// Plan body — wrap to inner width
+	planBody := lipgloss.NewStyle().
+		Foreground(colorText).
+		Width(innerW).
+		Render(strings.TrimSpace(msg.Content))
+	bodyParts = append(bodyParts, planBody)
+
+	inner := strings.Join(bodyParts, "\n")
+
+	box := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(mc).
+		Width(innerW+2).
+		Padding(0, 1).
+		Render(inner)
+
+	// Indent the whole block
+	indented := indent(header+"\n"+box, "  ")
+	return indented
+}
+
 func (m Model) renderMessages() string {
 	if len(m.messages) == 0 {
 		return styleMuted.Render("  no messages yet — type a prompt or /help")
@@ -2660,6 +2874,11 @@ func (m Model) renderMessages() string {
 			parts = append(parts, prefix+text)
 
 		case RoleAssistant:
+			if msg.Kind == "plan" {
+				// Plan messages rendered as a distinct bordered block
+				parts = append(parts, m.renderPlanMessage(msg, mc))
+				continue
+			}
 			bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
 			body := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
 			var entryLines []string
@@ -2731,8 +2950,10 @@ func (m Model) recalcLayout() Model {
 	if m.banner != "" {
 		inputH++ // banner line
 	}
-	if m.pendingAuth != nil {
-		inputH += len(strings.Split(formatShellApprovalPrompt(m.pendingAuth.request.Command), "\n"))
+	if m.showPlanApproval {
+		inputH += 2 + len(planApprovalOptions) // title + options
+	} else if m.pendingAuth != nil {
+		inputH += 2 + len(shellApprovalOptions) // command line + options
 	}
 	// Command palette above input box: border(2) + title/hint(2) + items
 	if len(m.cmdItems) > 0 {
@@ -3029,17 +3250,21 @@ func waitForShellApproval(ch chan shellApprovalRequestMsg) tea.Cmd {
 	}
 }
 
-func formatShellApprovalPrompt(command string) string {
-	return strings.Join([]string{
-		"spettro wants to run this command:",
-		"  Bash(" + command + ")",
-		"",
-		"choose an action:",
-		"  1) yes",
-		"  2) yes and don't ask again",
-		"  3) no",
-		"  4) tell the agent what to do instead",
-	}, "\n")
+// renderApprovalPicker renders an arrow-key navigable list of choices.
+func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc lipgloss.Color) string {
+	var sb strings.Builder
+	sb.WriteString(styleMuted.Render("  "+title) + "\n")
+	for i, opt := range options {
+		if i == cursor {
+			sb.WriteString(lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › " + opt))
+		} else {
+			sb.WriteString(styleMuted.Render("    " + opt))
+		}
+		if i < len(options)-1 {
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }
 
 // formatToolLabel returns a human-readable label for a completed tool call.
@@ -3258,6 +3483,8 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 		return ""
 	}
 	bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
+	errStyle := lipgloss.NewStyle().Foreground(colorError)
+	outputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563")).Italic(true)
 	var lines []string
 
 	i := 0
@@ -3272,21 +3499,33 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 		name := group[0].Name
 
 		if count == 1 {
-			label := formatToolLabel(name, group[0].Args)
-			if group[0].Status == "error" {
-				label = lipgloss.NewStyle().Foreground(colorError).Render(label)
+			item := group[0]
+			label := formatToolLabel(name, item.Args)
+			if item.Status == "error" {
+				label = errStyle.Render(label)
 			} else {
 				label = styleMuted.Render(label)
 			}
 			lines = append(lines, bullet+" "+label)
-			if p := extractToolPath(name, group[0].Args); p != "" && showTools {
-				lines = append(lines, styleMuted.Render("    ⎿  "+p))
+			if showTools {
+				if p := extractToolPath(name, item.Args); p != "" {
+					icon := "✓"
+					if item.Status == "error" {
+						icon = "✗"
+					}
+					lines = append(lines, styleMuted.Render(fmt.Sprintf("    ⎿  %s %s", p, icon)))
+				}
+				if out := trimToolOutput(item.Output, 20); out != "" {
+					for _, ol := range strings.Split(out, "\n") {
+						lines = append(lines, outputStyle.Render("       "+ol))
+					}
+				}
 			}
 		} else {
 			noun := toolNounCount(name, count)
 			label := fmt.Sprintf("%s %s", toolActionVerb(name), noun)
 			if !showTools {
-				label += styleMuted.Render(" (ctrl+o to expand)")
+				label += "  " + styleMuted.Render("(ctrl+o to expand)")
 			}
 			lines = append(lines, bullet+" "+styleMuted.Render(label))
 			if showTools {
@@ -3302,6 +3541,11 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 						detail = "    ⎿  " + formatToolLabel(gt.Name, gt.Args)
 					}
 					lines = append(lines, styleMuted.Render(detail))
+					if out := trimToolOutput(gt.Output, 8); out != "" {
+						for _, ol := range strings.Split(out, "\n") {
+							lines = append(lines, outputStyle.Render("       "+ol))
+						}
+					}
 				}
 			}
 		}
@@ -3309,6 +3553,21 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 		i = j
 	}
 	return strings.Join(lines, "\n")
+}
+
+// trimToolOutput returns the first maxLines lines of output, adding a truncation
+// notice if there are more. Returns empty string for blank output.
+func trimToolOutput(output string, maxLines int) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) <= maxLines {
+		return output
+	}
+	remaining := len(lines) - maxLines
+	return strings.Join(lines[:maxLines], "\n") + fmt.Sprintf("\n  … %d more lines", remaining)
 }
 
 func toToolItems(traces []agent.ToolTrace) []ToolItem {
@@ -3350,9 +3609,23 @@ func truncateLabel(s string, max int) string {
 	return string(r[:max-1]) + "…"
 }
 
-// nextAgent cycles only through the 3 primary modes shown in the header.
-func nextAgent(_ config.AgentManifest, current string) string {
-	primary := []string{"planning", "coding", "ask"}
+// nextAgent cycles through primary modes shown in the header.
+// It consults the project manifest so optional agents (for example
+// "architect") can be included in the cycle when enabled.
+func nextAgent(manifest config.AgentManifest, current string) string {
+	// Preferred ordering — UI will show planning/coding/ask by default;
+	// architect is included if enabled in the manifest so Shift+Tab cycles to it.
+	order := []string{"planning", "coding", "ask", "architect"}
+	var primary []string
+	for _, id := range order {
+		if spec, ok := manifest.AgentByID(id); ok && spec.Enabled {
+			primary = append(primary, id)
+		}
+	}
+	// Fallback to the canonical trio if manifest doesn't enable any of the above.
+	if len(primary) == 0 {
+		primary = []string{"planning", "coding", "ask"}
+	}
 	for i, id := range primary {
 		if id == current {
 			return primary[(i+1)%len(primary)]
