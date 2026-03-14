@@ -105,7 +105,7 @@ type toolLoopConfig struct {
 	ModelName       func() string
 	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
 	RequiredReads   []string
-	Images          []string // only used on first LLM call (chat use case)
+	Images          []string        // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	Permission      config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
@@ -128,12 +128,12 @@ type toolRuntime struct {
 	shellApproval ShellApprovalCallback
 	allowedShell  map[string]struct{}
 	// sub-agent support
-	manifest        *config.AgentManifest
-	providerMgr     *provider.Manager
-	providerName    func() string
-	modelName       func() string
-	maxTokens       int
-	toolCallback    func(ToolTrace)
+	manifest     *config.AgentManifest
+	providerMgr  *provider.Manager
+	providerName func() string
+	modelName    func() string
+	maxTokens    int
+	toolCallback func(ToolTrace)
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.

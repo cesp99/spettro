@@ -107,4 +107,3 @@ func ProjectDir(globalDir, cwd string) string {
 	slug := fmt.Sprintf("%s-%x", filepath.Base(cwd), sum[:4])
 	return filepath.Join(globalDir, "conversations", slug)
 }
-

@@ -15,12 +15,12 @@ const apiURL = "https://models.dev/api.json"
 
 // DevModel is a single model entry from models.dev.
 type DevModel struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Family     string    `json:"family"`
-	Reasoning  bool      `json:"reasoning"`
-	ToolCall   bool      `json:"tool_call"`
-	Attachment bool      `json:"attachment"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Family     string `json:"family"`
+	Reasoning  bool   `json:"reasoning"`
+	ToolCall   bool   `json:"tool_call"`
+	Attachment bool   `json:"attachment"`
 	Modalities *struct {
 		Input  []string `json:"input"`
 		Output []string `json:"output"`

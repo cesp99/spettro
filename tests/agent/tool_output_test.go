@@ -94,7 +94,7 @@ func capturedCoder(cs *captureServer, dir string) agent.LLMCoder {
 
 func TestToolOutput_RepoSearch_ListsFiles(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644)          //nolint:errcheck
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644)         //nolint:errcheck
 	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module myapp\ngo 1.22\n"), 0o644) //nolint:errcheck
 
 	cs := newCaptureServer(t, []string{
@@ -119,7 +119,7 @@ func TestToolOutput_RepoSearch_ListsFiles(t *testing.T) {
 func TestToolOutput_RepoSearch_ContentSearch(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package main\n\nfunc HelloWorld() {}\n"), 0o644) //nolint:errcheck
-	os.WriteFile(filepath.Join(dir, "other.go"), []byte("package main\n\nfunc Other() {}\n"), 0o644)     //nolint:errcheck
+	os.WriteFile(filepath.Join(dir, "other.go"), []byte("package main\n\nfunc Other() {}\n"), 0o644)      //nolint:errcheck
 
 	cs := newCaptureServer(t, []string{
 		`TOOL_CALL {"tool":"repo-search","args":{"query":"HelloWorld"}}`,
@@ -286,9 +286,9 @@ func TestToolOutput_FileWrite_RefusalIncludedInPrompt(t *testing.T) {
 
 func TestToolOutput_Glob_MatchesPattern(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644)           //nolint:errcheck
-	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)                                          //nolint:errcheck
-	os.WriteFile(filepath.Join(dir, "sub", "util.go"), []byte("package sub\n"), 0o644)     //nolint:errcheck
+	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644)       //nolint:errcheck
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)                                      //nolint:errcheck
+	os.WriteFile(filepath.Join(dir, "sub", "util.go"), []byte("package sub\n"), 0o644) //nolint:errcheck
 
 	pm, provName, modelName := scriptedManager(t, []string{
 		`TOOL_CALL {"tool":"glob","args":{"pattern":"**/*.go"}}`,
@@ -328,7 +328,7 @@ func TestToolOutput_Glob_MatchesPattern(t *testing.T) {
 func TestToolOutput_Grep_FindsMatches(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package foo\n\nfunc HelloWorld() {}\n"), 0o644) //nolint:errcheck
-	os.WriteFile(filepath.Join(dir, "bar.go"), []byte("package bar\n\nfunc Other() {}\n"), 0o644)     //nolint:errcheck
+	os.WriteFile(filepath.Join(dir, "bar.go"), []byte("package bar\n\nfunc Other() {}\n"), 0o644)      //nolint:errcheck
 
 	pm, provName, modelName := scriptedManager(t, []string{
 		`TOOL_CALL {"tool":"grep","args":{"pattern":"func HelloWorld","type":"go"}}`,

@@ -40,9 +40,9 @@ type ToolTrace struct {
 }
 
 type RunResult struct {
-	Content     string
-	Tools       []ToolTrace
-	TokensUsed  int // total tokens consumed across all LLM calls in the run
+	Content    string
+	Tools      []ToolTrace
+	TokensUsed int // total tokens consumed across all LLM calls in the run
 }
 
 // Legacy stub types — kept so existing tests compile.
