@@ -16,13 +16,28 @@
 
 - Increase budget with `/budget <n>`.
 - Use `/compact` to reduce conversation context size (`/compact <focus...>` if you need a focused summary).
-- Split large prompts into smaller tasks.
+- Split large prompts into smaller tasks (per-agent context in manifest).
 
 ## `/approve` does nothing useful
 
-- Ensure you generated a plan first in `planning` mode.
-- Switch to `coding` mode, then run `/approve`.
+- Ensure you generated a plan first in planning mode.
+- Switch to coding mode (or let manifest handoff), then run `/approve`.
 - Check permission mode with `/permission`.
+
+## Unknown agent / TOOL_CALL
+
+- Verify `id` exists in `spettro.agents.toml` or built-ins.
+- Check `handoffs` and `allowed_tools` in manifest.
+- Re-run `/models` or restart to reload manifest.
+
+## Manifest validation error
+
+- Fix unknown TOML fields, duplicate IDs, missing `default_agent`, or invalid permissions.
+- See `AGENTS.md` for rules; remove `spettro.agents.toml` to use built-ins.
+
+## docs-writer recursion
+
+- `agents/docs-writer.md` contains self-recursion guard that blocks edits to own file or planning docs; avoid updating without explicit request.
 
 ## Search feels slow
 
@@ -39,7 +54,7 @@ If needed, remove local Spettro state:
 
 ```bash
 rm -rf .spettro
-rm -rf ~/.spettro
+rm -rf ~/.spettro/config.json ~/.spettro/keys.enc ~/.spettro/trusted.json
 ```
 
 Only do this if you are comfortable losing cached models, encrypted keys, and saved conversations.

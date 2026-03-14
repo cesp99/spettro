@@ -8,16 +8,18 @@
 
 Spettro is a terminal-first multi-agent coding assistant written in Go.
 
-It provides a Bubble Tea TUI with three modes (`planning`, `coding`, `chat`), provider/model switching, permission-gated execution, repository search, conversation resume, and encrypted API key storage.
+It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via the "agent" tool with `TOOL_CALL` syntax, and specialized agents (planning, coding, docs-writer, research, tester, reviewer, etc.). The entry point `cmd/spettro/main.go` boots config, storage, provider manager, model catalog, and TUI; manifest loaded via `config.LoadAgentManifestForProject`.
 
 ## Highlights
 
-- Multi-mode workflow: plan first, execute in coding mode, then discuss in chat mode.
-- Live tool traces during planning/coding runs.
-- Permission policies: `ask-first`, `restricted`, `yolo`.
-- Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints.
-- Conversation persistence and resume per project.
-- Project trust prompt before first use in a folder.
+- Configurable multi-agent system via `spettro.agents.toml` and `agents/*.md`
+- Parallel `TOOL_CALL` spawning of sub-agents
+- Exploration-first workflow using glob/grep/file-read before edits
+- Permission policies: `ask-first`, `restricted`, `yolo`
+- Live tool traces during planning/coding runs
+- Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
+- Conversation persistence and resume per project
+- Project trust prompt before first use in a folder
 
 ## Build and run
 
@@ -44,7 +46,7 @@ At first launch:
 
 1. Confirm folder trust.
 2. Run `/setup` (or `/connect` then `/models`) to configure provider/model and API key.
-3. Start with `planning` mode and switch modes with `Shift+Tab`.
+3. Start with `planning` (default_agent) and switch with `Shift+Tab`.
 
 ## Common commands
 
@@ -56,7 +58,7 @@ Spettro commands are entered in the input box with a leading `/`.
 - `/connect` also supports local endpoints (e.g. LM Studio `localhost:1234`)
 - `/models` open model selector (supports `/models provider:model`)
 - `/permission <ask-first|restricted|yolo>`
-- `/approve` execute pending plan in coding mode
+- `/approve` execute pending plan in coding mode (routes via manifest handoff)
 - `/search [query]` search repository files/content
 - `/compact [focus]` summarize conversation history (optionally focused)
 - `/resume` load a previous saved conversation
@@ -66,11 +68,14 @@ For the full command and keybinding reference, see [`docs/commands.md`](docs/com
 
 ## Project docs
 
+- [Agent Manifest](AGENTS.md)
+- [Agent Prompts](agents/README.md)
 - [Getting started and workflow](docs/getting-started.md)
 - [Commands and keybindings](docs/commands.md)
 - [Configuration and storage](docs/configuration.md)
 - [Architecture overview](docs/architecture.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Documentation Index](docs/README.md)
 
 ## Development
 

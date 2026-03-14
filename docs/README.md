@@ -5,4 +5,5 @@
 - [Configuration and storage](configuration.md)
 - [Architecture overview](architecture.md)
 - [Troubleshooting](troubleshooting.md)
-
+- [Agent Manifest](../AGENTS.md)
+- [Agent Prompts](../agents/README.md)

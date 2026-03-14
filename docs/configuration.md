@@ -6,7 +6,7 @@ Spettro uses both project-local and user-global storage.
 
 | Path | Purpose |
 | --- | --- |
-| `config.json` | Active provider/model, permission, token budget, favorites. |
+| `config.json` | Active provider/model, permission, token budget, favorites, per-agent conversation support. |
 | `keys.enc` | Encrypted API keys map by provider ID. |
 | `trusted.json` | Permanently trusted project paths. |
 | `models.json` | Cached `models.dev` catalog. |
@@ -19,6 +19,7 @@ Spettro uses both project-local and user-global storage.
 | `PLAN.md` | Last generated implementation plan. |
 | `index.json` | Optional project snapshot (when indexer path is used). |
 | `allowed_commands.json` | Commands approved with "yes and don't ask again" for this project. |
+| `spettro.agents.toml` | Project-specific agent manifest (fallback to built-ins). |
 
 ## Security model
 
@@ -44,8 +45,17 @@ Spettro uses both project-local and user-global storage.
 
 ## Agent manifest
 
-Spettro loads `spettro.agents.toml` from the project root if present; otherwise it falls back to built-in defaults.
+Spettro loads `spettro.agents.toml` from the project root if present; otherwise it falls back to built-in defaults (via `config.LoadAgentManifestForProject`).
 
 See [`AGENTS.md`](../AGENTS.md) for schema and validation rules.
+
+```toml
+version = 1
+default_agent = "planning"
+
+[runtime]
+default_permission = "ask-first"
+# ... (full excerpt from AGENTS.md: root fields, [runtime], [[tools]], [[agents]], permitted_actions, validation rules)
+```
 
 `config.json` also stores local model endpoints configured via `/connect` (for example `http://localhost:1234`), while API keys remain encrypted in `keys.enc`.

@@ -25,30 +25,28 @@ Spettro supports:
 
 Model metadata is loaded from `https://models.dev/api.json` and cached locally.
 
-## 3) Work in the 3-mode loop
+## 3) Work with the agent system
 
-Spettro starts in `planning` mode.
+Spettro starts with `default_agent` from manifest (planning).
 
-- `planning`: generate actionable plans.
-- `coding`: execute implementation tasks with tool access and permission policy.
-- `chat`: ask questions or discuss code freely.
-
-Switch mode with `Shift+Tab` (or `/mode`).
+- Use `glob`/`grep`/`file-read` for exploration (minimum required before edits).
+- Spawn sub-agents in parallel via `TOOL_CALL {"tool":"agent","args":{"id":"...","task":"..."}}`.
+- Switch mode/agent with `Shift+Tab` (or `/mode`).
 
 ## 4) Approval flow (important)
 
 If permission is `ask-first`:
 
-1. Prompt in `planning` mode.
-2. Switch to `coding` mode.
+1. Prompt in planning.
+2. Manifest handoff to coding agent.
 3. Run `/approve` to execute the pending plan.
-
-Generated artifacts:
-
-- `.spettro/PLAN.md` for plans.
 
 ## 5) Persist and resume conversations
 
 - `/compact` summarizes long threads to save context (or `/compact <focus...>` for focused summaries).
 - `/clear` saves current conversation and clears active messages.
 - `/resume` loads a prior conversation from the project’s conversation store.
+
+## 6) Customize
+
+Edit `spettro.agents.toml`, `agents/*.md` (e.g. `agents/docs-writer.md`) and restart.
