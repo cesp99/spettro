@@ -7,7 +7,7 @@ type Mode string
 const (
 	ModePlanning Mode = "planning"
 	ModeCoding   Mode = "coding"
-	ModeChat     Mode = "chat"
+	ModeChat     Mode = "ask"
 )
 
 func (m Mode) Next() Mode {

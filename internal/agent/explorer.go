@@ -29,7 +29,7 @@ func (e LLMExplorer) Explore(ctx context.Context, task string) (RunResult, error
 	}
 
 	systemPrompt := loadPromptOrFallback(e.CWD, "agents/explore.md", exploreFallbackPrompt)
-	result, traces, err := runToolLoop(ctx, toolLoopConfig{
+	result, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
 		CWD:             e.CWD,
@@ -50,7 +50,8 @@ func (e LLMExplorer) Explore(ctx context.Context, task string) (RunResult, error
 	result = stripLeakedToolCalls(result)
 	main, _ := stripThinkTags(result)
 	return RunResult{
-		Content: strings.TrimSpace(main),
-		Tools:   traces,
+		Content:    strings.TrimSpace(main),
+		Tools:      traces,
+		TokensUsed: tokens,
 	}, nil
 }

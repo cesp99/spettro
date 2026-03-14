@@ -32,7 +32,7 @@ var eyesPlanning = []string{
 
 // eyeArtFor returns the correct art for the given mode.
 func eyeArtFor(mode string) []string {
-	if mode == "planning" {
+	if mode == "planning" || mode == "research" || mode == "explore" {
 		return eyesPlanning
 	}
 	return eyesActing

@@ -64,19 +64,22 @@ var allCommands = []commandDef{
 	{"/help", "show help"},
 	{"/models", "switch model"},
 	{"/connect", "connect a provider"},
-	{"/setup", "setup wizard"},
 	{"/mode", "cycle mode"},
 	{"/approve", "execute pending plan"},
 	{"/permission", "set permission level"},
 	{"/budget", "set token budget per request  usage: /budget <n>"},
 	{"/image", "attach image to next message"},
 	{"/init", "analyze codebase and write SPETTRO.md"},
-	{"/explore", "explore the codebase with the AI"},
-	{"/search", "search repo files  usage: /search [query]"},
 	{"/compact", "summarize conversation (optionally focused)"},
 	{"/clear", "clear conversation history"},
 	{"/resume", "resume a previous conversation"},
 	{"/exit", "exit spettro"},
+}
+
+var permissionCommands = []commandDef{
+	{"/permission yolo", "no approval required for any action"},
+	{"/permission restricted", "ask once, remember for session"},
+	{"/permission ask-first", "always ask before executing"},
 }
 
 const localConnectProviderID = "__local_endpoint__"
@@ -100,16 +103,18 @@ func filterCommands(query string) []commandDef {
 type tickMsg time.Time
 
 type agentDoneMsg struct {
-	content string
-	meta    string // hint shown below the message
-	tools   []agent.ToolTrace
-	err     error
+	content    string
+	meta       string // hint shown below the message
+	tools      []agent.ToolTrace
+	tokensUsed int
+	err        error
 }
 
 type planDoneMsg struct {
-	plan  string
-	tools []agent.ToolTrace
-	err   error
+	plan       string
+	tools      []agent.ToolTrace
+	tokensUsed int
+	err        error
 }
 
 type commitDoneMsg struct {
@@ -131,19 +136,20 @@ type compactDoneMsg struct {
 	err     error
 }
 
-type initDoneMsg struct {
-	err error
-}
-
-type exploreDoneMsg struct {
-	content string
-	tools   []agent.ToolTrace
-	err     error
-}
-
 type toolProgressMsg struct {
 	trace agent.ToolTrace
 }
+
+// ── parallel agent tracking ───────────────────────────────────────────────────
+
+type parallelAgentEntry struct {
+	ID       string
+	Instance int    // 1-based instance number (for multiple of same agent)
+	Task     string // truncated task description
+	Status   string // "running" | "done" | "error"
+}
+
+type agentTickMsg struct{}
 
 type shellApprovalRequestMsg struct {
 	request  agent.ShellApprovalRequest
@@ -246,6 +252,13 @@ type Model struct {
 	pendingAuth *shellApprovalRequestMsg
 	approvalAltMode bool
 
+	// parallel agent tracking
+	parallelAgents []parallelAgentEntry
+	tickCount      int
+
+	// context window tracking
+	totalTokensUsed int
+
 	// conversation persistence
 	convID  string // current conversation ID (set on first message)
 	convDir string // path to .spettro/conversations/
@@ -259,9 +272,7 @@ type Model struct {
 	cwd       string
 	store     *storage.Store
 	providers *provider.Manager
-	planner   agent.PlanningAgent
-	coder     agent.CodingAgent
-	chatter   agent.ChatAgent
+	manifest  config.AgentManifest
 	committer agent.CommitAgent
 	searcher  agent.SearchAgent
 }
@@ -291,34 +302,24 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 
 	repoFiles, _ := scanRepoFiles(cwd)
 
+	manifest, _ := config.LoadAgentManifestForProject(cwd)
+	defaultMode := manifest.DefaultAgent
+	if defaultMode == "" {
+		defaultMode = "planning"
+	}
+
 	return Model{
-		mode:      "planning",
+		mode:      defaultMode,
 		cfg:       cfg,
 		cwd:       cwd,
 		store:     store,
 		providers: pm,
+		manifest:  manifest,
 		ta:        ta,
 		spin:      sp,
 		favorites: favs,
 		repoFiles: repoFiles,
 		convDir:   conversation.ProjectDir(store.GlobalDir, cwd),
-		planner: agent.LLMPlanner{
-			ProviderManager: pm,
-			ProviderName:    func() string { return cfg.ActiveProvider },
-			ModelName:       func() string { return cfg.ActiveModel },
-			CWD:             cwd,
-		},
-		coder: agent.LLMCoder{
-			ProviderManager: pm,
-			ProviderName:    func() string { return cfg.ActiveProvider },
-			ModelName:       func() string { return cfg.ActiveModel },
-			CWD:             cwd,
-		},
-		chatter: agent.Chatter{
-			ProviderManager: pm,
-			ProviderName:    func() string { return cfg.ActiveProvider },
-			ModelName:       func() string { return cfg.ActiveModel },
-		},
 		committer: agent.LLMCommitter{
 			ProviderManager: pm,
 			ProviderName:    func() string { return cfg.ActiveProvider },
@@ -326,6 +327,17 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		},
 		searcher: agent.RepoSearcher{},
 	}
+}
+
+func (m Model) currentAgent() (config.AgentSpec, bool) {
+	return m.manifest.AgentByID(m.mode)
+}
+
+func (m Model) currentColor() lipgloss.Color {
+	if spec, ok := m.manifest.AgentByID(m.mode); ok {
+		return modeColor(spec.Color)
+	}
+	return modeColor(m.mode)
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -341,6 +353,14 @@ func (m Model) Init() tea.Cmd {
 func tick() tea.Cmd {
 	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+var spinnerFrames = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+
+func agentTickCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return agentTickMsg{}
 	})
 }
 
@@ -397,6 +417,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveTools = nil
 		m.currentTool = nil
 		m.pendingAuth = nil
+		if msg.tokensUsed > 0 {
+			m.totalTokensUsed += msg.tokensUsed
+		}
 		if msg.err != nil {
 			m.showBanner("error: "+msg.err.Error(), "error")
 		} else {
@@ -411,6 +434,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.refreshViewport()
+		// Auto-compact when approaching context limit (85% threshold)
+		if cmd := m.autoCompactIfNeeded(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case planDoneMsg:
 		if !m.thinking {
@@ -423,6 +450,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveTools = nil
 		m.currentTool = nil
 		m.pendingAuth = nil
+		if msg.tokensUsed > 0 {
+			m.totalTokensUsed += msg.tokensUsed
+		}
 		if msg.err != nil {
 			m.showBanner("planning error: "+msg.err.Error(), "error")
 		} else {
@@ -435,6 +465,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.refreshViewport()
+		// Auto-compact when approaching context limit (85% threshold)
+		if cmd := m.autoCompactIfNeeded(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case commitDoneMsg:
 		if !m.thinking {
@@ -481,6 +515,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.autoSave()  // save full history before compacting
 			m.convID = "" // new conversation after compact
+			m.totalTokensUsed = 0 // reset context counter after compaction
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
 				Content: "── conversation compacted ──\n\n" + msg.summary,
@@ -489,45 +524,58 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshViewport()
 
-	case initDoneMsg:
-		if !m.thinking {
-			break
+	case agentTickMsg:
+		m.tickCount++
+		// Only keep ticking if there are running agents
+		for _, a := range m.parallelAgents {
+			if a.Status == "running" {
+				cmds = append(cmds, agentTickCmd())
+				break
+			}
 		}
-		m.thinking = false
-		m.cancelAgent = nil
-		if msg.err != nil {
-			m.showBanner("init error: "+msg.err.Error(), "error")
-		} else {
-			m.showBanner("SPETTRO.md written", "success")
-		}
-		m.refreshViewport()
-
-	case exploreDoneMsg:
-		if !m.thinking {
-			break
-		}
-		m.thinking = false
-		m.cancelAgent = nil
-		m.toolCh = nil
-		m.approvalCh = nil
-		m.liveTools = nil
-		m.currentTool = nil
-		m.pendingAuth = nil
-		if msg.err != nil {
-			m.showBanner("explore error: "+msg.err.Error(), "error")
-		} else {
-			m.messages = append(m.messages, ChatMessage{
-				Role:    RoleAssistant,
-				Content: msg.content,
-				Tools:   toToolItems(msg.tools),
-				At:      time.Now(),
-			})
-		}
-		m.refreshViewport()
+		m.vp.SetContent(m.renderMessages())
 
 	case toolProgressMsg:
 		if m.thinking {
 			t := msg.trace
+			// Handle "agent" tool specially for parallel agent display
+			if t.Name == "agent" {
+				var agentArgs struct {
+					ID   string `json:"id"`
+					Task string `json:"task"`
+				}
+				_ = json.Unmarshal([]byte(t.Args), &agentArgs)
+				if agentArgs.ID != "" {
+					if t.Status == "running" {
+						// Count existing instances of this agent ID
+						instance := 0
+						for _, a := range m.parallelAgents {
+							if a.ID == agentArgs.ID {
+								instance++
+							}
+						}
+						m.parallelAgents = append(m.parallelAgents, parallelAgentEntry{
+							ID:       agentArgs.ID,
+							Instance: instance + 1,
+							Task:     agentArgs.Task,
+							Status:   "running",
+						})
+						cmds = append(cmds, agentTickCmd())
+					} else {
+						// Update first running instance of this agent
+						for i, a := range m.parallelAgents {
+							if a.ID == agentArgs.ID && a.Status == "running" {
+								if t.Status == "error" {
+									m.parallelAgents[i].Status = "error"
+								} else {
+									m.parallelAgents[i].Status = "done"
+								}
+								break
+							}
+						}
+					}
+				}
+			}
 			if t.Status == "running" {
 				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
 				m.currentTool = &item
@@ -692,7 +740,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "shift+tab":
-		m.mode = nextMode(m.mode)
+		m.mode = nextAgent(m.manifest, m.mode)
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 		return m, nil
 
@@ -821,7 +869,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/exit", "/quit":
 		return m, tea.Quit
 	case "/mode", "/next":
-		m.mode = nextMode(m.mode)
+		m.mode = nextAgent(m.manifest, m.mode)
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 	case "/setup":
 		m.showSetup = true
@@ -889,10 +937,13 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/approve":
 		if m.pendingPlan == "" {
 			m.showBanner("no pending plan — run a planning prompt first", "info")
-		} else if m.mode != "coding" {
-			m.showBanner("switch to coding mode first (shift+tab)", "info")
 		} else {
-			return m.runCoder(m.pendingPlan, true, nil)
+			spec, ok := m.manifest.AgentByID("coding")
+			if !ok {
+				m.showBanner("coding agent not found in manifest", "error")
+			} else {
+				return m.runAgent(spec, m.pendingPlan, nil, nil)
+			}
 		}
 	case "/image":
 		if len(fields) < 2 {
@@ -951,6 +1002,8 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 	mentionedFiles := m.extractMentionedFiles(input)
 	prompt := injectMentionGuidance(input, mentionedFiles)
 
+	m.parallelAgents = nil
+
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleUser,
 		Content: input,
@@ -958,57 +1011,16 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 	})
 	m.refreshViewport()
 
-	switch m.mode {
-	case "planning":
-		return m.runPlanner(prompt, mentionedFiles)
-	case "coding":
-		return m.runCoder(prompt, false, mentionedFiles)
-	case "chat":
-		return m.runChatter(prompt)
+	spec, ok := m.manifest.AgentByID(m.mode)
+	if !ok {
+		m.showBanner("unknown agent: "+m.mode, "error")
+		return m, nil
 	}
-	return m, nil
+	return m.runAgent(spec, prompt, mentionedFiles, nil)
 }
 
-// runPlanner starts an async planning call with live tool streaming.
-func (m Model) runPlanner(prompt string, mentionedFiles []string) (tea.Model, tea.Cmd) {
-	m.thinking = true
-	m.liveTools = nil
-	m.currentTool = nil
-	toolCh := make(chan agent.ToolTrace, 64)
-	m.toolCh = toolCh
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
-	store := m.store
-	cwd := m.cwd
-	pm := m.providers
-	providerName := m.cfg.ActiveProvider
-	modelName := m.cfg.ActiveModel
-	planner := agent.LLMPlanner{
-		ProviderManager: pm,
-		ProviderName:    func() string { return providerName },
-		ModelName:       func() string { return modelName },
-		CWD:             cwd,
-		MaxTokens:       m.cfg.TokenBudget,
-		RequiredReads:   mentionedFiles,
-		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
-	}
-	return m, tea.Batch(
-		m.spin.Tick,
-		waitForTool(toolCh),
-		func() tea.Msg {
-			plan, err := planner.Plan(ctx, prompt)
-			close(toolCh)
-			if err != nil {
-				return planDoneMsg{err: err}
-			}
-			_ = store.WriteProjectFile("PLAN.md", plan.Content)
-			return planDoneMsg{plan: plan.Content, tools: plan.Tools}
-		},
-	)
-}
-
-// runCoder starts an async coding call with live tool streaming.
-func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (tea.Model, tea.Cmd) {
+// runAgent is the unified agent runner for the TUI.
+func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []string, images []string) (tea.Model, tea.Cmd) {
 	m.thinking = true
 	m.liveTools = nil
 	m.currentTool = nil
@@ -1022,13 +1034,22 @@ func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (t
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel
-	coder := agent.LLMCoder{
+	cwd := m.cwd
+	store := m.store
+	perm := m.cfg.Permission
+	agentID := spec.ID
+
+	manifest := m.manifest
+	a := agent.LLMAgent{
+		Spec:            spec,
 		ProviderManager: pm,
 		ProviderName:    func() string { return providerName },
 		ModelName:       func() string { return modelName },
-		CWD:             m.cwd,
+		CWD:             cwd,
 		MaxTokens:       m.cfg.TokenBudget,
 		RequiredReads:   mentionedFiles,
+		Images:          images,
+		Manifest:        &manifest,
 		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
 		ShellApproval: func(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			respCh := make(chan shellApprovalResponse, 1)
@@ -1048,52 +1069,36 @@ func (m Model) runCoder(input string, approved bool, mentionedFiles []string) (t
 			}
 		},
 	}
-	perm := m.cfg.Permission
+
 	return m, tea.Batch(
 		m.spin.Tick,
 		waitForTool(toolCh),
 		waitForShellApproval(approvalCh),
 		func() tea.Msg {
-			if perm == config.PermissionAskFirst && !approved {
+			// For ask-first + coding agents: require approval
+			if perm == config.PermissionAskFirst && spec.Mode == "coding" {
 				close(toolCh)
 				close(approvalCh)
 				return agentDoneMsg{content: "ask-first mode: generate a plan then use /approve"}
 			}
-			result, err := coder.Execute(ctx, input, perm, approved)
+			// Override permission from global config if more permissive
+			runSpec := spec
+			if perm != config.PermissionAskFirst {
+				runSpec.Permission = perm
+			}
+			a.Spec = runSpec
+			result, err := a.Run(ctx, input)
 			close(toolCh)
 			close(approvalCh)
 			if err != nil {
 				return agentDoneMsg{err: err}
 			}
-			return agentDoneMsg{content: result.Content, tools: result.Tools}
-		},
-	)
-}
-
-// runChatter starts an async chat call.
-func (m Model) runChatter(input string) (tea.Model, tea.Cmd) {
-	m.thinking = true
-	imgs := append([]string(nil), m.pendingImgs...)
-	m.pendingImgs = nil
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
-	pm := m.providers
-	providerName := m.cfg.ActiveProvider
-	modelName := m.cfg.ActiveModel
-	return m, tea.Batch(
-		m.spin.Tick,
-		func() tea.Msg {
-			resp, err := pm.Send(ctx, providerName, modelName, provider.Request{
-				Prompt: input,
-				Images: imgs,
-			})
-			if err != nil {
-				return agentDoneMsg{err: err}
+			// Planning agents save their result to PLAN.md
+			if agentID == "planning" || spec.Mode == "planning" {
+				_ = store.WriteProjectFile("PLAN.md", result.Content)
+				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed}
 			}
-			return agentDoneMsg{
-				content: resp.Content,
-				meta:    "",
-			}
+			return agentDoneMsg{content: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed, meta: ""}
 		},
 	)
 }
@@ -1181,85 +1186,26 @@ func (m Model) runCompact(focus string) (tea.Model, tea.Cmd) {
 
 // runInit runs the /init agent: explores the codebase and writes SPETTRO.md.
 func (m Model) runInit() (tea.Model, tea.Cmd) {
-	initPromptPath := filepath.Join(m.cwd, "agents/init.md")
-	raw, err := os.ReadFile(initPromptPath)
-	if err != nil {
-		m.showBanner("agents/init.md not found", "error")
+	spec, ok := m.manifest.AgentByID("init")
+	if !ok {
+		m.showBanner("init agent not found in manifest", "error")
 		return m, nil
 	}
-	initPrompt := strings.TrimSpace(string(raw))
-	if initPrompt == "" {
-		m.showBanner("agents/init.md is empty", "error")
-		return m, nil
-	}
-
-	m.thinking = true
-	m.liveTools = nil
-	m.currentTool = nil
-	toolCh := make(chan agent.ToolTrace, 64)
-	m.toolCh = toolCh
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
-	cwd := m.cwd
-	pm := m.providers
-	providerName := m.cfg.ActiveProvider
-	modelName := m.cfg.ActiveModel
-	coder := agent.LLMCoder{
-		ProviderManager: pm,
-		ProviderName:    func() string { return providerName },
-		ModelName:       func() string { return modelName },
-		CWD:             cwd,
-		MaxTokens:       m.cfg.TokenBudget,
-		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
-	}
-	return m, tea.Batch(
-		m.spin.Tick,
-		waitForTool(toolCh),
-		func() tea.Msg {
-			_, err := coder.Execute(ctx, initPrompt, config.PermissionYOLO, true)
-			close(toolCh)
-			return initDoneMsg{err: err}
-		},
-	)
+	task := "Analyze this codebase and create (or improve) a SPETTRO.md file in the repository root."
+	return m.runAgent(spec, task, nil, nil)
 }
 
-// runExplore starts an async codebase exploration using LLMExplorer.
+// runExplore starts an async codebase exploration.
 func (m Model) runExplore(task string) (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(task) == "" {
 		task = "Explore this codebase: understand the architecture, key types, conventions, and entry points."
 	}
-	m.thinking = true
-	m.liveTools = nil
-	m.currentTool = nil
-	toolCh := make(chan agent.ToolTrace, 64)
-	m.toolCh = toolCh
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelAgent = cancel
-	cwd := m.cwd
-	pm := m.providers
-	providerName := m.cfg.ActiveProvider
-	modelName := m.cfg.ActiveModel
-	explorer := agent.LLMExplorer{
-		ProviderManager: pm,
-		ProviderName:    func() string { return providerName },
-		ModelName:       func() string { return modelName },
-		CWD:             cwd,
-		MaxTokens:       m.cfg.TokenBudget,
-		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
+	spec, ok := m.manifest.AgentByID("explore")
+	if !ok {
+		m.showBanner("explore agent not found in manifest", "error")
+		return m, nil
 	}
-	capturedTask := task
-	return m, tea.Batch(
-		m.spin.Tick,
-		waitForTool(toolCh),
-		func() tea.Msg {
-			result, err := explorer.Explore(ctx, capturedTask)
-			close(toolCh)
-			if err != nil {
-				return exploreDoneMsg{err: err}
-			}
-			return exploreDoneMsg{content: result.Content, tools: result.Tools}
-		},
-	)
+	return m.runAgent(spec, task, nil, nil)
 }
 
 func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1967,40 +1913,49 @@ func (m Model) View() string {
 	inputArea := m.viewInput()
 	statusBar := m.viewStatusBar()
 
-	return lipgloss.JoinVertical(lipgloss.Left,
+	parts := []string{
 		header,
 		eyes,
 		sep,
 		content,
 		sep,
-		inputArea,
-		statusBar,
-	)
+	}
+	if pa := m.renderParallelAgents(); pa != "" {
+		parts = append(parts, pa)
+	}
+	parts = append(parts, inputArea, statusBar)
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // viewHeader renders the top bar.
 func (m Model) viewHeader() string {
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 
 	// Left: logo
 	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro")
 
-	// Center: mode tabs
-	modes := []string{"planning", "coding", "chat"}
-	tabs := make([]string, len(modes))
-	for i, mo := range modes {
-		if mo == m.mode {
-			tabs[i] = lipgloss.NewStyle().
+	// Center: only the 3 primary mode tabs (planning, coding, ask)
+	primaryIDs := []string{"planning", "coding", "ask"}
+	var tabs []string
+	for _, id := range primaryIDs {
+		ag, ok := m.manifest.AgentByID(id)
+		if !ok {
+			continue
+		}
+		agColor := modeColor(ag.Color)
+		if ag.ID == m.mode {
+			tabs = append(tabs, lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#0D0D0D")).
-				Background(modeColor(mo)).
+				Background(agColor).
 				PaddingLeft(1).PaddingRight(1).
-				Render(mo)
+				Render(ag.ID))
 		} else {
-			tabs[i] = lipgloss.NewStyle().
+			tabs = append(tabs, lipgloss.NewStyle().
 				Foreground(colorMuted).
 				PaddingLeft(1).PaddingRight(1).
-				Render(mo)
+				Render(ag.ID))
 		}
 	}
 	center := strings.Join(tabs, " ")
@@ -2018,6 +1973,10 @@ func (m Model) viewHeader() string {
 			}
 			break
 		}
+	}
+	// Truncate model name to 12 characters max
+	if len(modelLabel) > 12 {
+		modelLabel = modelLabel[:12]
 	}
 	permText := string(m.cfg.Permission)
 	logoW := lipgloss.Width(logo)
@@ -2060,7 +2019,7 @@ func (m Model) viewCommandPalette() string {
 	if len(m.cmdItems) == 0 {
 		return ""
 	}
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 	var rows []string
 	for i, cmd := range m.cmdItems {
 		var nameStyle, descStyle lipgloss.Style
@@ -2087,7 +2046,7 @@ func (m Model) viewMentionPalette() string {
 	if len(m.mentionItems) == 0 {
 		return ""
 	}
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 	var rows []string
 	for i, item := range m.mentionItems {
 		style := lipgloss.NewStyle().Foreground(colorMuted)
@@ -2110,9 +2069,13 @@ func (m Model) viewMentionPalette() string {
 
 // viewInput renders the input area with prompt prefix.
 func (m Model) viewInput() string {
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
+	agentLabel := m.mode
+	if spec, ok := m.manifest.AgentByID(m.mode); ok {
+		agentLabel = spec.ID
+	}
 	prompt := modePrompt(m.mode)
-	label := lipgloss.NewStyle().Foreground(mc).Bold(true).Render(prompt + " " + m.mode)
+	label := lipgloss.NewStyle().Foreground(mc).Bold(true).Render(prompt + " " + agentLabel)
 
 	lines := []string{label}
 	if m.pendingAuth != nil {
@@ -2162,14 +2125,142 @@ func (m Model) viewInput() string {
 	return lipgloss.JoinVertical(lipgloss.Left, blocks...)
 }
 
-// viewStatusBar renders the bottom help bar.
+// renderParallelAgents renders the parallel agent progress display.
+func (m Model) renderParallelAgents() string {
+	if len(m.parallelAgents) == 0 {
+		return ""
+	}
+	frame := spinnerFrames[m.tickCount%len(spinnerFrames)]
+	var lines []string
+	for _, a := range m.parallelAgents {
+		var dot string
+		var style lipgloss.Style
+		agentColor := modeColor("")
+		if spec, ok := m.manifest.AgentByID(a.ID); ok {
+			agentColor = modeColor(spec.Color)
+		}
+		switch a.Status {
+		case "running":
+			dot = frame
+			style = lipgloss.NewStyle().Foreground(agentColor).Bold(true)
+		case "done":
+			dot = "●"
+			style = lipgloss.NewStyle().Foreground(agentColor)
+		case "error":
+			dot = "✗"
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+		default:
+			dot = "○"
+			style = lipgloss.NewStyle().Foreground(colorMuted)
+		}
+		label := a.ID
+		if a.Instance > 1 {
+			label = fmt.Sprintf("%s [%d]", a.ID, a.Instance)
+		}
+		task := a.Task
+		if len(task) > 50 {
+			task = task[:47] + "..."
+		}
+		line := style.Render(fmt.Sprintf("  %s %-18s", dot, label)) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// contextWindow returns the context window size for the active model (0 = unknown).
+func (m Model) contextWindow() int {
+	for _, mod := range m.providers.Models() {
+		if mod.Provider == m.cfg.ActiveProvider && mod.Name == m.cfg.ActiveModel {
+			return mod.Context
+		}
+	}
+	return 0
+}
+
+// contextWindowDefault returns a sensible default context window when the model's limit is unknown.
+func contextWindowDefault(providerName string) int {
+	switch providerName {
+	case "anthropic":
+		return 200_000
+	case "openai":
+		return 128_000
+	case "google":
+		return 1_000_000
+	default:
+		return 128_000
+	}
+}
+
+// autoCompactIfNeeded triggers a compact if tokens used exceeds 85% of the context window.
+// Returns a tea.Cmd if compaction should start, nil otherwise.
+func (m Model) autoCompactIfNeeded() tea.Cmd {
+	if m.thinking || m.totalTokensUsed == 0 {
+		return nil
+	}
+	window := m.contextWindow()
+	if window == 0 {
+		window = contextWindowDefault(m.cfg.ActiveProvider)
+	}
+	threshold := int(float64(window) * 0.85)
+	if m.totalTokensUsed < threshold {
+		return nil
+	}
+	// Only auto-compact if there's enough conversation to compact
+	if len(m.messages) < 3 {
+		return nil
+	}
+	_, cmd := m.runCompact("preserve all key decisions, code changes, and action items")
+	return cmd
+}
+
+// formatTokenCount formats a token count as "12.4k" or "1.2M".
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// viewStatusBar renders the bottom help bar with context usage in the bottom right.
 func (m Model) viewStatusBar() string {
-	parts := []string{
+	left := strings.Join([]string{
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("f2: model"),
 		styleMuted.Render("/help"),
+	}, styleDim.Render("  ·  "))
+
+	// Context window indicator (right side)
+	window := m.contextWindow()
+	if window == 0 {
+		window = contextWindowDefault(m.cfg.ActiveProvider)
 	}
-	bar := strings.Join(parts, styleDim.Render("  ·  "))
+	used := m.totalTokensUsed
+	pct := float64(used) / float64(window)
+	var ctxColor lipgloss.Color
+	switch {
+	case pct >= 0.85:
+		ctxColor = lipgloss.Color("#EF4444") // red
+	case pct >= 0.65:
+		ctxColor = lipgloss.Color("#F59E0B") // yellow
+	default:
+		ctxColor = lipgloss.Color("#6B7280") // muted
+	}
+	ctxLabel := fmt.Sprintf("%s / %s ctx", formatTokenCount(used), formatTokenCount(window))
+	right := lipgloss.NewStyle().Foreground(ctxColor).Render(ctxLabel)
+
+	// Pad left side to fill width, right-align the context indicator
+	leftWidth := m.width - lipgloss.Width(right) - 2
+	if leftWidth < 0 {
+		leftWidth = 0
+	}
+	leftPadded := lipgloss.NewStyle().Width(leftWidth).Render(left)
+
+	bar := leftPadded + right + " "
 	return lipgloss.NewStyle().
 		Width(m.width).
 		Background(lipgloss.Color("#0D0D0D")).
@@ -2180,7 +2271,7 @@ func (m Model) viewStatusBar() string {
 // viewSelector renders the model selector dialog.
 // Only shows models from connected providers (those with an API key set).
 func (m Model) viewSelector() string {
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ select model")
 
@@ -2326,7 +2417,7 @@ func (m Model) viewSelector() string {
 // Step 0: searchable list of ALL providers from the catalog.
 // Step 1: API key input for the chosen provider.
 func (m Model) viewConnect() string {
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 
 	dialogWidth := 60
 	if m.width < dialogWidth+4 {
@@ -2558,7 +2649,7 @@ func (m Model) renderMessages() string {
 		return styleMuted.Render("  no messages yet — type a prompt or /help")
 	}
 
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 	var parts []string
 
 	for _, msg := range m.messages {
@@ -2652,7 +2743,10 @@ func (m Model) recalcLayout() Model {
 		inputH += 5 + len(m.mentionItems)
 	}
 
-	fixed := headerH + eyesH + sepH + inputH + statusH
+	// Parallel agents display
+	parallelH := len(m.parallelAgents)
+
+	fixed := headerH + eyesH + sepH + inputH + statusH + parallelH
 
 	contentH := m.height - fixed
 	if contentH < 3 {
@@ -2713,7 +2807,7 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) viewResume() string {
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation")
 
 	var rows []string
@@ -2828,7 +2922,7 @@ func (m Model) updateTrust(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) viewTrust() string {
-	mc := modeColor(m.mode)
+	mc := m.currentColor()
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ confirm folder trust")
 	pathStyle := lipgloss.NewStyle().Foreground(colorText).Bold(true)
 	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24"))
@@ -3256,12 +3350,25 @@ func truncateLabel(s string, max int) string {
 	return string(r[:max-1]) + "…"
 }
 
+// nextAgent cycles only through the 3 primary modes shown in the header.
+func nextAgent(_ config.AgentManifest, current string) string {
+	primary := []string{"planning", "coding", "ask"}
+	for i, id := range primary {
+		if id == current {
+			return primary[(i+1)%len(primary)]
+		}
+	}
+	return primary[0]
+}
+
+// nextMode is kept as a legacy shim; callers in updateMain/handleCommand
+// now use the manifest-aware nextAgent instead.
 func nextMode(mode string) string {
 	switch mode {
 	case "planning":
 		return "coding"
 	case "coding":
-		return "chat"
+		return "ask"
 	default:
 		return "planning"
 	}
@@ -3270,7 +3377,7 @@ func nextMode(mode string) string {
 func prevMode(mode string) string {
 	switch mode {
 	case "planning":
-		return "chat"
+		return "ask"
 	case "coding":
 		return "planning"
 	default:

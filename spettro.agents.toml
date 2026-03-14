@@ -12,6 +12,26 @@ allow_network_tools = false
 log_tool_calls = true
 
 [[tools]]
+id = "glob"
+name = "Glob"
+description = "Find files by name pattern."
+kind = "builtin"
+enabled = true
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ["read", "search"]
+
+[[tools]]
+id = "grep"
+name = "Grep"
+description = "Search file contents with regex."
+kind = "builtin"
+enabled = true
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ["read", "search"]
+
+[[tools]]
 id = "repo-search"
 name = "Repository Search"
 description = "Search file names and file contents in the current repository."
@@ -52,25 +72,94 @@ requires_approval = true
 permitted_actions = ["execute", "git"]
 
 [[tools]]
-id = "provider-chat"
-name = "Provider Chat"
-description = "Send prompts/images to the active model provider."
+id = "ls"
+name = "List Directory"
+description = "List directory contents."
+kind = "builtin"
+enabled = true
+timeout_sec = 10
+requires_approval = false
+permitted_actions = ["read", "search"]
+
+[[tools]]
+id = "web-fetch"
+name = "Web Fetch"
+description = "Fetch content from a URL."
+kind = "builtin"
+enabled = true
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ["read", "search"]
+
+[[tools]]
+id = "web-search"
+name = "Web Search"
+description = "Search the web for information."
+kind = "builtin"
+enabled = true
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ["read", "search"]
+
+[[tools]]
+id = "todo-write"
+name = "Todo Write"
+description = "Write a list of todos to track task progress."
+kind = "builtin"
+enabled = true
+timeout_sec = 10
+requires_approval = false
+permitted_actions = ["write"]
+
+[[tools]]
+id = "bash"
+name = "Bash"
+description = "Execute a bash command and return output."
 kind = "builtin"
 enabled = true
 timeout_sec = 120
-requires_approval = false
-permitted_actions = ["chat"]
+requires_approval = true
+permitted_actions = ["execute", "git"]
 
 [[tools]]
-id = "github-mcp"
-name = "GitHub MCP"
-description = "Optional MCP bridge for PR/issue/workflow operations."
-kind = "mcp"
-enabled = false
-entry_point = "mcp://github"
-timeout_sec = 45
-requires_approval = true
-permitted_actions = ["network", "git", "read"]
+id = "comment"
+name = "Comment"
+description = "Emit a progress comment or note."
+kind = "builtin"
+enabled = true
+timeout_sec = 5
+requires_approval = false
+permitted_actions = ["read"]
+
+[[tools]]
+id = "agent"
+name = "Agent"
+description = "Spawn a sub-agent to handle a subtask."
+kind = "builtin"
+enabled = true
+timeout_sec = 300
+requires_approval = false
+permitted_actions = ["read", "write", "execute", "git", "search", "plan", "ask"]
+
+[[agents]]
+id = "architect"
+name = "Architect"
+description = "Main orchestrator — delegates to specialized agents and synthesizes results."
+skill = "orchestration"
+mode = "custom"
+color = "magenta"
+model_provider = ""
+model = ""
+prompt_file = "agents/architect.md"
+system_prompt = ""
+allowed_tools = ["agent", "comment", "glob", "grep", "file-read", "todo-write"]
+permitted_actions = ["read", "search", "plan", "write"]
+permission = "ask-first"
+temperature = 0.2
+max_tokens = 8192
+max_steps = 50
+handoffs = ["coding", "planning", "reviewer", "tester", "debugger", "git", "docs-writer", "research", "explore", "init"]
+enabled = true
 
 [[agents]]
 id = "planning"
@@ -78,17 +167,18 @@ name = "Planning Agent"
 description = "Produces implementation plans and risk notes before coding."
 skill = "architecture"
 mode = "planning"
+color = "blue"
 model_provider = ""
 model = ""
 prompt_file = "agents/planning.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "file-read"]
+allowed_tools = ["glob", "grep", "file-read"]
 permitted_actions = ["read", "search", "plan"]
 permission = "ask-first"
 temperature = 0.2
 max_tokens = 4096
-max_steps = 20
-handoffs = ["coding", "chat"]
+max_steps = 30
+handoffs = ["coding", "ask"]
 enabled = true
 
 [[agents]]
@@ -97,35 +187,37 @@ name = "Coding Agent"
 description = "Executes approved plans and produces code changes."
 skill = "implementation"
 mode = "coding"
+color = "green"
 model_provider = ""
 model = ""
 prompt_file = "agents/coding.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "file-read", "file-write", "shell-exec"]
+allowed_tools = ["glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment"]
 permitted_actions = ["read", "write", "execute", "git"]
 permission = "restricted"
 temperature = 0.1
 max_tokens = 8192
-max_steps = 40
-handoffs = ["planning", "chat"]
+max_steps = 24
+handoffs = ["planning", "ask"]
 enabled = true
 
 [[agents]]
-id = "chat"
-name = "Chat Agent"
+id = "ask"
+name = "Ask Agent"
 description = "General assistant mode for explanation and Q&A."
 skill = "conversation"
-mode = "chat"
+mode = "ask"
+color = "cyan"
 model_provider = ""
 model = ""
 prompt_file = "agents/chat.md"
 system_prompt = ""
-allowed_tools = ["provider-chat", "repo-search"]
-permitted_actions = ["chat", "read", "search"]
+allowed_tools = ["glob", "grep", "file-read"]
+permitted_actions = ["ask", "read", "search"]
 permission = "ask-first"
 temperature = 0.4
 max_tokens = 8192
-max_steps = 12
+max_steps = 10
 handoffs = ["planning", "coding"]
 enabled = true
 
@@ -135,12 +227,13 @@ name = "Research Agent"
 description = "Investigates codebase behavior, architecture, and implementation options."
 skill = "analysis"
 mode = "custom"
+color = "blue"
 model_provider = ""
 model = ""
 prompt_file = "agents/research.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "provider-chat"]
-permitted_actions = ["read", "search", "chat", "plan"]
+allowed_tools = ["glob", "grep", "file-read"]
+permitted_actions = ["read", "search", "plan"]
 permission = "ask-first"
 temperature = 0.3
 max_tokens = 8192
@@ -149,22 +242,23 @@ handoffs = ["planning", "coding", "reviewer"]
 enabled = true
 
 [[agents]]
-id = "git-expert"
-name = "Git Expert Agent"
-description = "Handles branch hygiene, commit strategy, changelog-ready summaries, and safe git workflows."
+id = "git"
+name = "Git Agent"
+description = "Handles all git operations: commits, branches, PRs, history, and safe git workflows."
 skill = "git"
 mode = "custom"
+color = "yellow"
 model_provider = ""
 model = ""
-prompt_file = "agents/git-expert.md"
+prompt_file = "agents/git.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "shell-exec", "file-write", "github-mcp"]
-permitted_actions = ["read", "search", "execute", "git", "write"]
+allowed_tools = ["glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"]
+permitted_actions = ["read", "search", "execute", "git"]
 permission = "restricted"
 temperature = 0.1
 max_tokens = 4096
 max_steps = 20
-handoffs = ["coding", "reviewer", "chat"]
+handoffs = ["coding", "reviewer", "ask"]
 enabled = true
 
 [[agents]]
@@ -173,12 +267,13 @@ name = "Code Review Agent"
 description = "Reviews changes for logic, security, regressions, and missing tests."
 skill = "review"
 mode = "custom"
+color = "red"
 model_provider = ""
 model = ""
 prompt_file = "agents/reviewer.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "shell-exec", "provider-chat"]
-permitted_actions = ["read", "search", "execute", "chat", "plan"]
+allowed_tools = ["glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"]
+permitted_actions = ["read", "search", "execute", "plan"]
 permission = "ask-first"
 temperature = 0.2
 max_tokens = 8192
@@ -192,11 +287,12 @@ name = "Debugger Agent"
 description = "Reproduces failures, isolates root cause, and proposes minimal-risk fixes."
 skill = "debugging"
 mode = "custom"
+color = "magenta"
 model_provider = ""
 model = ""
 prompt_file = "agents/debugger.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "shell-exec", "file-write"]
+allowed_tools = ["glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment"]
 permitted_actions = ["read", "search", "execute", "write", "plan"]
 permission = "restricted"
 temperature = 0.1
@@ -211,17 +307,18 @@ name = "Testing Agent"
 description = "Designs and runs focused tests, then summarizes confidence and residual risk."
 skill = "testing"
 mode = "custom"
+color = "yellow"
 model_provider = ""
 model = ""
 prompt_file = "agents/tester.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "shell-exec", "file-write"]
+allowed_tools = ["glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment"]
 permitted_actions = ["read", "search", "execute", "write", "plan"]
 permission = "restricted"
 temperature = 0.1
 max_tokens = 4096
 max_steps = 24
-handoffs = ["reviewer", "coding", "chat"]
+handoffs = ["reviewer", "coding", "ask"]
 enabled = true
 
 [[agents]]
@@ -230,15 +327,56 @@ name = "Documentation Agent"
 description = "Writes and updates technical docs, usage guides, and migration notes."
 skill = "documentation"
 mode = "custom"
+color = "cyan"
 model_provider = ""
 model = ""
 prompt_file = "agents/docs-writer.md"
 system_prompt = ""
-allowed_tools = ["repo-search", "file-write", "provider-chat"]
-permitted_actions = ["read", "search", "write", "chat"]
+allowed_tools = ["glob", "grep", "file-read", "file-write"]
+permitted_actions = ["read", "search", "write", "ask"]
 permission = "ask-first"
 temperature = 0.3
 max_tokens = 8192
 max_steps = 20
-handoffs = ["reviewer", "chat", "planning"]
+handoffs = ["reviewer", "ask", "planning"]
+enabled = true
+
+[[agents]]
+id = "explore"
+name = "Explore Agent"
+description = "Maps and understands repository architecture, key types, and conventions. Read-only."
+skill = "analysis"
+mode = "custom"
+color = "blue"
+model_provider = ""
+model = ""
+prompt_file = "agents/explore.md"
+system_prompt = ""
+allowed_tools = ["glob", "grep", "file-read"]
+permitted_actions = ["read", "search"]
+permission = "ask-first"
+temperature = 0.2
+max_tokens = 8192
+max_steps = 40
+handoffs = ["planning", "ask"]
+enabled = true
+
+[[agents]]
+id = "init"
+name = "Init Agent"
+description = "Analyzes a codebase and creates or improves a SPETTRO.md context file."
+skill = "documentation"
+mode = "custom"
+color = "cyan"
+model_provider = ""
+model = ""
+prompt_file = "agents/init.md"
+system_prompt = ""
+allowed_tools = ["glob", "grep", "file-read", "file-write"]
+permitted_actions = ["read", "search", "write"]
+permission = "ask-first"
+temperature = 0.3
+max_tokens = 8192
+max_steps = 30
+handoffs = ["planning", "ask"]
 enabled = true

@@ -53,6 +53,7 @@ type AgentSpec struct {
 	Description      string          `toml:"description"`
 	Skill            string          `toml:"skill"`
 	Mode             string          `toml:"mode"`
+	Color            string          `toml:"color"`
 	ModelProvider    string          `toml:"model_provider"`
 	Model            string          `toml:"model"`
 	SystemPrompt     string          `toml:"system_prompt"`
@@ -82,97 +83,33 @@ func DefaultAgentManifest() AgentManifest {
 			LogToolCalls:      true,
 		},
 		Tools: []ToolSpec{
-			{
-				ID:               "repo-search",
-				Name:             "Repository Search",
-				Description:      "Searches file names and content inside the project.",
-				Kind:             "builtin",
-				Enabled:          true,
-				TimeoutSec:       30,
-				RequiresApproval: false,
-				PermittedActions: []string{"read", "search"},
-			},
-			{
-				ID:               "file-read",
-				Name:             "File Reader",
-				Description:      "Reads file contents (optionally partial) in the workspace.",
-				Kind:             "builtin",
-				Enabled:          true,
-				TimeoutSec:       30,
-				RequiresApproval: false,
-				PermittedActions: []string{"read"},
-			},
-			{
-				ID:               "file-write",
-				Name:             "File Writer",
-				Description:      "Creates and edits files in the repository workspace.",
-				Kind:             "builtin",
-				Enabled:          true,
-				TimeoutSec:       60,
-				RequiresApproval: true,
-				PermittedActions: []string{"write"},
-			},
-			{
-				ID:               "shell-exec",
-				Name:             "Shell Executor",
-				Description:      "Runs shell commands in the project directory.",
-				Kind:             "builtin",
-				Enabled:          true,
-				TimeoutSec:       120,
-				RequiresApproval: true,
-				PermittedActions: []string{"execute", "git"},
-			},
-			{
-				ID:               "provider-chat",
-				Name:             "Provider Chat",
-				Description:      "Sends prompts and images to the active LLM provider.",
-				Kind:             "builtin",
-				Enabled:          true,
-				TimeoutSec:       120,
-				RequiresApproval: false,
-				PermittedActions: []string{"chat"},
-			},
+			{ID: "glob", Name: "Glob", Description: "Find files by name pattern.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
+			{ID: "grep", Name: "Grep", Description: "Search file contents with regex.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
+			{ID: "file-read", Name: "File Reader", Description: "Reads file contents in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}},
+			{ID: "file-write", Name: "File Writer", Description: "Creates and edits files in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}},
+			{ID: "shell-exec", Name: "Shell Executor", Description: "Runs shell commands in the project directory.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}},
+			{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
+			{ID: "ls", Name: "List Directory", Description: "List directory contents.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
+			{ID: "web-fetch", Name: "Web Fetch", Description: "Fetch content from a URL.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
+			{ID: "web-search", Name: "Web Search", Description: "Search the web for information.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
+			{ID: "todo-write", Name: "Todo Write", Description: "Write a list of todos to track task progress.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}},
+			{ID: "bash", Name: "Bash", Description: "Execute a bash command and return output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}},
+			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}},
+			{ID: "agent", Name: "Agent", Description: "Spawn a sub-agent to handle a subtask.", Kind: "builtin", Enabled: true, TimeoutSec: 300, RequiresApproval: false, PermittedActions: []string{"read", "write", "execute", "git", "search", "plan", "ask"}},
 		},
 		Agents: []AgentSpec{
-			{
-				ID:               "planning",
-				Name:             "Planning Agent",
-				Description:      "Plans changes and produces approved implementation steps.",
-				Skill:            "architecture",
-				Mode:             "planning",
-				AllowedTools:     []string{"repo-search", "file-read"},
-				PermittedActions: []string{"read", "search", "plan"},
-				Permission:       PermissionAskFirst,
-				MaxSteps:         20,
-				Enabled:          true,
-				Handoffs:         []string{"coding", "chat"},
-			},
-			{
-				ID:               "coding",
-				Name:             "Coding Agent",
-				Description:      "Executes approved plans with permission-aware actions.",
-				Skill:            "implementation",
-				Mode:             "coding",
-				AllowedTools:     []string{"repo-search", "file-read", "file-write", "shell-exec"},
-				PermittedActions: []string{"read", "write", "execute", "git"},
-				Permission:       PermissionRestricted,
-				MaxSteps:         40,
-				Enabled:          true,
-				Handoffs:         []string{"planning", "chat"},
-			},
-			{
-				ID:               "chat",
-				Name:             "Chat Agent",
-				Description:      "General assistant mode for questions, explanations, and Q&A.",
-				Skill:            "conversation",
-				Mode:             "chat",
-				AllowedTools:     []string{"provider-chat", "repo-search"},
-				PermittedActions: []string{"chat", "read", "search"},
-				Permission:       PermissionAskFirst,
-				MaxSteps:         10,
-				Enabled:          true,
-				Handoffs:         []string{"planning", "coding"},
-			},
+			{ID: "architect", Name: "Architect", Description: "Main orchestrator", Skill: "orchestration", Mode: "custom", Color: "magenta", AllowedTools: []string{"agent", "comment", "glob", "grep", "file-read", "todo-write"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionAskFirst, MaxSteps: 50, Enabled: false, Handoffs: []string{"coding", "planning", "reviewer", "tester", "debugger", "git", "docs-writer", "research", "explore", "init"}, PromptFile: "agents/architect.md"},
+			{ID: "planning", Name: "Planning Agent", Description: "Plans changes and produces approved implementation steps.", Skill: "architecture", Mode: "planning", Color: "blue", AllowedTools: []string{"agent", "glob", "grep", "file-read", "comment"}, PermittedActions: []string{"read", "search", "plan"}, Permission: PermissionAskFirst, MaxSteps: 30, Enabled: true, Handoffs: []string{"coding", "ask"}, PromptFile: "agents/planning.md"},
+			{ID: "coding", Name: "Coding Agent", Description: "Executes approved plans with permission-aware actions.", Skill: "implementation", Mode: "coding", Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "write", "execute", "git"}, Permission: PermissionRestricted, MaxSteps: 24, Enabled: true, Handoffs: []string{"planning", "ask"}, PromptFile: "agents/coding.md"},
+			{ID: "ask", Name: "Ask Agent", Description: "General assistant mode for questions, explanations, and Q&A.", Skill: "conversation", Mode: "ask", Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "comment"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, MaxSteps: 10, Enabled: true, Handoffs: []string{"planning", "coding"}, PromptFile: "agents/chat.md"},
+			{ID: "research", Name: "Research Agent", Description: "Investigates codebase behavior, architecture, and implementation options.", Skill: "analysis", Mode: "custom", Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "web-search", "web-fetch", "comment"}, PermittedActions: []string{"read", "search", "plan"}, Permission: PermissionAskFirst, MaxSteps: 24, Enabled: false, Handoffs: []string{"planning", "coding", "reviewer"}, PromptFile: "agents/research.md"},
+			{ID: "reviewer", Name: "Code Review Agent", Description: "Reviews changes for logic, security, regressions, and missing tests.", Skill: "review", Mode: "custom", Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, MaxSteps: 20, Enabled: false, Handoffs: []string{"coding", "debugger", "tester"}, PromptFile: "agents/reviewer.md"},
+			{ID: "debugger", Name: "Debugger Agent", Description: "Reproduces failures, isolates root cause, and proposes minimal-risk fixes.", Skill: "debugging", Mode: "custom", Color: "magenta", AllowedTools: []string{"glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "write", "plan"}, Permission: PermissionRestricted, MaxSteps: 28, Enabled: false, Handoffs: []string{"coding", "tester", "reviewer"}, PromptFile: "agents/debugger.md"},
+			{ID: "tester", Name: "Testing Agent", Description: "Designs and runs focused tests, then summarizes confidence and residual risk.", Skill: "testing", Mode: "custom", Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "write", "plan"}, Permission: PermissionRestricted, MaxSteps: 24, Enabled: false, Handoffs: []string{"reviewer", "coding", "ask"}, PromptFile: "agents/tester.md"},
+			{ID: "git", Name: "Git Agent", Description: "Handles all git operations: commits, branches, PRs, history, and safe git workflows.", Skill: "git", Mode: "custom", Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, MaxSteps: 20, Enabled: false, Handoffs: []string{"coding", "reviewer", "ask"}, PromptFile: "agents/git.md"},
+			{ID: "docs-writer", Name: "Documentation Agent", Description: "Writes and updates technical docs, usage guides, and migration notes.", Skill: "documentation", Mode: "custom", Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "file-write", "comment"}, PermittedActions: []string{"read", "search", "write", "ask"}, Permission: PermissionAskFirst, MaxSteps: 20, Enabled: false, Handoffs: []string{"reviewer", "ask", "planning"}, PromptFile: "agents/docs-writer.md"},
+			{ID: "explore", Name: "Explore Agent", Description: "Maps and understands repository architecture, key types, and conventions. Read-only.", Skill: "analysis", Mode: "custom", Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, MaxSteps: 40, Enabled: false, Handoffs: []string{"planning", "ask"}, PromptFile: "agents/explore.md"},
+			{ID: "init", Name: "Init Agent", Description: "Analyzes a codebase and creates or improves a SPETTRO.md context file.", Skill: "documentation", Mode: "custom", Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "file-write", "ls", "comment"}, PermittedActions: []string{"read", "search", "write"}, Permission: PermissionAskFirst, MaxSteps: 30, Enabled: false, Handoffs: []string{"planning", "ask"}, PromptFile: "agents/init.md"},
 		},
 	}
 }
@@ -292,6 +229,11 @@ func (m AgentManifest) Validate() error {
 		if err := validatePermissionLevel(agent.Permission); err != nil {
 			return fmt.Errorf("agent manifest: invalid permission for agent %q: %w", id, err)
 		}
+		if strings.TrimSpace(agent.Color) != "" {
+			if err := validateAgentColor(agent.Color); err != nil {
+				return fmt.Errorf("agent manifest: invalid color for agent %q: %w", id, err)
+			}
+		}
 		for _, toolID := range agent.AllowedTools {
 			if _, exists := toolIDs[toolID]; !exists {
 				return fmt.Errorf("agent manifest: agent %q references unknown tool %q", id, toolID)
@@ -321,6 +263,23 @@ func validatePermissionLevel(level PermissionLevel) error {
 	default:
 		return fmt.Errorf("unsupported permission level %q", level)
 	}
+}
+
+var validAgentColors = map[string]struct{}{
+	"blue":    {},
+	"green":   {},
+	"cyan":    {},
+	"yellow":  {},
+	"magenta": {},
+	"red":     {},
+	"white":   {},
+}
+
+func validateAgentColor(color string) error {
+	if _, ok := validAgentColors[color]; !ok {
+		return fmt.Errorf("unsupported color %q; must be one of: blue, green, cyan, yellow, magenta, red, white", color)
+	}
+	return nil
 }
 
 func (m AgentManifest) AgentByID(id string) (AgentSpec, bool) {

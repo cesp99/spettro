@@ -4,10 +4,6 @@ import "github.com/charmbracelet/lipgloss"
 
 // Color palette
 var (
-	colorPlanning = lipgloss.Color("#A78BFA")
-	colorCoding   = lipgloss.Color("#34D399")
-	colorChat     = lipgloss.Color("#60A5FA")
-
 	colorText    = lipgloss.Color("#F9FAFB")
 	colorMuted   = lipgloss.Color("#6B7280")
 	colorDim     = lipgloss.Color("#374151")
@@ -22,43 +18,45 @@ var (
 	colorToolErr  = lipgloss.Color("#EF4444")
 )
 
-func modeColor(mode string) lipgloss.Color {
-	switch mode {
+func modeColor(colorName string) lipgloss.Color {
+	switch colorName {
+	case "blue":
+		return lipgloss.Color("#A78BFA")
+	case "green":
+		return lipgloss.Color("#34D399")
+	case "cyan":
+		return lipgloss.Color("#60A5FA")
+	case "yellow":
+		return lipgloss.Color("#F59E0B")
+	case "magenta":
+		return lipgloss.Color("#C084FC")
+	case "red":
+		return lipgloss.Color("#EF4444")
+	// Legacy mode-name fallbacks for backward compatibility
 	case "planning":
-		return colorPlanning
+		return lipgloss.Color("#A78BFA")
 	case "coding":
-		return colorCoding
+		return lipgloss.Color("#34D399")
 	case "chat":
-		return colorChat
+		return lipgloss.Color("#60A5FA")
 	default:
-		return colorChat
+		return lipgloss.Color("#60A5FA")
 	}
 }
 
-func modePrompt(mode string) string {
-	switch mode {
+func modePrompt(agentID string) string {
+	switch agentID {
 	case "planning":
 		return "◈"
 	case "coding":
 		return "◆"
-	case "chat":
-		return "●"
 	default:
-		return "›"
+		return "●"
 	}
 }
 
-func modeLabel(mode string) string {
-	switch mode {
-	case "planning":
-		return "planning"
-	case "coding":
-		return "coding"
-	case "chat":
-		return "chat"
-	default:
-		return mode
-	}
+func modeLabel(agentID string) string {
+	return agentID
 }
 
 var (

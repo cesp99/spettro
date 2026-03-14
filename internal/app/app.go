@@ -26,9 +26,7 @@ type App struct {
 	cfg         config.UserConfig
 	store       *storage.Store
 	providers   *provider.Manager
-	planner     agent.PlanningAgent
-	coder       agent.CodingAgent
-	chatter     agent.ChatAgent
+	manifest    config.AgentManifest
 	pendingPlan string
 	pendingImgs []string
 	ui          *ui.Renderer
@@ -77,6 +75,7 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		}
 		pm.AddLocalModels(localModels)
 	}
+	manifest, _ := config.LoadAgentManifestForProject(cwd)
 	app := &App{
 		in:        in,
 		out:       out,
@@ -85,37 +84,8 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		cfg:       cfg,
 		store:     store,
 		providers: pm,
+		manifest:  manifest,
 		ui:        ui.NewRenderer(),
-	}
-	app.planner = agent.LLMPlanner{
-		ProviderManager: pm,
-		ProviderName: func() string {
-			return app.cfg.ActiveProvider
-		},
-		ModelName: func() string {
-			return app.cfg.ActiveModel
-		},
-		CWD: cwd,
-	}
-	app.coder = agent.LLMCoder{
-		ProviderManager: pm,
-		ProviderName: func() string {
-			return app.cfg.ActiveProvider
-		},
-		ModelName: func() string {
-			return app.cfg.ActiveModel
-		},
-		CWD:           cwd,
-		ShellApproval: app.promptShellApproval,
-	}
-	app.chatter = agent.Chatter{
-		ProviderManager: pm,
-		ProviderName: func() string {
-			return app.cfg.ActiveProvider
-		},
-		ModelName: func() string {
-			return app.cfg.ActiveModel
-		},
 	}
 	return app, nil
 }
@@ -254,7 +224,20 @@ func (a *App) handleCommand(line string) error {
 			a.printLine("no pending plan to approve")
 			return nil
 		}
-		result, err := a.coder.Execute(context.Background(), a.pendingPlan, a.cfg.Permission, true)
+		spec, ok := a.manifest.AgentByID("coding")
+		if !ok {
+			return fmt.Errorf("coding agent not found")
+		}
+		ag := agent.LLMAgent{
+			Spec:            spec,
+			ProviderManager: a.providers,
+			ProviderName:    func() string { return a.cfg.ActiveProvider },
+			ModelName:       func() string { return a.cfg.ActiveModel },
+			CWD:             a.cwd,
+			ShellApproval:   a.promptShellApproval,
+		}
+		ag.Spec.Permission = a.cfg.Permission
+		result, err := ag.Run(context.Background(), a.pendingPlan)
 		if err != nil {
 			return err
 		}
@@ -385,14 +368,25 @@ func (a *App) handleSetupInput(line string) error {
 }
 
 func (a *App) handlePlanning(ctx context.Context, prompt string) error {
-	plan, err := a.planner.Plan(ctx, prompt)
+	spec, ok := a.manifest.AgentByID("planning")
+	if !ok {
+		return fmt.Errorf("planning agent not found")
+	}
+	ag := agent.LLMAgent{
+		Spec:            spec,
+		ProviderManager: a.providers,
+		ProviderName:    func() string { return a.cfg.ActiveProvider },
+		ModelName:       func() string { return a.cfg.ActiveModel },
+		CWD:             a.cwd,
+	}
+	result, err := ag.Run(ctx, prompt)
 	if err != nil {
 		return err
 	}
-	if err := a.store.WriteProjectFile("PLAN.md", plan.Content); err != nil {
+	if err := a.store.WriteProjectFile("PLAN.md", result.Content); err != nil {
 		return err
 	}
-	a.pendingPlan = plan.Content
+	a.pendingPlan = result.Content
 	a.printLine(a.ui.Panel(string(a.mode), "Plan Generated", "Saved to .spettro/PLAN.md.\nUse /approve in coding flow to execute."))
 	return nil
 }
@@ -402,7 +396,20 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 		a.printLine("ask-first mode: generate plan in planning mode, then use /approve")
 		return nil
 	}
-	result, err := a.coder.Execute(ctx, prompt, a.cfg.Permission, true)
+	spec, ok := a.manifest.AgentByID("coding")
+	if !ok {
+		return fmt.Errorf("coding agent not found")
+	}
+	ag := agent.LLMAgent{
+		Spec:            spec,
+		ProviderManager: a.providers,
+		ProviderName:    func() string { return a.cfg.ActiveProvider },
+		ModelName:       func() string { return a.cfg.ActiveModel },
+		CWD:             a.cwd,
+		ShellApproval:   a.promptShellApproval,
+	}
+	ag.Spec.Permission = a.cfg.Permission
+	result, err := ag.Run(ctx, prompt)
 	if err != nil {
 		return err
 	}
@@ -411,13 +418,24 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 }
 
 func (a *App) handleChat(ctx context.Context, prompt string) error {
-	resp, err := a.chatter.Reply(ctx, prompt, a.pendingImgs)
+	spec, ok := a.manifest.AgentByID("chat")
+	if !ok {
+		return fmt.Errorf("chat agent not found")
+	}
+	ag := agent.LLMAgent{
+		Spec:            spec,
+		ProviderManager: a.providers,
+		ProviderName:    func() string { return a.cfg.ActiveProvider },
+		ModelName:       func() string { return a.cfg.ActiveModel },
+		CWD:             a.cwd,
+		Images:          a.pendingImgs,
+	}
+	result, err := ag.Run(ctx, prompt)
 	if err != nil {
 		return err
 	}
 	a.pendingImgs = nil
-	a.printLine(a.ui.Panel(string(a.mode), "Assistant", resp.Content))
-	a.printLine(a.ui.Info(fmt.Sprintf("provider=%s model=%s est_tokens=%d", resp.Provider, resp.Model, resp.EstimatedTokens)))
+	a.printLine(a.ui.Panel(string(a.mode), "Assistant", result.Content))
 	return nil
 }
 

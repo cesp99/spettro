@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,7 +66,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	}
 
 	systemPrompt := loadPromptOrFallback(c.CWD, "agents/coding.md", codingSystemPromptFallback)
-	out, traces, err := runToolLoop(ctx, toolLoopConfig{
+	out, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
 		UserTask:        plan,
 		CWD:             c.CWD,
@@ -85,8 +87,9 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 	}
 	main, _ := stripThinkTags(out)
 	return RunResult{
-		Content: strings.TrimSpace(main),
-		Tools:   traces,
+		Content:    strings.TrimSpace(main),
+		Tools:      traces,
+		TokensUsed: tokens,
 	}, nil
 }
 
@@ -102,9 +105,11 @@ type toolLoopConfig struct {
 	ModelName       func() string
 	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
 	RequiredReads   []string
+	Images          []string // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	Permission      config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
+	Manifest        *config.AgentManifest
 }
 
 type toolCall struct {
@@ -122,6 +127,13 @@ type toolRuntime struct {
 	permission    config.PermissionLevel
 	shellApproval ShellApprovalCallback
 	allowedShell  map[string]struct{}
+	// sub-agent support
+	manifest        *config.AgentManifest
+	providerMgr     *provider.Manager
+	providerName    func() string
+	modelName       func() string
+	maxTokens       int
+	toolCallback    func(ToolTrace)
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -132,20 +144,21 @@ type parallelResult struct {
 	status string
 }
 
-func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, error) {
+func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, error) {
 	if cfg.ProviderManager == nil {
-		return "", nil, fmt.Errorf("missing provider manager")
+		return "", nil, 0, fmt.Errorf("missing provider manager")
 	}
 	if cfg.ProviderName == nil || cfg.ModelName == nil {
-		return "", nil, fmt.Errorf("missing provider/model selectors")
+		return "", nil, 0, fmt.Errorf("missing provider/model selectors")
 	}
 	if strings.TrimSpace(cfg.UserTask) == "" {
-		return "", nil, fmt.Errorf("empty task")
+		return "", nil, 0, fmt.Errorf("empty task")
 	}
 	if cfg.MaxSteps <= 0 {
 		cfg.MaxSteps = 8
 	}
 
+	var totalTokens int
 	allowed := make(map[string]struct{}, len(cfg.AllowedTools))
 	for _, t := range cfg.AllowedTools {
 		allowed[t] = struct{}{}
@@ -157,10 +170,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		permission:    cfg.Permission,
 		shellApproval: cfg.ShellApproval,
 		allowedShell:  map[string]struct{}{},
+		manifest:      cfg.Manifest,
+		providerMgr:   cfg.ProviderManager,
+		providerName:  cfg.ProviderName,
+		modelName:     cfg.ModelName,
+		maxTokens:     cfg.MaxTokens,
+		toolCallback:  cfg.ToolCallback,
 	}
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	runtime.allowedShell = allowedShell
 	for _, p := range cfg.RequiredReads {
@@ -177,15 +196,20 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	for step := 1; step <= cfg.MaxSteps; step++ {
 		prompt := buildLoopPrompt(cfg, history.String(), step)
 		if err := budget.Validate(cfg.MaxTokens, prompt); err != nil {
-			return "", traces, err
+			return "", traces, totalTokens, err
 		}
-		resp, err := cfg.ProviderManager.Send(ctx, cfg.ProviderName(), cfg.ModelName(), provider.Request{
+		req := provider.Request{
 			Prompt:    prompt,
 			MaxTokens: cfg.MaxTokens,
-		})
-		if err != nil {
-			return "", traces, fmt.Errorf("agent call failed: %w", err)
 		}
+		if step == 1 && len(cfg.Images) > 0 {
+			req.Images = cfg.Images
+		}
+		resp, err := cfg.ProviderManager.Send(ctx, cfg.ProviderName(), cfg.ModelName(), req)
+		if err != nil {
+			return "", traces, totalTokens, fmt.Errorf("agent call failed: %w", err)
+		}
+		totalTokens += resp.EstimatedTokens
 
 		content := strings.TrimSpace(resp.Content)
 		main, _ := stripThinkTags(content)
@@ -227,7 +251,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				history.WriteString(fmt.Sprintf("system: you must use at least one tool before writing FINAL.\n\n"))
 				continue
 			}
-			return strings.TrimSpace(final), traces, nil
+			return strings.TrimSpace(final), traces, totalTokens, nil
 		}
 
 		// Plain text without FINAL prefix and without a tool call.
@@ -240,14 +264,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			}
 			continue
 		}
-		return main, traces, nil
+		return main, traces, totalTokens, nil
 	}
 
 	// Max steps exhausted: return whatever content we accumulated rather than discarding it.
 	if lastContent != "" {
-		return lastContent, traces, nil
+		return lastContent, traces, totalTokens, nil
 	}
-	return "", traces, fmt.Errorf("max tool steps reached without final answer")
+	return "", traces, totalTokens, fmt.Errorf("max tool steps reached without final answer")
 }
 
 func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
@@ -475,6 +499,183 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("grep args: %w", err)
 		}
 		return r.runGrep(ctx, gargs)
+	case "ls":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("ls args: %w", err)
+		}
+		dir := "."
+		if args.Path != "" {
+			abs, _, err := r.resolvePath(args.Path)
+			if err != nil {
+				return "", fmt.Errorf("ls: %w", err)
+			}
+			dir = abs
+		} else {
+			dir = r.cwd
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return "", fmt.Errorf("ls: %w", err)
+		}
+		var lines []string
+		for _, e := range entries {
+			if e.IsDir() {
+				lines = append(lines, e.Name()+"/")
+			} else {
+				lines = append(lines, e.Name())
+			}
+		}
+		return strings.Join(lines, "\n"), nil
+	case "web-fetch":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("web-fetch args: %w", err)
+		}
+		if args.URL == "" {
+			return "", fmt.Errorf("web-fetch: url required")
+		}
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, err := client.Get(args.URL)
+		if err != nil {
+			return "", fmt.Errorf("web-fetch: %w", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
+		if err != nil {
+			return "", fmt.Errorf("web-fetch: read: %w", err)
+		}
+		return string(body), nil
+	case "web-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("web-search args: %w", err)
+		}
+		if args.Query == "" {
+			return "", fmt.Errorf("web-search: query required")
+		}
+		apiKey := os.Getenv("SERPER_API_KEY")
+		if apiKey == "" {
+			return "Web search not configured. Set SERPER_API_KEY environment variable.", nil
+		}
+		payload, _ := json.Marshal(map[string]interface{}{"q": args.Query, "num": 5})
+		req, err := http.NewRequestWithContext(ctx, "POST", "https://google.serper.dev/search", bytes.NewReader(payload))
+		if err != nil {
+			return "", fmt.Errorf("web-search: %w", err)
+		}
+		req.Header.Set("X-API-KEY", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("web-search: %w", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
+		if err != nil {
+			return "", fmt.Errorf("web-search: read: %w", err)
+		}
+		return string(body), nil
+	case "todo-write":
+		var args struct {
+			Todos []interface{} `json:"todos"`
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("todo-write args: %w", err)
+		}
+		todosDir := filepath.Join(r.cwd, ".spettro")
+		if err := os.MkdirAll(todosDir, 0o755); err != nil {
+			return "", fmt.Errorf("todo-write: mkdir: %w", err)
+		}
+		todosPath := filepath.Join(todosDir, "todos.json")
+		raw, err := json.MarshalIndent(args.Todos, "", "  ")
+		if err != nil {
+			return "", fmt.Errorf("todo-write: marshal: %w", err)
+		}
+		if err := os.WriteFile(todosPath, raw, 0o644); err != nil {
+			return "", fmt.Errorf("todo-write: write: %w", err)
+		}
+		return fmt.Sprintf("wrote %d todos to .spettro/todos.json", len(args.Todos)), nil
+	case "bash", "bash-output":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("bash args: %w", err)
+		}
+		cmdText := strings.TrimSpace(args.Command)
+		if cmdText == "" {
+			return "", fmt.Errorf("bash: command is required")
+		}
+		if err := r.authorizeShellCommand(ctx, cmdText); err != nil {
+			return "", err
+		}
+		cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(cctx, "bash", "-lc", cmdText)
+		cmd.Dir = r.cwd
+		out, err := cmd.CombinedOutput()
+		text := truncate(string(out), 12000)
+		if err != nil {
+			return text, fmt.Errorf("command failed: %w", err)
+		}
+		return text, nil
+	case "comment":
+		var args struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("comment args: %w", err)
+		}
+		return args.Message, nil
+	case "agent":
+		var args struct {
+			ID   string `json:"id"`
+			Task string `json:"task"`
+		}
+		if err := json.Unmarshal(call.Args, &args); err != nil {
+			return "", fmt.Errorf("agent args: %w", err)
+		}
+		if args.ID == "" || args.Task == "" {
+			return "", fmt.Errorf("agent: id and task required")
+		}
+		if r.manifest == nil || r.providerMgr == nil {
+			return "", fmt.Errorf("agent: sub-agent execution not configured")
+		}
+		// Find agent spec
+		var spec *config.AgentSpec
+		for _, a := range r.manifest.Agents {
+			if a.ID == args.ID {
+				s := a
+				spec = &s
+				break
+			}
+		}
+		if spec == nil {
+			return "", fmt.Errorf("agent: unknown agent %q", args.ID)
+		}
+		// Create and run sub-agent
+		subAgent := LLMAgent{
+			Spec:            *spec,
+			ProviderManager: r.providerMgr,
+			ProviderName:    r.providerName,
+			ModelName:       r.modelName,
+			CWD:             r.cwd,
+			MaxTokens:       r.maxTokens,
+			ToolCallback:    r.toolCallback,
+			ShellApproval:   r.shellApproval,
+		}
+		result, err := subAgent.Run(ctx, args.Task)
+		if err != nil {
+			return "", fmt.Errorf("agent %s: %w", args.ID, err)
+		}
+		return result.Content, nil
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}
@@ -916,13 +1117,29 @@ func stripThinkTags(content string) (main, thinking string) {
 	return strings.TrimSpace(sb.String()), strings.TrimSpace(tb.String())
 }
 
+// stripFrontmatter removes a YAML frontmatter block (between --- delimiters)
+// from content loaded from agent .md files. The system prompt is everything after
+// the second --- marker.
+func stripFrontmatter(content string) string {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "---") {
+		return content
+	}
+	rest := content[3:]
+	idx := strings.Index(rest, "\n---")
+	if idx == -1 {
+		return content
+	}
+	return strings.TrimSpace(rest[idx+4:])
+}
+
 func loadPromptOrFallback(cwd, relative, fallback string) string {
 	if strings.TrimSpace(cwd) != "" && strings.TrimSpace(relative) != "" {
 		p := filepath.Join(cwd, relative)
 		if data, err := os.ReadFile(p); err == nil {
 			text := strings.TrimSpace(string(data))
 			if text != "" {
-				return text
+				return stripFrontmatter(text)
 			}
 		}
 	}
