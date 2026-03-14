@@ -2,7 +2,7 @@ package budget
 
 import "fmt"
 
-const DefaultMax = 10_000
+const DefaultMax = 1_000_000
 
 func EstimateTokens(parts ...string) int {
 	totalChars := 0
