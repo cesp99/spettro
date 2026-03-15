@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,10 +19,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
-	"spettro/internal/budget"
 	"spettro/internal/config"
 	"spettro/internal/conversation"
 	"spettro/internal/provider"
+	"spettro/internal/session"
 	"spettro/internal/storage"
 )
 
@@ -68,7 +70,7 @@ var allCommands = []commandDef{
 	{"/mode", "cycle mode"},
 	{"/approve", "execute pending plan"},
 	{"/permission", "set permission level"},
-	{"/budget", "set token budget per request  usage: /budget <n>"},
+	{"/budget", "set token budget per request  usage: /budget <n|0>"},
 	{"/image", "attach image to next message"},
 	{"/init", "analyze codebase and write SPETTRO.md"},
 	{"/compact", "summarize conversation (optionally focused)"},
@@ -145,9 +147,26 @@ type toolProgressMsg struct {
 
 type parallelAgentEntry struct {
 	ID       string
-	Instance int    // 1-based instance number (for multiple of same agent)
-	Task     string // truncated task description
-	Status   string // "running" | "done" | "error"
+	Label    string
+	Kind     string
+	Instance int
+	Task     string
+	Status   string
+}
+
+type modifiedFileEntry struct {
+	Path      string
+	Added     int
+	Deleted   int
+	Untracked bool
+}
+
+type sidePanelItem struct {
+	Kind   string // agent | file
+	ID     string
+	Title  string
+	Detail string
+	Status string
 }
 
 type agentTickMsg struct{}
@@ -260,18 +279,25 @@ type Model struct {
 	// parallel agent tracking
 	parallelAgents []parallelAgentEntry
 	tickCount      int
+	sideCursor     int
+	sideScroll     int
+	modifiedFiles  []modifiedFileEntry
+	showSidePanel  bool
+	sessionEdits   map[string]struct{}
 
 	// context window tracking
 	totalTokensUsed int
 
 	// conversation persistence
-	convID  string // current conversation ID (set on first message)
-	convDir string // path to .spettro/conversations/
+	sessionID string
 
 	// resume dialog
 	showResume   bool
-	resumeItems  []conversation.Summary
+	resumeItems  []session.Summary
 	resumeCursor int
+
+	// session todos
+	todos []session.Todo
 
 	// app deps
 	cwd       string
@@ -310,10 +336,10 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	manifest, _ := config.LoadAgentManifestForProject(cwd)
 	defaultMode := manifest.DefaultAgent
 	if defaultMode == "" {
-		defaultMode = "planning"
+		defaultMode = "plan"
 	}
 
-	return Model{
+	m := Model{
 		mode:      defaultMode,
 		cfg:       cfg,
 		cwd:       cwd,
@@ -324,7 +350,6 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		spin:      sp,
 		favorites: favs,
 		repoFiles: repoFiles,
-		convDir:   conversation.ProjectDir(store.GlobalDir, cwd),
 		committer: agent.LLMCommitter{
 			ProviderManager: pm,
 			ProviderName:    func() string { return cfg.ActiveProvider },
@@ -332,6 +357,8 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 		},
 		searcher: agent.RepoSearcher{},
 	}
+	m.refreshModifiedFiles()
+	return m
 }
 
 func (m Model) currentAgent() (config.AgentSpec, bool) {
@@ -422,12 +449,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveTools = nil
 		m.currentTool = nil
 		m.pendingAuth = nil
+		m.parallelAgents = nil
+		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
 		}
 		if msg.err != nil {
 			m.showBanner("error: "+msg.err.Error(), "error")
 		} else {
+			m.syncTodosFromSession()
 			main, thinking := stripThinking(msg.content)
 			m.messages = append(m.messages, ChatMessage{
 				Role:     RoleAssistant,
@@ -455,12 +485,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveTools = nil
 		m.currentTool = nil
 		m.pendingAuth = nil
+		m.parallelAgents = nil
+		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
 		}
 		if msg.err != nil {
-			m.showBanner("planning error: "+msg.err.Error(), "error")
+			m.showBanner("plan error: "+msg.err.Error(), "error")
 		} else {
+			m.syncTodosFromSession()
 			m.pendingPlan = msg.plan
 			m.messages = append(m.messages, ChatMessage{
 				Role:    RoleAssistant,
@@ -484,6 +517,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.thinking = false
 		m.cancelAgent = nil
+		m.refreshModifiedFiles()
 		if msg.err != nil {
 			m.showBanner("commit error: "+msg.err.Error(), "error")
 		} else {
@@ -521,8 +555,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.showBanner("compact error: "+msg.err.Error(), "error")
 		} else {
-			m.autoSave()          // save full history before compacting
-			m.convID = ""         // new conversation after compact
+			m.autoSave()
+			m.sessionID = ""
+			m.todos = nil
 			m.totalTokensUsed = 0 // reset context counter after compaction
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
@@ -546,42 +581,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolProgressMsg:
 		if m.thinking {
 			t := msg.trace
-			// Handle "agent" tool specially for parallel agent display
-			if t.Name == "agent" {
-				var agentArgs struct {
-					ID   string `json:"id"`
-					Task string `json:"task"`
-				}
-				_ = json.Unmarshal([]byte(t.Args), &agentArgs)
-				if agentArgs.ID != "" {
-					if t.Status == "running" {
-						// Count existing instances of this agent ID
-						instance := 0
-						for _, a := range m.parallelAgents {
-							if a.ID == agentArgs.ID {
-								instance++
-							}
-						}
-						m.parallelAgents = append(m.parallelAgents, parallelAgentEntry{
-							ID:       agentArgs.ID,
-							Instance: instance + 1,
-							Task:     agentArgs.Task,
-							Status:   "running",
-						})
-						cmds = append(cmds, agentTickCmd())
-					} else {
-						// Update first running instance of this agent
-						for i, a := range m.parallelAgents {
-							if a.ID == agentArgs.ID && a.Status == "running" {
-								if t.Status == "error" {
-									m.parallelAgents[i].Status = "error"
-								} else {
-									m.parallelAgents[i].Status = "done"
-								}
-								break
-							}
-						}
-					}
+			m.applyToolTraceToObservability(t)
+			if t.Name == "todo-write" && t.Status != "running" {
+				m.syncTodosFromSession()
+			}
+			m.trackSessionEditFromTrace(t)
+			if t.Status != "running" {
+				switch t.Name {
+				case "file-write", "shell-exec", "bash", "agent":
+					m.refreshModifiedFiles()
 				}
 			}
 			if t.Status == "running" {
@@ -629,6 +637,41 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		// Wheel scroll for viewport, selector, and connect dialog
+		sideW := m.sidePanelWidth()
+		onSidePanel := sideW > 0 && msg.X >= m.paneWidth()+1
+		if onSidePanel {
+			items := m.sidePanelItems()
+			_, rows := m.sideListGeometry()
+			maxStart := max(0, len(items)-rows)
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				if m.sideScroll > 0 {
+					m.sideScroll--
+				}
+				if m.sideCursor > 0 {
+					m.sideCursor--
+				}
+				return m, tea.Batch(cmds...)
+			case tea.MouseButtonWheelDown:
+				if m.sideScroll < maxStart {
+					m.sideScroll++
+				}
+				if m.sideCursor < len(items)-1 {
+					m.sideCursor++
+				}
+				return m, tea.Batch(cmds...)
+			case tea.MouseButtonLeft:
+				startY, _ := m.sideListGeometry()
+				row := msg.Y - startY
+				if row >= 0 {
+					idx := m.sideScroll + row
+					if idx >= 0 && idx < len(items) {
+						m.sideCursor = idx
+					}
+				}
+				return m, tea.Batch(cmds...)
+			}
+		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			switch {
@@ -758,6 +801,17 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+o":
 		m.showTools = !m.showTools
 		m.refreshViewport()
+		return m, nil
+
+	case "ctrl+b":
+		m.showSidePanel = !m.showSidePanel
+		m.refreshModifiedFiles()
+		m.refreshViewport()
+		if m.showSidePanel {
+			m.showBanner("activity panel enabled", "info")
+		} else {
+			m.showBanner("activity panel hidden", "info")
+		}
 		return m, nil
 
 	case "f2":
@@ -925,24 +979,28 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		}
 	case "/budget":
 		if len(fields) < 2 {
-			current := m.cfg.TokenBudget
-			if current == 0 {
-				current = budget.DefaultMax
+			if m.cfg.TokenBudget <= 0 {
+				m.showBanner("token budget: unlimited  usage: /budget <n|0>", "info")
+			} else {
+				m.showBanner(fmt.Sprintf("token budget: %d  usage: /budget <n|0>", m.cfg.TokenBudget), "info")
 			}
-			m.showBanner(fmt.Sprintf("token budget: %d  usage: /budget <n>", current), "info")
 		} else {
 			var n int
-			if _, err := fmt.Sscanf(fields[1], "%d", &n); err != nil || n < 1000 {
-				m.showBanner("usage: /budget <n>  (minimum 1000)", "error")
+			if _, err := fmt.Sscanf(fields[1], "%d", &n); err != nil || n < 0 {
+				m.showBanner("usage: /budget <n|0>", "error")
 			} else {
 				m.cfg.TokenBudget = n
 				_ = config.Save(m.cfg)
-				m.showBanner(fmt.Sprintf("token budget set to %d", n), "success")
+				if n == 0 {
+					m.showBanner("token budget set to unlimited", "success")
+				} else {
+					m.showBanner(fmt.Sprintf("token budget set to %d", n), "success")
+				}
 			}
 		}
 	case "/approve":
 		if m.pendingPlan == "" {
-			m.showBanner("no pending plan — run a planning prompt first", "info")
+			m.showBanner("no pending plan — run a plan prompt first", "info")
 		} else {
 			spec, ok := m.manifest.AgentByID("coding")
 			if !ok {
@@ -976,11 +1034,12 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/clear":
 		m.autoSave()
 		m.messages = nil
-		m.convID = ""
+		m.sessionID = ""
+		m.todos = nil
 		m.pushSystemMsg("conversation cleared")
 		m.refreshViewport()
 	case "/resume":
-		items, err := conversation.List(m.convDir)
+		items, err := session.List(m.store.GlobalDir, m.cwd)
 		if err != nil || len(items) == 0 {
 			m.showBanner("no saved conversations found", "info")
 		} else {
@@ -1002,6 +1061,7 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 	prompt := injectMentionGuidance(input, mentionedFiles)
 
 	m.parallelAgents = nil
+	m.ensureSession()
 
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleUser,
@@ -1026,6 +1086,7 @@ func (m Model) runAgent(spec config.AgentSpec, input string, mentionedFiles []st
 
 func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFiles []string, images []string, approved bool) (tea.Model, tea.Cmd) {
 	m.thinking = true
+	m.refreshModifiedFiles()
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
@@ -1035,6 +1096,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	m.approvalCh = approvalCh
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
+	m.ensureSession()
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel
@@ -1054,6 +1116,8 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		RequiredReads:   mentionedFiles,
 		Images:          images,
 		Manifest:        &manifest,
+		SessionDir:      session.SessionDir(store.GlobalDir, m.sessionID),
+		DelegationDepth: 0,
 		ToolCallback:    func(t agent.ToolTrace) { toolCh <- t },
 		ShellApproval: func(ctx context.Context, req agent.ShellApprovalRequest) (agent.ShellApprovalDecision, error) {
 			respCh := make(chan shellApprovalResponse, 1)
@@ -1096,7 +1160,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 				return agentDoneMsg{err: err}
 			}
 			// Planning agents save their result to PLAN.md
-			if agentID == "planning" || spec.Mode == "planning" {
+			if agentID == "plan" || spec.Mode == "planning" {
 				_ = store.WriteProjectFile("PLAN.md", result.Content)
 				return planDoneMsg{plan: result.Content, tools: result.Tools, tokensUsed: result.TokensUsed}
 			}
@@ -1188,10 +1252,13 @@ func (m Model) runCompact(focus string) (tea.Model, tea.Cmd) {
 
 // runInit runs the /init agent: explores the codebase and writes SPETTRO.md.
 func (m Model) runInit() (tea.Model, tea.Cmd) {
-	spec, ok := m.manifest.AgentByID("init")
+	spec, ok := m.manifest.AgentByID("docs")
 	if !ok {
-		m.showBanner("init agent not found in manifest", "error")
-		return m, nil
+		spec, ok = m.manifest.AgentByID("coding")
+		if !ok {
+			m.showBanner("docs/coding agent not found in manifest", "error")
+			return m, nil
+		}
 	}
 	task := "Analyze this codebase and create (or improve) a SPETTRO.md file in the repository root."
 	return m.runAgent(spec, task, nil, nil)
@@ -1265,15 +1332,15 @@ func (m Model) updatePlanApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handlePlanEdit is called when user submits text while plan approval is in "edit" mode.
-// It re-runs the planning agent with the edit instructions appended to the original prompt.
+// It re-runs the plan agent with the edit instructions appended to the original prompt.
 func (m Model) handlePlanEdit(editInstruction string) (tea.Model, tea.Cmd) {
 	if m.pendingPlan == "" {
 		m.showBanner("no pending plan to edit", "warn")
 		return m, nil
 	}
-	spec, ok := m.manifest.AgentByID("planning")
+	spec, ok := m.manifest.AgentByID("plan")
 	if !ok {
-		m.showBanner("planning agent not found", "error")
+		m.showBanner("plan agent not found", "error")
 		return m, nil
 	}
 	task := m.pendingPlan + "\n\n---\nUser requested the following changes to the plan:\n" + editInstruction
@@ -2056,25 +2123,35 @@ func (m Model) View() string {
 	}
 
 	header := m.viewHeader()
-	eyes := renderEyes(m.mode, m.eyeFrame, m.thinking, m.width)
-	sep := m.viewSep()
+	paneW := m.paneWidth()
+	eyes := renderEyes(m.mode, m.eyeFrame, m.thinking, paneW)
+	sep := m.viewSep(paneW)
 	content := m.vp.View()
-	inputArea := m.viewInput()
-	statusBar := m.viewStatusBar()
+	inputArea := m.viewInput(paneW)
+	statusBar := m.viewStatusBar(paneW)
 
 	parts := []string{
-		header,
 		eyes,
 		sep,
 		content,
 		sep,
 	}
-	if pa := m.renderParallelAgents(); pa != "" {
-		parts = append(parts, pa)
+	sideW := m.sidePanelWidth()
+	if sideW <= 0 {
+		if pa := m.renderParallelAgents(); pa != "" {
+			parts = append(parts, pa)
+		}
 	}
 	parts = append(parts, inputArea, statusBar)
+	mainPane := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	if sideW <= 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, header, mainPane)
+	}
+	sidePane := m.viewSidePanel(sideW)
+	divider := lipgloss.NewStyle().Foreground(colorDim).Render("│")
+	body := lipgloss.JoinHorizontal(lipgloss.Top, mainPane, divider, sidePane)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
 
 // viewHeader renders the top bar.
@@ -2084,8 +2161,8 @@ func (m Model) viewHeader() string {
 	// Left: logo
 	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro")
 
-	// Center: only the 3 primary mode tabs (planning, coding, ask)
-	primaryIDs := []string{"planning", "coding", "ask"}
+	// Center: only the 3 primary mode tabs (plan, coding, ask)
+	primaryIDs := []string{"plan", "coding", "ask"}
 	var tabs []string
 	for _, id := range primaryIDs {
 		ag, ok := m.manifest.AgentByID(id)
@@ -2145,9 +2222,18 @@ func (m Model) viewHeader() string {
 	if availableCenter < 0 {
 		availableCenter = 0
 	}
-	centerBlock := lipgloss.PlaceHorizontal(availableCenter, lipgloss.Center, center)
+	if availableCenter > 0 && lipgloss.Width(center) > availableCenter {
+		center = lipgloss.NewStyle().Foreground(mc).Bold(true).Render(m.mode)
+	}
+	centerBlock := ""
+	if availableCenter > 0 {
+		centerBlock = lipgloss.PlaceHorizontal(availableCenter, lipgloss.Center, center)
+	}
 
-	row := logo + " " + centerBlock + " " + right
+	row := logo + " " + centerBlock
+	if right != "" {
+		row += " " + right
+	}
 
 	return lipgloss.NewStyle().
 		Width(m.width).
@@ -2157,14 +2243,14 @@ func (m Model) viewHeader() string {
 }
 
 // viewSep renders a horizontal separator line.
-func (m Model) viewSep() string {
+func (m Model) viewSep(width int) string {
 	return lipgloss.NewStyle().
 		Foreground(colorDim).
-		Render(strings.Repeat("─", m.width))
+		Render(strings.Repeat("─", width))
 }
 
 // viewCommandPalette renders the command autocomplete overlay.
-func (m Model) viewCommandPalette() string {
+func (m Model) viewCommandPalette(width int) string {
 	if len(m.cmdItems) == 0 {
 		return ""
 	}
@@ -2186,12 +2272,12 @@ func (m Model) viewCommandPalette() string {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
-		Width(m.width - 4).
+		Width(width - 4).
 		PaddingLeft(2).PaddingRight(2).
 		Render(body + "\n\n" + hint)
 }
 
-func (m Model) viewMentionPalette() string {
+func (m Model) viewMentionPalette(width int) string {
 	if len(m.mentionItems) == 0 {
 		return ""
 	}
@@ -2211,13 +2297,13 @@ func (m Model) viewMentionPalette() string {
 	return lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
-		Width(m.width - 4).
+		Width(width - 4).
 		PaddingLeft(2).PaddingRight(2).
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
 
 // viewInput renders the input area with prompt prefix.
-func (m Model) viewInput() string {
+func (m Model) viewInput(width int) string {
 	mc := m.currentColor()
 	agentLabel := m.mode
 	if spec, ok := m.manifest.AgentByID(m.mode); ok {
@@ -2257,35 +2343,17 @@ func (m Model) viewInput() string {
 	} else {
 		lines = append(lines, m.ta.View())
 	}
-	if m.thinking {
-		lines = append(lines, "  "+m.spin.View()+styleMuted.Render(" thinking…"))
-	}
-	if m.banner != "" {
-		var bs lipgloss.Style
-		switch m.bannerKind {
-		case "error":
-			bs = styleError
-		case "warn":
-			bs = styleWarn
-		case "success":
-			bs = styleSuccess
-		default:
-			bs = styleMuted
-		}
-		lines = append(lines, "  "+bs.Render(m.banner))
-	}
-
 	boxStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(mc).
-		Width(m.width - 2).
+		Width(width - 2).
 		PaddingLeft(1).PaddingRight(1)
 
 	inner := strings.Join(lines, "\n")
 	inputBox := boxStyle.Render(inner)
 
-	palette := m.viewCommandPalette()
-	mentionPalette := m.viewMentionPalette()
+	palette := m.viewCommandPalette(width)
+	mentionPalette := m.viewMentionPalette(width)
 	if palette == "" && mentionPalette == "" {
 		return inputBox
 	}
@@ -2302,12 +2370,22 @@ func (m Model) viewInput() string {
 
 // renderParallelAgents renders the parallel agent progress display.
 func (m Model) renderParallelAgents() string {
-	if len(m.parallelAgents) == 0 {
+	active := make([]parallelAgentEntry, 0, len(m.parallelAgents))
+	for _, a := range m.parallelAgents {
+		if a.Status == "running" {
+			active = append(active, a)
+		}
+	}
+	if len(active) == 0 && len(m.todos) == 0 {
 		return ""
 	}
 	frame := spinnerFrames[m.tickCount%len(spinnerFrames)]
 	var lines []string
-	for _, a := range m.parallelAgents {
+	if len(active) > 0 {
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  agents"))
+		lines = append(lines, lipgloss.NewStyle().Foreground(m.currentColor()).Render("  ● orchestrator: "+m.mode+" (running)"))
+	}
+	for _, a := range active {
 		var dot string
 		var style lipgloss.Style
 		agentColor := modeColor("")
@@ -2321,7 +2399,7 @@ func (m Model) renderParallelAgents() string {
 		case "done":
 			dot = "●"
 			style = lipgloss.NewStyle().Foreground(agentColor)
-		case "error":
+		case "error", "failed":
 			dot = "✗"
 			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 		default:
@@ -2339,6 +2417,32 @@ func (m Model) renderParallelAgents() string {
 		line := style.Render(fmt.Sprintf("  %s %-18s", dot, label)) +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
 		lines = append(lines, line)
+	}
+	if len(m.todos) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  todos"))
+		for _, td := range m.todos {
+			icon := "○"
+			color := colorMuted
+			switch td.Status {
+			case "completed", "done":
+				icon = "✓"
+				color = lipgloss.Color("#10B981")
+			case "in_progress", "running":
+				icon = frame
+				color = lipgloss.Color("#F59E0B")
+			case "blocked", "failed", "cancelled":
+				icon = "!"
+				color = lipgloss.Color("#EF4444")
+			}
+			label := td.Content
+			if len(label) > 56 {
+				label = label[:53] + "..."
+			}
+			lines = append(lines, lipgloss.NewStyle().Foreground(color).Render("  "+icon+" ")+styleMuted.Render(label))
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2402,10 +2506,11 @@ func formatTokenCount(n int) string {
 }
 
 // viewStatusBar renders the bottom help bar with context usage in the bottom right.
-func (m Model) viewStatusBar() string {
+func (m Model) viewStatusBar(width int) string {
 	left := strings.Join([]string{
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("f2: model"),
+		styleMuted.Render("ctrl+b: panel"),
 		styleMuted.Render("/help"),
 	}, styleDim.Render("  ·  "))
 
@@ -2429,7 +2534,7 @@ func (m Model) viewStatusBar() string {
 	right := lipgloss.NewStyle().Foreground(ctxColor).Render(ctxLabel)
 
 	// Pad left side to fill width, right-align the context indicator
-	leftWidth := m.width - lipgloss.Width(right) - 2
+	leftWidth := width - lipgloss.Width(right) - 2
 	if leftWidth < 0 {
 		leftWidth = 0
 	}
@@ -2437,10 +2542,171 @@ func (m Model) viewStatusBar() string {
 
 	bar := leftPadded + right + " "
 	return lipgloss.NewStyle().
-		Width(m.width).
+		Width(width).
 		Background(lipgloss.Color("#0D0D0D")).
 		PaddingLeft(1).
 		Render(bar)
+}
+
+func (m Model) sidePanelWidth() int {
+	if !m.showSidePanel {
+		return 0
+	}
+	hasActive := false
+	for _, a := range m.parallelAgents {
+		if a.Status == "running" {
+			hasActive = true
+			break
+		}
+	}
+	if !hasActive && len(m.modifiedFiles) == 0 {
+		return 0
+	}
+	if m.width < 110 {
+		return 0
+	}
+	w := m.width / 3
+	if w < 34 {
+		w = 34
+	}
+	if w > 54 {
+		w = 54
+	}
+	return w
+}
+
+func (m Model) paneWidth() int {
+	sw := m.sidePanelWidth()
+	if sw <= 0 {
+		return m.width
+	}
+	w := m.width - sw - 1
+	if w < 40 {
+		return m.width
+	}
+	return w
+}
+
+func (m Model) sidePanelItems() []sidePanelItem {
+	items := make([]sidePanelItem, 0, len(m.parallelAgents)+len(m.modifiedFiles))
+	for _, a := range m.parallelAgents {
+		if a.Status != "running" {
+			continue
+		}
+		label := a.ID
+		if a.Instance > 1 {
+			label = fmt.Sprintf("%s [%d]", a.ID, a.Instance)
+		}
+		items = append(items, sidePanelItem{
+			Kind:   "agent",
+			ID:     a.ID,
+			Title:  label,
+			Detail: strings.TrimSpace(a.Task),
+			Status: a.Status,
+		})
+	}
+	for _, f := range m.modifiedFiles {
+		if strings.TrimSpace(f.Path) == "" {
+			continue
+		}
+		detail := fmt.Sprintf("+%d  -%d", f.Added, f.Deleted)
+		if f.Untracked {
+			detail = "untracked"
+		}
+		items = append(items, sidePanelItem{
+			Kind:   "file",
+			ID:     f.Path,
+			Title:  f.Path,
+			Detail: detail,
+			Status: "changed",
+		})
+	}
+	return items
+}
+
+func (m Model) sideListGeometry() (startY, rows int) {
+	rows = m.height - 13
+	if rows < 4 {
+		rows = 4
+	}
+	return 5, rows
+}
+
+func (m Model) viewSidePanel(width int) string {
+	items := m.sidePanelItems()
+	if len(items) == 0 {
+		box := lipgloss.NewStyle().
+			Width(width).
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(colorBorder).
+			Padding(0, 1).
+			Render(lipgloss.NewStyle().Bold(true).Render("Activity") + "\n\n" + styleMuted.Render("No active agents or modified files."))
+		return box
+	}
+
+	cursor := m.sideCursor
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(items) {
+		cursor = len(items) - 1
+	}
+	_, rows := m.sideListGeometry()
+	start := m.sideScroll
+	maxStart := max(0, len(items)-rows)
+	if start > maxStart {
+		start = maxStart
+	}
+	if cursor < start {
+		start = cursor
+	}
+	if cursor >= start+rows {
+		start = cursor - rows + 1
+	}
+
+	var lines []string
+	for idx := start; idx < len(items) && len(lines) < rows; idx++ {
+		it := items[idx]
+		prefix := "  "
+		titleStyle := lipgloss.NewStyle().Foreground(colorMuted)
+		if idx == cursor {
+			prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("› ")
+			titleStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+		}
+		detail := styleDim.Render(it.Detail)
+		if it.Kind == "file" {
+			detail = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(it.Detail)
+		}
+		label := truncateLabel(it.Title, max(8, width-14))
+		lines = append(lines, prefix+titleStyle.Render(label)+" "+detail)
+	}
+
+	selected := items[cursor]
+	details := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("Details"),
+		styleMuted.Render("type: " + selected.Kind),
+		styleMuted.Render("id: " + selected.ID),
+		styleMuted.Render(truncateLabel(selected.Detail, max(12, width-4))),
+	}
+	if selected.Kind == "agent" {
+		details = append(details, styleMuted.Render(truncateLabel(selected.Detail, max(12, width-4))))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Bold(true).Render("Activity"),
+		styleMuted.Render("Active agents and session edits"),
+		"",
+		strings.Join(lines, "\n"),
+		"",
+		strings.Join(details, "\n"),
+	)
+
+	return lipgloss.NewStyle().
+		Width(width).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(colorBorder).
+		Padding(0, 1).
+		Render(content)
 }
 
 // viewSelector renders the model selector dialog.
@@ -2781,8 +3047,224 @@ func (m *Model) showBanner(text, kind string) {
 	m.bannerKind = kind
 }
 
+func (m *Model) ensureSession() {
+	if m.sessionID == "" {
+		m.sessionID = session.NewID(m.cwd)
+	}
+}
+
+func (m *Model) syncTodosFromSession() {
+	if m.sessionID == "" {
+		return
+	}
+	todos, err := session.LoadTodos(m.store.GlobalDir, m.sessionID)
+	if err == nil {
+		m.todos = todos
+	}
+}
+
+func parseNumstat(text string, totals map[string][2]int) {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		added, _ := strconv.Atoi(parts[0])
+		deleted, _ := strconv.Atoi(parts[1])
+		path := strings.TrimSpace(parts[2])
+		if strings.Contains(path, " -> ") {
+			segs := strings.Split(path, " -> ")
+			path = strings.TrimSpace(segs[len(segs)-1])
+		}
+		if path == "" {
+			continue
+		}
+		curr := totals[path]
+		totals[path] = [2]int{curr[0] + added, curr[1] + deleted}
+	}
+}
+
+func normalizeWorkspacePath(cwd, p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) {
+		rel, err := filepath.Rel(cwd, p)
+		if err == nil && !strings.HasPrefix(rel, "..") {
+			p = rel
+		}
+	}
+	p = filepath.ToSlash(filepath.Clean(p))
+	if p == "." || strings.HasPrefix(p, "../") {
+		return ""
+	}
+	return p
+}
+
+func (m *Model) markSessionEdit(path string) {
+	path = normalizeWorkspacePath(m.cwd, path)
+	if path == "" {
+		return
+	}
+	if m.sessionEdits == nil {
+		m.sessionEdits = map[string]struct{}{}
+	}
+	m.sessionEdits[path] = struct{}{}
+}
+
+func (m *Model) trackSessionEditFromTrace(t agent.ToolTrace) {
+	if t.Name != "file-write" || t.Status == "running" {
+		return
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(t.Args), &args); err != nil {
+		return
+	}
+	m.markSessionEdit(args.Path)
+}
+
+func (m *Model) refreshModifiedFiles() {
+	if len(m.sessionEdits) == 0 {
+		m.modifiedFiles = nil
+		return
+	}
+
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = m.cwd
+	out, err := cmd.Output()
+	if err != nil {
+		m.modifiedFiles = nil
+		return
+	}
+
+	stat := make(map[string]modifiedFileEntry)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
+			continue
+		}
+		path := strings.TrimSpace(line[3:])
+		if strings.Contains(path, " -> ") {
+			segs := strings.Split(path, " -> ")
+			path = strings.TrimSpace(segs[len(segs)-1])
+		}
+		if path == "" {
+			continue
+		}
+		normPath := normalizeWorkspacePath(m.cwd, path)
+		if normPath == "" {
+			continue
+		}
+		if _, ok := m.sessionEdits[normPath]; !ok {
+			continue
+		}
+		entry := stat[normPath]
+		entry.Path = normPath
+		entry.Untracked = strings.HasPrefix(line, "??")
+		stat[normPath] = entry
+	}
+
+	numTotals := make(map[string][2]int)
+	for _, args := range [][]string{{"diff", "--numstat"}, {"diff", "--cached", "--numstat"}} {
+		d := exec.Command("git", args...)
+		d.Dir = m.cwd
+		data, derr := d.Output()
+		if derr == nil {
+			parseNumstat(string(data), numTotals)
+		}
+	}
+
+	m.modifiedFiles = m.modifiedFiles[:0]
+	for path, entry := range stat {
+		if v, ok := numTotals[path]; ok {
+			entry.Added, entry.Deleted = v[0], v[1]
+		}
+		m.modifiedFiles = append(m.modifiedFiles, entry)
+	}
+	sort.Slice(m.modifiedFiles, func(i, j int) bool {
+		return m.modifiedFiles[i].Path < m.modifiedFiles[j].Path
+	})
+}
+
+func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
+	if t.Name != "agent" {
+		return
+	}
+	var args struct {
+		Target         string `json:"target"`
+		ID             string `json:"id"`
+		Task           string `json:"task"`
+		ExpectedOutput string `json:"expected_output"`
+		ParentAgentID  string `json:"parent_agent_id"`
+	}
+	_ = json.Unmarshal([]byte(t.Args), &args)
+	agentID := args.Target
+	if agentID == "" {
+		agentID = args.ID
+	}
+	if agentID == "" {
+		return
+	}
+	task := args.Task
+	if t.Status == "running" {
+		instance := 0
+		for _, a := range m.parallelAgents {
+			if a.ID == agentID {
+				instance++
+			}
+		}
+		kind := "worker"
+		if parent, ok := m.manifest.AgentByID(args.ParentAgentID); ok && parent.Mode == "worker" {
+			kind = "microagent"
+		}
+		entry := parallelAgentEntry{
+			ID:       agentID,
+			Label:    agentID,
+			Kind:     kind,
+			Instance: instance + 1,
+			Task:     task,
+			Status:   "running",
+		}
+		m.parallelAgents = append(m.parallelAgents, entry)
+		m.ensureSession()
+		_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+			AgentID:       agentID,
+			AgentType:     kind,
+			ParentAgentID: args.ParentAgentID,
+			Task:          task,
+			Status:        "running",
+		})
+		return
+	}
+	for i, a := range m.parallelAgents {
+		if a.ID == agentID && a.Status == "running" {
+			m.parallelAgents = append(m.parallelAgents[:i], m.parallelAgents[i+1:]...)
+			break
+		}
+	}
+	m.ensureSession()
+	status := "done"
+	if t.Status == "error" {
+		status = "failed"
+	}
+	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		AgentID:       agentID,
+		AgentType:     "worker",
+		ParentAgentID: args.ParentAgentID,
+		Task:          task,
+		Status:        status,
+		Summary:       t.Output,
+	})
+}
+
 func (m *Model) autoSave() {
-	// only save if there are substantive messages
 	hasContent := false
 	for _, msg := range m.messages {
 		if msg.Role == RoleUser || msg.Role == RoleAssistant {
@@ -2793,12 +3275,10 @@ func (m *Model) autoSave() {
 	if !hasContent {
 		return
 	}
-	if m.convID == "" {
-		m.convID = conversation.NewID()
-	}
-	msgs := make([]conversation.Message, len(m.messages))
+	m.ensureSession()
+	msgs := make([]session.Message, len(m.messages))
 	for i, msg := range m.messages {
-		msgs[i] = conversation.Message{
+		msgs[i] = session.Message{
 			Role:     string(msg.Role),
 			Content:  msg.Content,
 			Thinking: msg.Thinking,
@@ -2806,10 +3286,15 @@ func (m *Model) autoSave() {
 			At:       msg.At,
 		}
 	}
-	_ = conversation.Save(m.convDir, conversation.Conversation{
-		ID:        m.convID,
-		StartedAt: msgs[0].At,
-		Messages:  msgs,
+	_ = session.Save(m.store.GlobalDir, session.State{
+		Metadata: session.Metadata{
+			ID:          m.sessionID,
+			ProjectPath: m.cwd,
+			ProjectHash: session.ProjectHash(m.cwd),
+			StartedAt:   msgs[0].At,
+		},
+		Messages: msgs,
+		Todos:    m.todos,
 	})
 }
 
@@ -2821,7 +3306,7 @@ func (m *Model) refreshViewport() {
 
 // renderPlanMessage renders a plan ChatMessage as a distinct bordered block.
 func (m Model) renderPlanMessage(msg ChatMessage, mc lipgloss.Color) string {
-	innerW := m.width - 8 // account for indent + border
+	innerW := m.paneWidth() - 8 // account for indent + border
 	if innerW < 10 {
 		innerW = 10
 	}
@@ -2837,11 +3322,8 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc lipgloss.Color) string {
 		bodyParts = append(bodyParts, renderToolGroups(msg.Tools, m.showTools, mc))
 	}
 
-	// Plan body — wrap to inner width
-	planBody := lipgloss.NewStyle().
-		Foreground(colorText).
-		Width(innerW).
-		Render(strings.TrimSpace(msg.Content))
+	// Plan body — markdown aware rendering
+	planBody := renderMarkdown(strings.TrimSpace(msg.Content), innerW)
 	bodyParts = append(bodyParts, planBody)
 
 	inner := strings.Join(bodyParts, "\n")
@@ -2880,13 +3362,13 @@ func (m Model) renderMessages() string {
 				continue
 			}
 			bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
-			body := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
+			body := renderMarkdown(msg.Content, m.paneWidth()-8)
 			var entryLines []string
 			if len(msg.Tools) > 0 {
 				entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
 			}
 			if strings.TrimSpace(msg.Content) != "" {
-				entryLines = append(entryLines, bullet+" "+body)
+				entryLines = append(entryLines, prefixBlockWithBullet(bullet, body))
 			}
 			if m.showTools && msg.Thinking != "" {
 				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
@@ -2901,7 +3383,7 @@ func (m Model) renderMessages() string {
 			s := lipgloss.NewStyle().
 				Foreground(colorMuted).
 				PaddingLeft(4).
-				Width(m.width - 4).
+				Width(m.paneWidth() - 4).
 				Render(msg.Content)
 			parts = append(parts, s)
 		}
@@ -2931,11 +3413,30 @@ func (m Model) renderMessages() string {
 		}
 	}
 
+	if m.banner != "" {
+		var bs lipgloss.Style
+		prefix := "  • "
+		switch m.bannerKind {
+		case "error":
+			bs = styleError
+			prefix = "  ✗ "
+		case "warn":
+			bs = styleWarn
+			prefix = "  ! "
+		case "success":
+			bs = styleSuccess
+			prefix = "  ✓ "
+		default:
+			bs = styleMuted
+		}
+		parts = append(parts, bs.Render(prefix+m.banner))
+	}
+
 	return strings.Join(parts, "\n\n")
 }
 
 // recalcLayout updates sub-model sizes based on current terminal dimensions
-// and dynamic state (thinking indicator, banner, command palette).
+// and dynamic state (approval pickers and command palettes).
 func (m Model) recalcLayout() Model {
 	eyesH := len(eyesActing) // 9 lines
 	headerH := 1
@@ -2944,12 +3445,6 @@ func (m Model) recalcLayout() Model {
 
 	// Input box: border top(1) + label(1) + textarea(3) + border bottom(1) = 6 base
 	inputH := 6
-	if m.thinking {
-		inputH++ // thinking line
-	}
-	if m.banner != "" {
-		inputH++ // banner line
-	}
 	if m.showPlanApproval {
 		inputH += 2 + len(planApprovalOptions) // title + options
 	} else if m.pendingAuth != nil {
@@ -2964,8 +3459,12 @@ func (m Model) recalcLayout() Model {
 		inputH += 5 + len(m.mentionItems)
 	}
 
-	// Parallel agents display
-	parallelH := len(m.parallelAgents)
+	parallelH := 0
+	if m.sidePanelWidth() <= 0 {
+		if pa := m.renderParallelAgents(); pa != "" {
+			parallelH = lipgloss.Height(pa)
+		}
+	}
 
 	fixed := headerH + eyesH + sepH + inputH + statusH + parallelH
 
@@ -2973,19 +3472,35 @@ func (m Model) recalcLayout() Model {
 	if contentH < 3 {
 		contentH = 3
 	}
-	vpW := m.width - 2
+	vpW := m.paneWidth() - 2
 	if vpW < 10 {
 		vpW = 10
 	}
 
 	m.vp.Width = vpW
 	m.vp.Height = contentH
-	m.ta.SetWidth(m.width - 6)
+	m.ta.SetWidth(m.paneWidth() - 6)
 
 	return m
 }
 
 // ── Resume dialog ─────────────────────────────────────────────────────────────
+
+func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
+	if !sel.Legacy {
+		return session.Load(m.store.GlobalDir, sel.ID)
+	}
+	conv, err := conversation.Load(sel.Path)
+	if err != nil {
+		return session.State{}, err
+	}
+	state := session.StateFromLegacy(conv, m.cwd)
+	if state.Metadata.ID == "" {
+		state.Metadata.ID = session.NewID(m.cwd)
+	}
+	_ = session.Save(m.store.GlobalDir, state)
+	return state, nil
+}
 
 func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -3002,15 +3517,17 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if len(m.resumeItems) > 0 {
 			sel := m.resumeItems[m.resumeCursor]
-			conv, err := conversation.Load(sel.Path)
+			state, err := m.loadSessionSummary(sel)
 			if err != nil {
 				m.showResume = false
 				m.showBanner("failed to load conversation: "+err.Error(), "error")
 				return m, nil
 			}
-			m.convID = conv.ID
-			m.messages = make([]ChatMessage, 0, len(conv.Messages))
-			for _, cm := range conv.Messages {
+			m.sessionID = state.Metadata.ID
+			m.todos = state.Todos
+			m.parallelAgents = nil
+			m.messages = make([]ChatMessage, 0, len(state.Messages))
+			for _, cm := range state.Messages {
 				m.messages = append(m.messages, ChatMessage{
 					Role:     Role(cm.Role),
 					Content:  cm.Content,
@@ -3021,7 +3538,7 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.showResume = false
 			m.refreshViewport()
-			m.showBanner(fmt.Sprintf("resumed conversation from %s", conv.StartedAt.Format("2006-01-02 15:04")), "success")
+			m.showBanner(fmt.Sprintf("resumed conversation from %s", state.Metadata.StartedAt.Format("2006-01-02 15:04")), "success")
 		}
 	}
 	return m, nil
@@ -3613,9 +4130,7 @@ func truncateLabel(s string, max int) string {
 // It consults the project manifest so optional agents (for example
 // "architect") can be included in the cycle when enabled.
 func nextAgent(manifest config.AgentManifest, current string) string {
-	// Preferred ordering — UI will show planning/coding/ask by default;
-	// architect is included if enabled in the manifest so Shift+Tab cycles to it.
-	order := []string{"planning", "coding", "ask", "architect"}
+	order := []string{"plan", "coding", "ask"}
 	var primary []string
 	for _, id := range order {
 		if spec, ok := manifest.AgentByID(id); ok && spec.Enabled {
@@ -3624,7 +4139,7 @@ func nextAgent(manifest config.AgentManifest, current string) string {
 	}
 	// Fallback to the canonical trio if manifest doesn't enable any of the above.
 	if len(primary) == 0 {
-		primary = []string{"planning", "coding", "ask"}
+		primary = []string{"plan", "coding", "ask"}
 	}
 	for i, id := range primary {
 		if id == current {
@@ -3638,21 +4153,21 @@ func nextAgent(manifest config.AgentManifest, current string) string {
 // now use the manifest-aware nextAgent instead.
 func nextMode(mode string) string {
 	switch mode {
-	case "planning":
+	case "plan":
 		return "coding"
 	case "coding":
 		return "ask"
 	default:
-		return "planning"
+		return "plan"
 	}
 }
 
 func prevMode(mode string) string {
 	switch mode {
-	case "planning":
+	case "plan":
 		return "ask"
 	case "coding":
-		return "planning"
+		return "plan"
 	default:
 		return "coding"
 	}
@@ -3677,7 +4192,7 @@ const helpText = `commands:
   /resume        resume a previous saved conversation
 
 keys:
-  shift+tab      cycle mode (planning → coding → chat)
+  shift+tab      cycle mode (plan → coding → ask)
   f2             cycle to next favorite model
   shift+f2       cycle to previous favorite model
 
