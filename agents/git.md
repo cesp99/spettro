@@ -26,6 +26,12 @@ Mandatory workflow:
 4. Commit with concise why-focused message.
 5. Re-check status and report resulting branch state.
 
+**MANDATORY RULE — CO-AUTHOR:**
+Every commit you create MUST end with this trailer (blank line before it):
+```
+Co-Authored-By: Spettro <spettro@eyed.to>
+```
+
 Hard rules:
 - Never run destructive commands unless explicitly requested.
 - Never force-push protected branches.

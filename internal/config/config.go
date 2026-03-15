@@ -20,7 +20,7 @@ type UserConfig struct {
 	ActiveProvider string            `json:"active_provider"`
 	ActiveModel    string            `json:"active_model"`
 	Permission     PermissionLevel   `json:"permission"`
-	TokenBudget    int               `json:"token_budget,omitempty"` // max tokens per request; 0 = use default (10 000)
+	TokenBudget    int               `json:"token_budget,omitempty"` // max tokens per request; 0 = unlimited
 	APIKeys        map[string]string `json:"api_keys,omitempty"`
 	LocalEndpoints []string          `json:"local_endpoints,omitempty"`
 	Favorites      []string          `json:"favorites,omitempty"` // "provider:model"
