@@ -209,6 +209,12 @@ type Model struct {
 	// messages
 	messages []ChatMessage
 
+	// input history (for up/down recall in composer)
+	inputHistory    []string
+	historyIndex    int
+	historyDraft    string
+	historyBrowsing bool
+
 	// animation frame
 	eyeFrame int
 
@@ -355,7 +361,8 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 			ProviderName:    func() string { return cfg.ActiveProvider },
 			ModelName:       func() string { return cfg.ActiveModel },
 		},
-		searcher: agent.RepoSearcher{},
+		searcher:     agent.RepoSearcher{},
+		historyIndex: -1,
 	}
 	m.refreshModifiedFiles()
 	return m
@@ -771,6 +778,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.recallPreviousInput() {
+			m.syncInputSuggestions()
+			return m, nil
+		}
 
 	case "down", "ctrl+n":
 		if len(m.cmdItems) > 0 || len(m.mentionItems) > 0 {
@@ -780,6 +791,10 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.mentionCursor < len(m.mentionItems)-1 {
 				m.mentionCursor++
 			}
+			return m, nil
+		}
+		if m.recallNextInput() {
+			m.syncInputSuggestions()
 			return m, nil
 		}
 
@@ -885,6 +900,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if input == "" {
 			return m, nil
 		}
+		m.pushInputHistory(input)
 		m.ta.Reset()
 		m.cmdItems = nil
 		m.mentionItems = nil
@@ -1894,6 +1910,47 @@ func (m Model) acceptMention() Model {
 	m.mentionItems = nil
 	m.mentionCursor = 0
 	return m
+}
+
+func (m *Model) pushInputHistory(input string) {
+	if strings.TrimSpace(input) == "" {
+		return
+	}
+	m.inputHistory = append(m.inputHistory, input)
+	m.historyBrowsing = false
+	m.historyIndex = -1
+	m.historyDraft = ""
+}
+
+func (m *Model) recallPreviousInput() bool {
+	if len(m.inputHistory) == 0 {
+		return false
+	}
+	if !m.historyBrowsing {
+		m.historyDraft = m.ta.Value()
+		m.historyIndex = len(m.inputHistory) - 1
+		m.historyBrowsing = true
+	} else if m.historyIndex > 0 {
+		m.historyIndex--
+	}
+	m.ta.SetValue(m.inputHistory[m.historyIndex])
+	return true
+}
+
+func (m *Model) recallNextInput() bool {
+	if !m.historyBrowsing || len(m.inputHistory) == 0 {
+		return false
+	}
+	if m.historyIndex < len(m.inputHistory)-1 {
+		m.historyIndex++
+		m.ta.SetValue(m.inputHistory[m.historyIndex])
+		return true
+	}
+	m.ta.SetValue(m.historyDraft)
+	m.historyBrowsing = false
+	m.historyIndex = -1
+	m.historyDraft = ""
+	return true
 }
 
 func scanRepoFiles(root string) ([]string, error) {
