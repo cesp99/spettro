@@ -1,13 +1,15 @@
-package tui
+package tui_test
 
 import (
 	"strings"
 	"testing"
+
+	"spettro/internal/tui"
 )
 
 func TestRenderMarkdown_StripsBasicMarkdownMarkers(t *testing.T) {
 	md := "# Title\n- **bold** item\n1. `code`\n[site](https://example.com)"
-	out := renderMarkdown(md, 80)
+	out := tui.RenderMarkdownForTesting(md, 80)
 
 	if strings.Contains(out, "**") {
 		t.Fatalf("expected bold markers to be rendered, got %q", out)
@@ -25,7 +27,7 @@ func TestRenderMarkdown_StripsBasicMarkdownMarkers(t *testing.T) {
 
 func TestRenderMarkdown_RendersCodeFenceContent(t *testing.T) {
 	md := "before\n```go\nfmt.Println(\"hi\")\n```\nafter"
-	out := renderMarkdown(md, 80)
+	out := tui.RenderMarkdownForTesting(md, 80)
 
 	if !strings.Contains(out, "fmt.Println(\"hi\")") {
 		t.Fatalf("expected fenced code content in output, got %q", out)
@@ -36,7 +38,7 @@ func TestRenderMarkdown_RendersCodeFenceContent(t *testing.T) {
 }
 
 func TestPrefixBlockWithBullet_IndentsFollowingLines(t *testing.T) {
-	out := prefixBlockWithBullet("  ●", "line one\nline two")
+	out := tui.PrefixBlockWithBulletForTesting("  ●", "line one\nline two")
 	lines := strings.Split(out, "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %d", len(lines))

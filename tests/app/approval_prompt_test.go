@@ -1,12 +1,14 @@
-package app
+package app_test
 
 import (
 	"strings"
 	"testing"
+
+	"spettro/internal/app"
 )
 
 func TestFormatShellApprovalPrompt_ChoicesUnderCommand(t *testing.T) {
-	prompt := formatShellApprovalPrompt("ls -la")
+	prompt := app.FormatShellApprovalPrompt("ls -la")
 
 	commandIdx := strings.Index(prompt, "Bash(ls -la)")
 	choiceIdx := strings.Index(prompt, "1) yes")

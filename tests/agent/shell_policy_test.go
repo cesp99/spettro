@@ -1,25 +1,27 @@
-package agent
+package agent_test
 
 import (
 	"path/filepath"
 	"testing"
+
+	"spettro/internal/agent"
 )
 
 func TestNormalizeCommand(t *testing.T) {
-	got := normalizeCommand("   git    status   --short  ")
+	got := agent.NormalizeCommandForTesting("   git    status   --short  ")
 	if got != "git status --short" {
 		t.Fatalf("unexpected normalized command: %q", got)
 	}
 }
 
 func TestIsAlwaysAllowedCommand(t *testing.T) {
-	if !isAlwaysAllowedCommand("pwd") {
+	if !agent.IsAlwaysAllowedCommandForTesting("pwd") {
 		t.Fatal("expected pwd to be always allowed")
 	}
-	if !isAlwaysAllowedCommand("git diff --staged") {
+	if !agent.IsAlwaysAllowedCommandForTesting("git diff --staged") {
 		t.Fatal("expected git diff prefix to be always allowed")
 	}
-	if isAlwaysAllowedCommand("npm publish") {
+	if agent.IsAlwaysAllowedCommandForTesting("npm publish") {
 		t.Fatal("npm publish should not be always allowed")
 	}
 }
@@ -27,14 +29,14 @@ func TestIsAlwaysAllowedCommand(t *testing.T) {
 func TestAllowedCommandSetRoundTrip(t *testing.T) {
 	cwd := t.TempDir()
 	set := map[string]struct{}{
-		normalizeCommand("echo  hi"): {},
-		"git status":                 {},
+		agent.NormalizeCommandForTesting("echo  hi"): {},
+		"git status": {},
 	}
-	if err := saveAllowedCommandSet(cwd, set); err != nil {
+	if err := agent.SaveAllowedCommandSetForTesting(cwd, set); err != nil {
 		t.Fatalf("saveAllowedCommandSet: %v", err)
 	}
 
-	loaded, err := loadAllowedCommandSet(cwd)
+	loaded, err := agent.LoadAllowedCommandSetForTesting(cwd)
 	if err != nil {
 		t.Fatalf("loadAllowedCommandSet: %v", err)
 	}
@@ -45,7 +47,7 @@ func TestAllowedCommandSetRoundTrip(t *testing.T) {
 		t.Fatalf("expected git status in loaded set: %+v", loaded)
 	}
 
-	path := allowedCommandsPath(cwd)
+	path := agent.AllowedCommandsPathForTesting(cwd)
 	if filepath.Base(path) != "allowed_commands.json" {
 		t.Fatalf("unexpected file path: %q", path)
 	}
