@@ -91,9 +91,8 @@ The default pack includes specialized roles for day-to-day CLI/TUI work:
 - planning
 - coding
 - chat
-- research
-- git expert
+- explore
+- git
 - reviewer
-- debugger
 - tester
-- docs writer
+- docs-writer

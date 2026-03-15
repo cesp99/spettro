@@ -8,7 +8,7 @@
 
 Spettro is a terminal-first multi-agent coding assistant written in Go.
 
-It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via the "agent" tool with `TOOL_CALL` syntax, and specialized agents (planning, coding, docs-writer, research, tester, reviewer, etc.). The entry point `cmd/spettro/main.go` boots config, storage, provider manager, model catalog, and TUI; manifest loaded via `config.LoadAgentManifestForProject`.
+It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via the "agent" tool with `TOOL_CALL` syntax, and specialized agents (planning, coding, chat, explore, git, reviewer, tester, docs-writer). The entry point `cmd/spettro/main.go` boots config, storage, provider manager, model catalog, and TUI; manifest loaded via `config.LoadAgentManifestForProject`.
 
 ## Highlights
 
