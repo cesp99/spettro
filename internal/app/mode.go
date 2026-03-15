@@ -5,7 +5,7 @@ import "strings"
 type Mode string
 
 const (
-	ModePlanning Mode = "planning"
+	ModePlanning Mode = "plan"
 	ModeCoding   Mode = "coding"
 	ModeChat     Mode = "ask"
 )

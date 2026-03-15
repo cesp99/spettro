@@ -108,6 +108,9 @@ type LLMAgent struct {
 	ToolCallback    func(ToolTrace)
 	ShellApproval   ShellApprovalCallback
 	Manifest        *config.AgentManifest // for sub-agent spawning via agent tool
+	SessionDir      string
+	DelegationDepth int
+	ParentAgentID   string
 }
 
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
@@ -125,6 +128,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		SystemPrompt:    systemPrompt,
 		UserTask:        task,
 		CWD:             a.CWD,
+		AgentID:         a.Spec.ID,
 		MaxSteps:        maxSteps,
 		RequireToolCall: requireToolCall,
 		AllowedTools:    a.Spec.AllowedTools,
@@ -138,6 +142,9 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		Permission:      a.Spec.Permission,
 		ShellApproval:   a.ShellApproval,
 		Manifest:        a.Manifest,
+		SessionDir:      a.SessionDir,
+		DelegationDepth: a.DelegationDepth,
+		ParentAgentID:   a.ParentAgentID,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)

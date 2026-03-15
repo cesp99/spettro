@@ -16,8 +16,15 @@ func TestValidateUnderLimit(t *testing.T) {
 func TestValidateOverLimit(t *testing.T) {
 	// ~11k estimated tokens
 	huge := strings.Repeat("a", 44_000)
-	if err := budget.Validate(0, huge); err == nil {
+	if err := budget.Validate(8_000, huge); err == nil {
 		t.Fatal("expected token budget error")
+	}
+}
+
+func TestValidateZeroIsUnlimited(t *testing.T) {
+	huge := strings.Repeat("a", 1_000_000)
+	if err := budget.Validate(0, huge); err != nil {
+		t.Fatalf("expected no error with unlimited budget, got: %v", err)
 	}
 }
 

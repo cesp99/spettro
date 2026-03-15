@@ -67,7 +67,7 @@ type Request struct {
 	Prompt      string
 	Images      []string
 	RequireFast bool
-	MaxTokens   int // token budget for this request; 0 = budget.DefaultMax
+	MaxTokens   int // token budget for this request; 0 = unlimited
 }
 
 type Response struct {

@@ -2,8 +2,6 @@ package budget
 
 import "fmt"
 
-const DefaultMax = 1_000_000
-
 func EstimateTokens(parts ...string) int {
 	totalChars := 0
 	for _, p := range parts {
@@ -18,14 +16,14 @@ func EstimateTokens(parts ...string) int {
 }
 
 // Validate returns an error if the combined token estimate of parts exceeds
-// maxTokens. Pass 0 to use DefaultMax.
+// maxTokens. Pass 0 (or a negative number) to disable budgeting.
 func Validate(maxTokens int, parts ...string) error {
 	if maxTokens <= 0 {
-		maxTokens = DefaultMax
+		return nil
 	}
 	estimated := EstimateTokens(parts...)
 	if estimated >= maxTokens {
-		return fmt.Errorf("token budget exceeded: estimated=%d max=%d", estimated, maxTokens-1)
+		return fmt.Errorf("token budget exceeded: estimated=%d max=%d", estimated, maxTokens)
 	}
 	return nil
 }

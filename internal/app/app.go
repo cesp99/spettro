@@ -368,9 +368,9 @@ func (a *App) handleSetupInput(line string) error {
 }
 
 func (a *App) handlePlanning(ctx context.Context, prompt string) error {
-	spec, ok := a.manifest.AgentByID("planning")
+	spec, ok := a.manifest.AgentByID("plan")
 	if !ok {
-		return fmt.Errorf("planning agent not found")
+		return fmt.Errorf("plan agent not found")
 	}
 	ag := agent.LLMAgent{
 		Spec:            spec,
@@ -418,9 +418,9 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 }
 
 func (a *App) handleChat(ctx context.Context, prompt string) error {
-	spec, ok := a.manifest.AgentByID("chat")
+	spec, ok := a.manifest.AgentByID("ask")
 	if !ok {
-		return fmt.Errorf("chat agent not found")
+		return fmt.Errorf("ask agent not found")
 	}
 	ag := agent.LLMAgent{
 		Spec:            spec,

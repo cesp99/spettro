@@ -19,7 +19,7 @@ func TestModeNextCycle(t *testing.T) {
 
 	got = got.Next()
 	if got != app.ModePlanning {
-		t.Fatalf("expected planning, got %s", got)
+		t.Fatalf("expected plan, got %s", got)
 	}
 }
 

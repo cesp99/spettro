@@ -55,7 +55,7 @@ type LLMPlanner struct {
 	ProviderName    func() string
 	ModelName       func() string
 	CWD             string
-	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
+	MaxTokens       int // max tokens per request; 0 = unlimited
 	RequiredReads   []string
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 }

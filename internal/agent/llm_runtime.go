@@ -21,6 +21,7 @@ import (
 	"spettro/internal/budget"
 	"spettro/internal/config"
 	"spettro/internal/provider"
+	"spettro/internal/session"
 )
 
 const (
@@ -37,7 +38,7 @@ type LLMCoder struct {
 	ProviderName    func() string
 	ModelName       func() string
 	CWD             string
-	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
+	MaxTokens       int // max tokens per request; 0 = unlimited
 	RequiredReads   []string
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	ShellApproval   ShellApprovalCallback
@@ -97,19 +98,25 @@ type toolLoopConfig struct {
 	SystemPrompt    string
 	UserTask        string
 	CWD             string
+	AgentID         string
 	MaxSteps        int
 	RequireToolCall bool
 	AllowedTools    []string
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
-	MaxTokens       int // max tokens per request; 0 = budget.DefaultMax
+	MaxTokens       int // max tokens per request; 0 = unlimited
 	RequiredReads   []string
 	Images          []string        // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	Permission      config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
 	Manifest        *config.AgentManifest
+	SessionDir      string
+	DelegationDepth int
+	ParentAgentID   string
+	MaxWorkers      int
+	MaxMicroagents  int
 }
 
 type toolCall struct {
@@ -134,6 +141,13 @@ type toolRuntime struct {
 	modelName    func() string
 	maxTokens    int
 	toolCallback func(ToolTrace)
+	sessionDir   string
+	agentID      string
+	parentID     string
+
+	delegationDepth      int
+	maxParallelWorkers   int
+	maxParallelMicroagnt int
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -164,19 +178,31 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		allowed[t] = struct{}{}
 	}
 	runtime := toolRuntime{
-		cwd:           cfg.CWD,
-		readSet:       map[string]struct{}{},
-		requiredReads: map[string]struct{}{},
-		permission:    cfg.Permission,
-		shellApproval: cfg.ShellApproval,
-		allowedShell:  map[string]struct{}{},
-		manifest:      cfg.Manifest,
-		providerMgr:   cfg.ProviderManager,
-		providerName:  cfg.ProviderName,
-		modelName:     cfg.ModelName,
-		maxTokens:     cfg.MaxTokens,
-		toolCallback:  cfg.ToolCallback,
+		cwd:             cfg.CWD,
+		readSet:         map[string]struct{}{},
+		requiredReads:   map[string]struct{}{},
+		permission:      cfg.Permission,
+		shellApproval:   cfg.ShellApproval,
+		allowedShell:    map[string]struct{}{},
+		manifest:        cfg.Manifest,
+		providerMgr:     cfg.ProviderManager,
+		providerName:    cfg.ProviderName,
+		modelName:       cfg.ModelName,
+		maxTokens:       cfg.MaxTokens,
+		toolCallback:    cfg.ToolCallback,
+		sessionDir:      cfg.SessionDir,
+		agentID:         cfg.AgentID,
+		parentID:        cfg.ParentAgentID,
+		delegationDepth: cfg.DelegationDepth,
 	}
+	if cfg.MaxWorkers <= 0 {
+		cfg.MaxWorkers = 4
+	}
+	if cfg.MaxMicroagents <= 0 {
+		cfg.MaxMicroagents = 2
+	}
+	runtime.maxParallelWorkers = cfg.MaxWorkers
+	runtime.maxParallelMicroagnt = cfg.MaxMicroagents
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
 		return "", nil, 0, err
@@ -308,7 +334,6 @@ FINAL
 <your final answer>
 
 Rules:
-- No chain-of-thought, no thinking trace, no <think> tags.
 - Prefer reading/searching before writing.
 - Never edit an existing file unless it has been read first.
 - Creating a brand-new file without reading is allowed.
@@ -331,8 +356,25 @@ Previous tool interaction log:
 // parallelExec fires one goroutine per call and collects results in original order.
 func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowed map[string]struct{}, callback func(ToolTrace)) []parallelResult {
 	results := make([]parallelResult, len(calls))
+	agentBudget := r.maxParallelWorkers
+	if r.delegationDepth > 0 {
+		agentBudget = r.maxParallelMicroagnt
+	}
+	agentCalls := 0
 	var wg sync.WaitGroup
 	for i, call := range calls {
+		if call.Tool == "agent" {
+			agentCalls++
+			if agentCalls > agentBudget {
+				results[i] = parallelResult{
+					name:   call.Tool,
+					args:   singleLine(string(call.Args)),
+					output: fmt.Sprintf("error: delegation limit reached (max %d in parallel)", agentBudget),
+					status: "error",
+				}
+				continue
+			}
+		}
 		wg.Add(1)
 		go func(idx int, c toolCall) {
 			defer wg.Done()
@@ -589,19 +631,48 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err := json.Unmarshal(call.Args, &args); err != nil {
 			return "", fmt.Errorf("todo-write args: %w", err)
 		}
-		todosDir := filepath.Join(r.cwd, ".spettro")
-		if err := os.MkdirAll(todosDir, 0o755); err != nil {
-			return "", fmt.Errorf("todo-write: mkdir: %w", err)
+		if strings.TrimSpace(r.sessionDir) == "" {
+			return "", fmt.Errorf("todo-write requires an active session")
 		}
-		todosPath := filepath.Join(todosDir, "todos.json")
-		raw, err := json.MarshalIndent(args.Todos, "", "  ")
+		out := make([]session.Todo, 0, len(args.Todos))
+		now := time.Now()
+		for i, item := range args.Todos {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			id, _ := m["id"].(string)
+			if strings.TrimSpace(id) == "" {
+				id = fmt.Sprintf("todo-%d", i+1)
+			}
+			content, _ := m["content"].(string)
+			status, _ := m["status"].(string)
+			if status == "" {
+				status = "pending"
+			}
+			owner, _ := m["owner"].(string)
+			source, _ := m["source"].(string)
+			out = append(out, session.Todo{
+				ID:        id,
+				Content:   content,
+				Status:    status,
+				Owner:     owner,
+				Source:    source,
+				UpdatedAt: now,
+			})
+		}
+		raw, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("todo-write: marshal: %w", err)
+		}
+		todosPath := filepath.Join(r.sessionDir, "todos.json")
+		if err := os.MkdirAll(filepath.Dir(todosPath), 0o700); err != nil {
+			return "", fmt.Errorf("todo-write: mkdir: %w", err)
 		}
 		if err := os.WriteFile(todosPath, raw, 0o644); err != nil {
 			return "", fmt.Errorf("todo-write: write: %w", err)
 		}
-		return fmt.Sprintf("wrote %d todos to .spettro/todos.json", len(args.Todos)), nil
+		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "bash", "bash-output":
 		var args struct {
 			Command string `json:"command"`
@@ -636,14 +707,25 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return args.Message, nil
 	case "agent":
 		var args struct {
-			ID   string `json:"id"`
-			Task string `json:"task"`
+			Target         string `json:"target"`
+			ID             string `json:"id"`
+			Task           string `json:"task"`
+			Constraints    string `json:"constraints"`
+			ExpectedOutput string `json:"expected_output"`
+			ParentAgentID  string `json:"parent_agent_id"`
 		}
 		if err := json.Unmarshal(call.Args, &args); err != nil {
 			return "", fmt.Errorf("agent args: %w", err)
 		}
-		if args.ID == "" || args.Task == "" {
-			return "", fmt.Errorf("agent: id and task required")
+		target := strings.TrimSpace(args.Target)
+		if target == "" {
+			target = strings.TrimSpace(args.ID)
+		}
+		if target == "" || strings.TrimSpace(args.Task) == "" {
+			return "", fmt.Errorf("agent: target and task required")
+		}
+		if r.delegationDepth >= 2 {
+			return "", fmt.Errorf("agent: delegation depth exceeded")
 		}
 		if r.manifest == nil || r.providerMgr == nil {
 			return "", fmt.Errorf("agent: sub-agent execution not configured")
@@ -651,16 +733,33 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		// Find agent spec
 		var spec *config.AgentSpec
 		for _, a := range r.manifest.Agents {
-			if a.ID == args.ID {
+			if a.ID == target {
 				s := a
 				spec = &s
 				break
 			}
 		}
 		if spec == nil {
-			return "", fmt.Errorf("agent: unknown agent %q", args.ID)
+			return "", fmt.Errorf("agent: unknown agent %q", target)
+		}
+		if r.delegationDepth == 0 && spec.Mode == "orchestrator" {
+			return "", fmt.Errorf("agent: orchestrator can only delegate to workers")
+		}
+		if r.delegationDepth == 1 && spec.Mode == "orchestrator" {
+			return "", fmt.Errorf("agent: workers can only delegate to worker-style microagents")
 		}
 		// Create and run sub-agent
+		subTask := strings.TrimSpace(args.Task)
+		if strings.TrimSpace(args.Constraints) != "" {
+			subTask += "\n\nConstraints:\n" + strings.TrimSpace(args.Constraints)
+		}
+		if strings.TrimSpace(args.ExpectedOutput) != "" {
+			subTask += "\n\nExpected output:\n" + strings.TrimSpace(args.ExpectedOutput)
+		}
+		parentID := strings.TrimSpace(args.ParentAgentID)
+		if parentID == "" {
+			parentID = r.agentID
+		}
 		subAgent := LLMAgent{
 			Spec:            *spec,
 			ProviderManager: r.providerMgr,
@@ -670,10 +769,14 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			MaxTokens:       r.maxTokens,
 			ToolCallback:    r.toolCallback,
 			ShellApproval:   r.shellApproval,
+			Manifest:        r.manifest,
+			SessionDir:      r.sessionDir,
+			DelegationDepth: r.delegationDepth + 1,
+			ParentAgentID:   parentID,
 		}
-		result, err := subAgent.Run(ctx, args.Task)
+		result, err := subAgent.Run(ctx, subTask)
 		if err != nil {
-			return "", fmt.Errorf("agent %s: %w", args.ID, err)
+			return "", fmt.Errorf("agent %s: %w", target, err)
 		}
 		return result.Content, nil
 	default:
