@@ -55,8 +55,71 @@ func (m *Model) showBanner(text, kind string) {
 	m.bannerKind = kind
 }
 
+func (m *Model) persistUIState() {
+	m.cfg.LastAgentID = m.mode
+	m.cfg.ShowSidePanel = m.showSidePanel
+	_ = config.Save(m.cfg)
+}
+
 func (m *Model) setProgressNote(text string) {
-	m.progressNote = strings.TrimSpace(text)
+	text = strings.TrimSpace(text)
+	if text == "" || text == m.progressNote {
+		m.progressNote = text
+		return
+	}
+	m.progressNote = text
+	m.messages = append(m.messages, ChatMessage{
+		Role:    RoleAssistant,
+		Kind:    "comment",
+		Content: text,
+		At:      time.Now(),
+	})
+}
+
+func (m *Model) appendToolStreamMessage(item ToolItem) {
+	m.messages = append(m.messages, ChatMessage{
+		Role:  RoleAssistant,
+		Kind:  "tool-stream",
+		Tools: []ToolItem{item},
+		At:    time.Now(),
+	})
+}
+
+func (m *Model) updateToolStreamMessage(item ToolItem) {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := &m.messages[i]
+		if msg.Role != RoleAssistant || msg.Kind != "tool-stream" || len(msg.Tools) != 1 {
+			continue
+		}
+		tool := msg.Tools[0]
+		if tool.Name == item.Name && tool.Args == item.Args && tool.Status == "running" {
+			msg.Tools[0] = item
+			msg.At = time.Now()
+			m.mergeAdjacentToolStreamMessage(i)
+			return
+		}
+	}
+	m.appendToolStreamMessage(item)
+	m.mergeAdjacentToolStreamMessage(len(m.messages) - 1)
+}
+
+func (m *Model) mergeAdjacentToolStreamMessage(idx int) {
+	if idx <= 0 || idx >= len(m.messages) {
+		return
+	}
+	curr := m.messages[idx]
+	if curr.Kind != "tool-stream" || len(curr.Tools) != 1 || curr.Tools[0].Status == "running" {
+		return
+	}
+	prev := &m.messages[idx-1]
+	if prev.Role != RoleAssistant || prev.Kind != "tool-stream" || len(prev.Tools) == 0 {
+		return
+	}
+	if prev.Tools[0].Status == "running" || prev.Tools[0].Name != curr.Tools[0].Name {
+		return
+	}
+	prev.Tools = append(prev.Tools, curr.Tools[0])
+	m.messages = append(m.messages[:idx], m.messages[idx+1:]...)
 }
 
 func (m *Model) queuePrompt(input, prompt string, mentionedFiles, images []string) {
@@ -587,51 +650,6 @@ func (m Model) renderMessages() string {
 				Render(msg.Content)
 			parts = append(parts, s)
 		}
-	}
-
-	if m.thinking && (len(m.liveTools) > 0 || m.currentTool != nil) {
-		bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
-		var liveLines []string
-		if strings.TrimSpace(m.progressNote) != "" {
-			liveLines = append(liveLines, styleMuted.Render("  "+m.progressNote))
-		}
-		for _, t := range m.liveTools {
-			label := formatToolLabel(t.Name, t.Args)
-			suffix := lipgloss.NewStyle().Foreground(colorSuccess).Render(" ✓")
-			if t.Status == "error" {
-				suffix = lipgloss.NewStyle().Foreground(colorError).Render(" ✗")
-			}
-			liveLines = append(liveLines, bullet+" "+styleMuted.Render(label)+suffix)
-		}
-		if m.currentTool != nil {
-			label := formatRunningLabel(m.currentTool.Name, m.currentTool.Args)
-			liveLines = append(liveLines, bullet+" "+styleMuted.Render(label)+" "+m.spin.View())
-			if p := extractToolPath(m.currentTool.Name, m.currentTool.Args); p != "" {
-				liveLines = append(liveLines, styleMuted.Render("    ⎿  "+p))
-			}
-		}
-		if len(liveLines) > 0 {
-			parts = append(parts, strings.Join(liveLines, "\n"))
-		}
-	}
-
-	if m.banner != "" {
-		var bs lipgloss.Style
-		prefix := "  • "
-		switch m.bannerKind {
-		case "error":
-			bs = styleError
-			prefix = "  ✗ "
-		case "warn":
-			bs = styleWarn
-			prefix = "  ! "
-		case "success":
-			bs = styleSuccess
-			prefix = "  ✓ "
-		default:
-			bs = styleMuted
-		}
-		parts = append(parts, bs.Render(prefix+m.banner))
 	}
 
 	return strings.Join(parts, "\n\n")

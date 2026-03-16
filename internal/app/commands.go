@@ -27,6 +27,7 @@ func (a *App) handleCommand(line string) error {
 		return a.startSetup()
 	case "/mode":
 		a.mode = a.mode.Next()
+		a.persistUIState()
 		a.printLine(a.ui.Info(a.ui.Stage(string(a.mode))))
 		a.printStatus()
 	case "/models":

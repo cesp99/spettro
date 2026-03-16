@@ -161,7 +161,7 @@ func formatRunningLabel(name, argsJSON string) string {
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
 			cmd := truncateLabel(args.Command, 60)
-			return "Running $ " + cmd + "…"
+			return "Run $ " + cmd + "…"
 		}
 		return "Running…"
 	case "glob":
@@ -373,7 +373,10 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 		if count == 1 {
 			item := group[0]
 			label := formatToolLabel(name, item.Args)
-			if item.Status == "error" {
+			if item.Status == "running" {
+				label = formatRunningLabel(name, item.Args)
+				label = styleMuted.Render(label)
+			} else if item.Status == "error" {
 				label = errStyle.Render(label)
 			} else {
 				label = styleMuted.Render(label)
@@ -382,19 +385,30 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 			if showTools {
 				if p := extractToolPath(name, item.Args); p != "" {
 					icon := "✓"
-					if item.Status == "error" {
+					if item.Status == "running" {
+						icon = ""
+					} else if item.Status == "error" {
 						icon = "✗"
 					}
-					lines = append(lines, styleMuted.Render(fmt.Sprintf("    ⎿  %s %s", p, icon)))
+					line := fmt.Sprintf("    ⎿  %s", p)
+					if icon != "" {
+						line += " " + icon
+					}
+					lines = append(lines, styleMuted.Render(line))
 				}
-				if out := trimToolOutput(item.Output, 20); out != "" {
-					for _, ol := range strings.Split(out, "\n") {
-						lines = append(lines, outputStyle.Render("       "+ol))
+				if item.Status != "running" {
+					if out := trimToolOutput(item.Output, 20); out != "" {
+						for _, ol := range strings.Split(out, "\n") {
+							lines = append(lines, outputStyle.Render("       "+ol))
+						}
 					}
 				}
 			}
 		} else {
 			label := fmt.Sprintf("%s %s", toolActionVerb(name), toolNounCount(name, count))
+			if hasRunningTool(group) {
+				label = formatRunningToolGroupLabel(name, count)
+			}
 			if !showTools {
 				label += "  " + styleMuted.Render("(ctrl+o to expand)")
 			}
@@ -404,17 +418,28 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 					var detail string
 					if p := extractToolPath(gt.Name, gt.Args); p != "" {
 						icon := "✓"
-						if gt.Status == "error" {
+						if gt.Status == "running" {
+							icon = ""
+						} else if gt.Status == "error" {
 							icon = "✗"
 						}
-						detail = fmt.Sprintf("    ⎿  %s %s", p, icon)
+						detail = "    ⎿  " + p
+						if icon != "" {
+							detail += " " + icon
+						}
 					} else {
-						detail = "    ⎿  " + formatToolLabel(gt.Name, gt.Args)
+						if gt.Status == "running" {
+							detail = "    ⎿  " + formatRunningLabel(gt.Name, gt.Args)
+						} else {
+							detail = "    ⎿  " + formatToolLabel(gt.Name, gt.Args)
+						}
 					}
 					lines = append(lines, styleMuted.Render(detail))
-					if out := trimToolOutput(gt.Output, 8); out != "" {
-						for _, ol := range strings.Split(out, "\n") {
-							lines = append(lines, outputStyle.Render("       "+ol))
+					if gt.Status != "running" {
+						if out := trimToolOutput(gt.Output, 8); out != "" {
+							for _, ol := range strings.Split(out, "\n") {
+								lines = append(lines, outputStyle.Render("       "+ol))
+							}
 						}
 					}
 				}
@@ -424,6 +449,51 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 		i = j
 	}
 	return strings.Join(lines, "\n")
+}
+
+func hasRunningTool(items []ToolItem) bool {
+	for _, item := range items {
+		if item.Status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+func formatRunningToolGroupLabel(name string, count int) string {
+	switch name {
+	case "file-read":
+		if count == 1 {
+			return "Reading 1 file…"
+		}
+		return fmt.Sprintf("Reading %d files…", count)
+	case "file-write":
+		if count == 1 {
+			return "Writing 1 file…"
+		}
+		return fmt.Sprintf("Writing %d files…", count)
+	case "repo-search":
+		if count == 1 {
+			return "Searching 1 query…"
+		}
+		return fmt.Sprintf("Searching %d queries…", count)
+	case "shell-exec", "bash":
+		if count == 1 {
+			return "Running 1 command…"
+		}
+		return fmt.Sprintf("Running %d commands…", count)
+	case "glob":
+		if count == 1 {
+			return "Globbing 1 pattern…"
+		}
+		return fmt.Sprintf("Globbing %d patterns…", count)
+	case "grep":
+		if count == 1 {
+			return "Grepping 1 pattern…"
+		}
+		return fmt.Sprintf("Grepping %d patterns…", count)
+	}
+	return fmt.Sprintf("%s %d call(s)…", toolActionVerb(name), count)
 }
 
 func trimToolOutput(output string, maxLines int) string {

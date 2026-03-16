@@ -322,18 +322,24 @@ func New(cwd string, cfg config.UserConfig, store *storage.Store, pm *provider.M
 	if defaultMode == "" {
 		defaultMode = "plan"
 	}
+	if cfg.LastAgentID != "" {
+		if spec, ok := manifest.AgentByID(cfg.LastAgentID); ok && spec.Enabled {
+			defaultMode = cfg.LastAgentID
+		}
+	}
 
 	m := Model{
-		mode:      defaultMode,
-		cfg:       cfg,
-		cwd:       cwd,
-		store:     store,
-		providers: pm,
-		manifest:  manifest,
-		ta:        ta,
-		spin:      sp,
-		favorites: favs,
-		repoFiles: repoFiles,
+		mode:          defaultMode,
+		cfg:           cfg,
+		cwd:           cwd,
+		store:         store,
+		providers:     pm,
+		manifest:      manifest,
+		ta:            ta,
+		spin:          sp,
+		favorites:     favs,
+		repoFiles:     repoFiles,
+		showSidePanel: cfg.ShowSidePanel,
 		committer: agent.LLMCommitter{
 			ProviderManager: pm,
 			ProviderName:    func() string { return cfg.ActiveProvider },
@@ -567,14 +573,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
 				m.currentTool = &item
 				m.setProgressNote("Okay, let me " + strings.TrimSuffix(strings.ToLower(formatRunningLabel(t.Name, t.Args)), "…") + ".")
+				m.appendToolStreamMessage(item)
 			} else {
-				m.liveTools = append(m.liveTools, ToolItem{
+				completed := ToolItem{
 					Name:   t.Name,
 					Status: t.Status,
 					Args:   t.Args,
 					Output: t.Output,
-				})
+				}
+				m.liveTools = append(m.liveTools, completed)
 				m.currentTool = nil
+				m.updateToolStreamMessage(completed)
 				if t.Status == "error" {
 					m.setProgressNote(fmt.Sprintf("That step failed while trying to %s.", strings.ToLower(toolActionVerb(t.Name))))
 				}
@@ -601,7 +610,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.banner = ""
 		m.bannerKind = ""
 	case quitWarningMsg:
-		if m.banner == "press ctrl+c again to quit" {
+		if m.banner == "press again ctrl C to exit" {
 			m.banner = ""
 			m.bannerKind = ""
 			m.ctrlCAt = time.Time{}
@@ -714,12 +723,12 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c":
-		if !m.ctrlCAt.IsZero() && time.Since(m.ctrlCAt) < 2*time.Second {
+		if !m.ctrlCAt.IsZero() && time.Since(m.ctrlCAt) < 5*time.Second {
 			return m, tea.Quit
 		}
 		m.ctrlCAt = time.Now()
-		m.showBanner("press ctrl+c again to quit", "warn")
-		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return quitWarningMsg{} })
+		m.showBanner("press again ctrl C to exit", "warn")
+		return m, tea.Tick(5*time.Second, func(time.Time) tea.Msg { return quitWarningMsg{} })
 	case "ctrl+q":
 		return m, tea.Quit
 	case "up", "ctrl+p":
@@ -761,6 +770,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "shift+tab":
 		m.mode = nextAgent(m.manifest, m.mode)
+		m.persistUIState()
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 		return m, nil
 	case "ctrl+o":
@@ -769,6 +779,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+b":
 		m.showSidePanel = !m.showSidePanel
+		m.persistUIState()
 		m.refreshModifiedFiles()
 		m.refreshViewport()
 		if m.showSidePanel {
@@ -896,6 +907,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/mode", "/next":
 		m.mode = nextAgent(m.manifest, m.mode)
+		m.persistUIState()
 		m.showBanner(fmt.Sprintf("switched to %s mode", m.mode), "info")
 	case "/connect":
 		m = m.openConnect()

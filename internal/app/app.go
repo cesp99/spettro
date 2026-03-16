@@ -41,6 +41,11 @@ type modelPicker struct {
 	items  []provider.Model
 }
 
+func (a *App) persistUIState() {
+	a.cfg.LastAgentID = string(a.mode)
+	_ = config.Save(a.cfg)
+}
+
 func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error) {
 	cwd, err := cwdFn()
 	if err != nil {
@@ -71,10 +76,19 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		pm.AddLocalModels(localModels)
 	}
 	manifest, _ := config.LoadAgentManifestForProject(cwd)
+	mode := ModePlanning
+	switch cfg.LastAgentID {
+	case string(ModePlanning):
+		mode = ModePlanning
+	case string(ModeCoding):
+		mode = ModeCoding
+	case string(ModeChat):
+		mode = ModeChat
+	}
 	app := &App{
 		in:        in,
 		out:       out,
-		mode:      ModePlanning,
+		mode:      mode,
 		cwd:       cwd,
 		cfg:       cfg,
 		store:     store,
@@ -126,6 +140,7 @@ func (a *App) Run(ctx context.Context) error {
 
 		if IsModeSwitchInput(line) {
 			a.mode = a.mode.Next()
+			a.persistUIState()
 			a.printLine(a.ui.Info(a.ui.Stage(string(a.mode))))
 			a.printStatus()
 			continue

@@ -24,6 +24,8 @@ type UserConfig struct {
 	APIKeys        map[string]string `json:"api_keys,omitempty"`
 	LocalEndpoints []string          `json:"local_endpoints,omitempty"`
 	Favorites      []string          `json:"favorites,omitempty"` // "provider:model"
+	LastAgentID    string            `json:"last_agent_id,omitempty"`
+	ShowSidePanel  bool              `json:"show_side_panel,omitempty"`
 }
 
 func Default() UserConfig {

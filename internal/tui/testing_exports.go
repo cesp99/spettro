@@ -117,12 +117,40 @@ func (m Model) BannerForTesting() string {
 	return m.banner
 }
 
+func (m *Model) SetCtrlCAtForTesting(t time.Time) {
+	m.ctrlCAt = t
+}
+
 func (m Model) ProgressNoteForTesting() string {
 	return m.progressNote
 }
 
+func (m Model) ModeForTesting() string {
+	return m.mode
+}
+
+func (m Model) SidePanelVisibleForTesting() bool {
+	return m.showSidePanel
+}
+
+func (m *Model) AddMessageForTesting(msg ChatMessage) {
+	m.messages = append(m.messages, msg)
+}
+
+func (m Model) RenderMessagesForTesting() string {
+	return m.renderMessages()
+}
+
 func (m Model) UpdateMainForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.updateMain(msg)
+}
+
+func (m Model) UpdateForTesting(msg tea.Msg) (tea.Model, tea.Cmd) {
+	return m.update(msg)
+}
+
+func (m Model) TriggerQuitWarningTimeoutForTesting() (tea.Model, tea.Cmd) {
+	return m.update(quitWarningMsg{})
 }
 
 func (m Model) UpdateShellApprovalForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

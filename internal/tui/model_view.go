@@ -394,13 +394,7 @@ func formatTokenCount(n int) string {
 }
 
 func (m Model) viewStatusBar(width int) string {
-	left := strings.Join([]string{
-		styleMuted.Render("shift+tab: mode"),
-		styleMuted.Render("f2: model"),
-		styleMuted.Render("ctrl+b: panel"),
-		styleMuted.Render("ctrl+o: context"),
-		styleMuted.Render("/help"),
-	}, styleDim.Render("  ·  "))
+	left := m.statusBarMessage()
 
 	window := m.contextWindow()
 	if window == 0 {
@@ -432,6 +426,34 @@ func (m Model) viewStatusBar(width int) string {
 		Background(lipgloss.Color("#0D0D0D")).
 		PaddingLeft(1).
 		Render(bar)
+}
+
+func (m Model) statusBarMessage() string {
+	if m.banner != "" {
+		return renderStatusBanner(m.banner, m.bannerKind)
+	}
+	return strings.Join([]string{
+		styleMuted.Render("shift+tab: mode"),
+		styleMuted.Render("ctrl+b: panel"),
+		styleMuted.Render("ctrl+o: context"),
+	}, styleDim.Render("  ·  "))
+}
+
+func renderStatusBanner(text, kind string) string {
+	prefix := "• "
+	style := styleMuted
+	switch kind {
+	case "error":
+		prefix = "✗ "
+		style = styleError
+	case "warn":
+		prefix = "! "
+		style = styleWarn
+	case "success":
+		prefix = "✓ "
+		style = styleSuccess
+	}
+	return style.Render(prefix + text)
 }
 
 func (m Model) sidePanelWidth() int {
