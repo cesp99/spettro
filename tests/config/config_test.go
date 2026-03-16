@@ -20,6 +20,8 @@ func TestLoadOrCreateRoundTrip(t *testing.T) {
 
 	cfg.ActiveProvider = "anthropic"
 	cfg.ActiveModel = "claude-3-7-sonnet"
+	cfg.LastAgentID = "coding"
+	cfg.ShowSidePanel = true
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -30,6 +32,12 @@ func TestLoadOrCreateRoundTrip(t *testing.T) {
 	}
 	if reloaded.ActiveProvider != "anthropic" {
 		t.Fatalf("expected anthropic provider, got %s", reloaded.ActiveProvider)
+	}
+	if reloaded.LastAgentID != "coding" {
+		t.Fatalf("expected saved last agent, got %s", reloaded.LastAgentID)
+	}
+	if !reloaded.ShowSidePanel {
+		t.Fatal("expected side panel preference to persist")
 	}
 
 	p := filepath.Join(tmpHome, ".spettro", "config.json")

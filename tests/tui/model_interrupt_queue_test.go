@@ -3,9 +3,13 @@ package tui_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"spettro/internal/config"
+	"spettro/internal/provider"
+	"spettro/internal/storage"
 	"spettro/internal/tui"
 )
 
@@ -78,5 +82,108 @@ func TestUpdateShellApproval_DenyInterruptsAndAsksInstead(t *testing.T) {
 	}
 	if got.BannerForTesting() != "what should I do instead?" {
 		t.Fatalf("unexpected banner: %q", got.BannerForTesting())
+	}
+}
+
+func TestRenderMessages_KeepsCommentsAndToolEventsInOrder(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(120, 40)
+	m.AddMessageForTesting(tui.ChatMessage{
+		Role:    tui.RoleAssistant,
+		Kind:    "comment",
+		Content: "Let me read the key files first.",
+		At:      time.Now(),
+	})
+	m.AddMessageForTesting(tui.ChatMessage{
+		Role: tui.RoleAssistant,
+		Kind: "tool-stream",
+		Tools: []tui.ToolItem{{
+			Name:   "file-read",
+			Status: "success",
+			Args:   `{"path":"internal/tui/model.go"}`,
+		}},
+		At: time.Now(),
+	})
+	m.AddMessageForTesting(tui.ChatMessage{
+		Role:    tui.RoleAssistant,
+		Kind:    "comment",
+		Content: "Now let me read the rendering section.",
+		At:      time.Now(),
+	})
+	m.AddMessageForTesting(tui.ChatMessage{
+		Role: tui.RoleAssistant,
+		Kind: "tool-stream",
+		Tools: []tui.ToolItem{{
+			Name:   "file-read",
+			Status: "running",
+			Args:   `{"path":"internal/tui/model_state.go"}`,
+		}},
+		At: time.Now(),
+	})
+
+	rendered := m.RenderMessagesForTesting()
+	wantOrder := []string{
+		"Let me read the key files first.",
+		"Read internal/tui/model.go",
+		"Now let me read the rendering section.",
+		"Reading internal/tui/model_state.go",
+	}
+	last := -1
+	for _, want := range wantOrder {
+		idx := strings.Index(rendered, want)
+		if idx == -1 {
+			t.Fatalf("expected %q in rendered output, got:\n%s", want, rendered)
+		}
+		if idx <= last {
+			t.Fatalf("expected %q after previous stream item, got:\n%s", want, rendered)
+		}
+		last = idx
+	}
+}
+
+func TestNew_RestoresLastAgentAndPanelState(t *testing.T) {
+	cwd := t.TempDir()
+	store, err := storage.New(cwd)
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	pm := provider.NewManager()
+	cfg := config.Default()
+	cfg.LastAgentID = "coding"
+	cfg.ShowSidePanel = true
+
+	m := tui.New(cwd, cfg, store, pm)
+	if m.ModeForTesting() != "coding" {
+		t.Fatalf("expected restored mode coding, got %s", m.ModeForTesting())
+	}
+	if !m.SidePanelVisibleForTesting() {
+		t.Fatal("expected restored side panel state to be visible")
+	}
+}
+
+func TestUpdateMain_CtrlCShowsExitHint(t *testing.T) {
+	m := tui.NewModelForTesting()
+
+	gotModel, _ := m.UpdateMainForTesting(tea.KeyMsg{Type: tea.KeyCtrlC})
+	got := gotModel.(tui.Model)
+
+	if got.BannerForTesting() != "press again ctrl C to exit" {
+		t.Fatalf("unexpected ctrl+c banner: %q", got.BannerForTesting())
+	}
+}
+
+func TestQuitWarningMsg_ClearsExitHintAfterTimeout(t *testing.T) {
+	m := tui.NewModelForTesting()
+
+	gotModel, _ := m.UpdateForTesting(tea.KeyMsg{Type: tea.KeyCtrlC})
+	got := gotModel.(tui.Model)
+	if got.BannerForTesting() != "press again ctrl C to exit" {
+		t.Fatalf("unexpected ctrl+c banner: %q", got.BannerForTesting())
+	}
+
+	clearedModel, _ := got.TriggerQuitWarningTimeoutForTesting()
+	cleared := clearedModel.(tui.Model)
+	if cleared.BannerForTesting() != "" {
+		t.Fatalf("expected ctrl+c hint to clear after timeout, got %q", cleared.BannerForTesting())
 	}
 }
