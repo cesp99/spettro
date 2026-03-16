@@ -622,11 +622,33 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc lipgloss.Color) string {
 	return indent(header+"\n"+box, "  ")
 }
 
-func renderAssistantTextBlock(body string) string {
+func renderAssistantTextBlock(body string, width int) string {
 	if strings.TrimSpace(body) == "" {
 		return ""
 	}
-	return indent(body, "  ")
+	if width < 10 {
+		width = 10
+	}
+	wrapped := lipgloss.NewStyle().Width(width).Render(body)
+	return indent(wrapped, "  ")
+}
+
+func renderUserTextBlock(body string, width int, prefix string) string {
+	if strings.TrimSpace(body) == "" {
+		return ""
+	}
+	if width < 10 {
+		width = 10
+	}
+	lines := strings.Split(lipgloss.NewStyle().Width(width).Render(body), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			lines[i] = prefix + line
+		} else {
+			lines[i] = strings.Repeat(" ", lipgloss.Width(prefix)) + line
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderMessages() string {
@@ -642,7 +664,7 @@ func (m Model) renderMessages() string {
 		case RoleUser:
 			prefix := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  › ")
 			text := lipgloss.NewStyle().Foreground(colorText).Render(msg.Content)
-			parts = append(parts, prefix+text)
+			parts = append(parts, renderUserTextBlock(text, m.paneWidth()-8, prefix))
 		case RoleAssistant:
 			if msg.Kind == "plan" {
 				parts = append(parts, m.renderPlanMessage(msg, mc))
@@ -654,7 +676,7 @@ func (m Model) renderMessages() string {
 				entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
 			}
 			if strings.TrimSpace(msg.Content) != "" {
-				entryLines = append(entryLines, renderAssistantTextBlock(body))
+				entryLines = append(entryLines, renderAssistantTextBlock(body, m.paneWidth()-8))
 			}
 			if m.showTools && msg.Thinking != "" {
 				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)

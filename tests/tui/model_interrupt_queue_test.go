@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/config"
 	"spettro/internal/provider"
@@ -241,5 +242,42 @@ func TestToolProgressMsg_FailedCommentStaysHidden(t *testing.T) {
 	}
 	if got.ActivityCountForTesting() != 0 {
 		t.Fatalf("expected failed comment to skip activity feed, got %d items", got.ActivityCountForTesting())
+	}
+}
+
+func TestRenderMessages_LongCommentWrapsToPaneWidth(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(60, 20)
+	m.AddMessageForTesting(tui.ChatMessage{
+		Role:    tui.RoleAssistant,
+		Kind:    "comment",
+		Content: "This is a very long progress comment that should wrap across multiple lines instead of overflowing in one single long row.",
+		At:      time.Now(),
+	})
+
+	rendered := m.RenderMessagesForTesting()
+	if !strings.Contains(rendered, "This is a very long progress comment") {
+		t.Fatalf("expected rendered comment content, got:\n%s", rendered)
+	}
+	if lipgloss.Height(rendered) < 2 {
+		t.Fatalf("expected wrapped output with multiple lines, got:\n%s", rendered)
+	}
+}
+
+func TestRenderMessages_LongUserMessageWrapsToPaneWidth(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(60, 20)
+	m.AddMessageForTesting(tui.ChatMessage{
+		Role:    tui.RoleUser,
+		Content: "This is a very long user message that should wrap cleanly in the chat pane instead of overflowing on a single line.",
+		At:      time.Now(),
+	})
+
+	rendered := m.RenderMessagesForTesting()
+	if !strings.Contains(rendered, "This is a very long user message") {
+		t.Fatalf("expected rendered user content, got:\n%s", rendered)
+	}
+	if lipgloss.Height(rendered) < 2 {
+		t.Fatalf("expected wrapped user output with multiple lines, got:\n%s", rendered)
 	}
 }
