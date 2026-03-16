@@ -1136,6 +1136,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.startAgentActivity(spec.ID, input)
 	toolCh := make(chan agent.ToolTrace, 64)
 	m.toolCh = toolCh
 	approvalCh := make(chan shellApprovalRequestMsg, 8)

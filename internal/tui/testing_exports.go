@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -19,6 +21,10 @@ func FormatToolLabelForTesting(name, argsJSON string) string {
 
 func FormatRunningLabelForTesting(name, argsJSON string) string {
 	return formatRunningLabel(name, argsJSON)
+}
+
+func SanitizeToolOutputForTesting(output string, maxLines int) string {
+	return sanitizeToolOutput(output, maxLines)
 }
 
 func ShellApprovalOptionsForTesting() []string {
@@ -78,4 +84,39 @@ func (m Model) UpdateMainForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) UpdateShellApprovalForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.updateShellApproval(msg)
+}
+
+func (m *Model) SetDimensionsForTesting(width, height int) {
+	m.width = width
+	m.height = height
+}
+
+func (m *Model) SetSidePanelVisibleForTesting(v bool) {
+	m.showSidePanel = v
+}
+
+func (m *Model) SetShowToolsForTesting(v bool) {
+	m.showTools = v
+}
+
+func (m *Model) AddActivityForTesting(kind, id, agentID, title, detail, body, status string) {
+	m.activityFeed = append(m.activityFeed, activityItem{
+		Key:     title + time.Now().Format(time.RFC3339Nano),
+		Kind:    kind,
+		ID:      id,
+		AgentID: agentID,
+		Title:   title,
+		Detail:  detail,
+		Body:    body,
+		Status:  status,
+		At:      time.Now(),
+	})
+}
+
+func (m Model) SidePanelWidthForTesting() int {
+	return m.sidePanelWidth()
+}
+
+func (m Model) ViewSidePanelForTesting(width int) string {
+	return m.viewSidePanel(width)
 }

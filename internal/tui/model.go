@@ -152,7 +152,21 @@ type sidePanelItem struct {
 	ID     string
 	Title  string
 	Detail string
+	Body   string
+	Agent  string
 	Status string
+}
+
+type activityItem struct {
+	Key     string
+	Kind    string
+	ID      string
+	AgentID string
+	Title   string
+	Detail  string
+	Body    string
+	Status  string
+	At      time.Time
 }
 
 type agentTickMsg struct{}
@@ -250,6 +264,8 @@ type Model struct {
 	modifiedFiles  []modifiedFileEntry
 	showSidePanel  bool
 	sessionEdits   map[string]struct{}
+	activityFeed   []activityItem
+	currentRunKey  string
 
 	totalTokensUsed int
 	sessionID       string
@@ -393,6 +409,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.totalTokensUsed += msg.tokensUsed
 		}
 		if msg.err != nil {
+			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("error: "+msg.err.Error(), "error")
 		} else {
 			m.syncTodosFromSession()
@@ -405,6 +422,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Tools:    toToolItems(msg.tools),
 				At:       time.Now(),
 			})
+			m.finishAgentActivity(m.mode, "done", main, thinking)
+			m.recordAssistantActivity(m.mode, main, thinking, false)
 		}
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
@@ -427,6 +446,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.totalTokensUsed += msg.tokensUsed
 		}
 		if msg.err != nil {
+			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
 			m.showBanner("plan error: "+msg.err.Error(), "error")
 		} else {
 			m.syncTodosFromSession()
@@ -438,6 +458,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Tools:   toToolItems(msg.tools),
 				At:      time.Now(),
 			})
+			m.finishAgentActivity(m.mode, "done", msg.plan, "")
+			m.recordAssistantActivity(m.mode, msg.plan, "", true)
 			m.showPlanApproval = true
 			m.planApprovalCursor = 0
 		}

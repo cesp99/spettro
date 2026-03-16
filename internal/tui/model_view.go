@@ -398,6 +398,7 @@ func (m Model) viewStatusBar(width int) string {
 		styleMuted.Render("shift+tab: mode"),
 		styleMuted.Render("f2: model"),
 		styleMuted.Render("ctrl+b: panel"),
+		styleMuted.Render("ctrl+o: context"),
 		styleMuted.Render("/help"),
 	}, styleDim.Render("  ·  "))
 
@@ -437,16 +438,6 @@ func (m Model) sidePanelWidth() int {
 	if !m.showSidePanel {
 		return 0
 	}
-	hasActive := false
-	for _, a := range m.parallelAgents {
-		if a.Status == "running" {
-			hasActive = true
-			break
-		}
-	}
-	if !hasActive && len(m.modifiedFiles) == 0 {
-		return 0
-	}
 	if m.width < 110 {
 		return 0
 	}
@@ -473,21 +464,20 @@ func (m Model) paneWidth() int {
 }
 
 func (m Model) sidePanelItems() []sidePanelItem {
-	items := make([]sidePanelItem, 0, len(m.parallelAgents)+len(m.modifiedFiles))
-	for _, a := range m.parallelAgents {
-		if a.Status != "running" {
+	items := make([]sidePanelItem, 0, len(m.activityFeed)+len(m.modifiedFiles))
+	for i := len(m.activityFeed) - 1; i >= 0; i-- {
+		entry := m.activityFeed[i]
+		if strings.TrimSpace(entry.Title) == "" && strings.TrimSpace(entry.Detail) == "" && strings.TrimSpace(entry.Body) == "" {
 			continue
 		}
-		label := a.ID
-		if a.Instance > 1 {
-			label = fmt.Sprintf("%s [%d]", a.ID, a.Instance)
-		}
 		items = append(items, sidePanelItem{
-			Kind:   "agent",
-			ID:     a.ID,
-			Title:  label,
-			Detail: strings.TrimSpace(a.Task),
-			Status: a.Status,
+			Kind:   entry.Kind,
+			ID:     entry.ID,
+			Title:  entry.Title,
+			Detail: entry.Detail,
+			Body:   entry.Body,
+			Agent:  entry.AgentID,
+			Status: entry.Status,
 		})
 	}
 	for _, f := range m.modifiedFiles {
@@ -503,6 +493,7 @@ func (m Model) sidePanelItems() []sidePanelItem {
 			ID:     f.Path,
 			Title:  f.Path,
 			Detail: detail,
+			Body:   detail,
 			Status: "changed",
 		})
 	}
@@ -510,22 +501,54 @@ func (m Model) sidePanelItems() []sidePanelItem {
 }
 
 func (m Model) sideListGeometry() (startY, rows int) {
-	rows = m.height - 13
+	rows = m.sidePanelInnerHeight() / 2
 	if rows < 4 {
 		rows = 4
 	}
 	return 5, rows
 }
 
+func (m Model) sidePanelInnerHeight() int {
+	h := m.height - 4
+	if h < 12 {
+		h = 12
+	}
+	return h
+}
+
+func clampLines(s string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	if maxLines == 1 {
+		return truncateLabel(strings.TrimSpace(lines[0]), 48)
+	}
+	clipped := append([]string(nil), lines[:maxLines-1]...)
+	clipped = append(clipped, styleMuted.Render("…"))
+	return strings.Join(clipped, "\n")
+}
+
 func (m Model) viewSidePanel(width int) string {
+	innerHeight := m.sidePanelInnerHeight()
 	items := m.sidePanelItems()
 	if len(items) == 0 {
+		body := lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Bold(true).Render("Activity"),
+			styleMuted.Render("Live tool context and agent output"),
+			"",
+			styleMuted.Render("Observability is on. Tool usage, reasoning, and agent output will appear here."),
+		)
 		box := lipgloss.NewStyle().
 			Width(width).
+			Height(innerHeight).
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(colorBorder).
 			Padding(0, 1).
-			Render(lipgloss.NewStyle().Bold(true).Render("Activity") + "\n\n" + styleMuted.Render("No active agents or modified files."))
+			Render(clampLines(body, innerHeight))
 		return box
 	}
 
@@ -536,7 +559,11 @@ func (m Model) viewSidePanel(width int) string {
 	if cursor >= len(items) {
 		cursor = len(items) - 1
 	}
-	_, rows := m.sideListGeometry()
+	availableRows := innerHeight - 10
+	if availableRows < 6 {
+		availableRows = 6
+	}
+	rows := min(max(4, availableRows/2), max(4, len(items)))
 	start := m.sideScroll
 	maxStart := max(0, len(items)-rows)
 	if start > maxStart {
@@ -558,36 +585,68 @@ func (m Model) viewSidePanel(width int) string {
 			prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("› ")
 			titleStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
 		}
-		detail := styleDim.Render(it.Detail)
-		if it.Kind == "file" {
-			detail = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render(it.Detail)
+		detailColor := colorDim
+		switch it.Status {
+		case "running":
+			detailColor = m.currentColor()
+		case "error", "failed":
+			detailColor = colorError
+		case "changed":
+			detailColor = lipgloss.Color("#22C55E")
+		default:
+			if it.Kind == "file" {
+				detailColor = lipgloss.Color("#22C55E")
+			}
 		}
+		detail := lipgloss.NewStyle().Foreground(detailColor).Render(truncateLabel(it.Detail, max(10, width-14)))
 		label := truncateLabel(it.Title, max(8, width-14))
 		lines = append(lines, prefix+titleStyle.Render(label)+" "+detail)
 	}
 
 	selected := items[cursor]
+	detailsBody := strings.TrimSpace(selected.Detail)
+	if m.showTools && strings.TrimSpace(selected.Body) != "" {
+		detailsBody = strings.TrimSpace(selected.Body)
+	}
+	if !m.showTools && strings.TrimSpace(selected.Body) != "" {
+		detailsBody = truncateLabel(strings.ReplaceAll(strings.TrimSpace(selected.Body), "\n", " "), max(24, width*2))
+	}
 	details := []string{
 		lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("Details"),
 		styleMuted.Render("type: " + selected.Kind),
 		styleMuted.Render("id: " + selected.ID),
-		styleMuted.Render(truncateLabel(selected.Detail, max(12, width-4))),
 	}
-	if selected.Kind == "agent" {
-		details = append(details, styleMuted.Render(truncateLabel(selected.Detail, max(12, width-4))))
+	if selected.Agent != "" {
+		details = append(details, styleMuted.Render("agent: "+selected.Agent))
 	}
+	if detailsBody != "" {
+		details = append(details, "")
+		details = append(details, renderMarkdown(detailsBody, max(20, width-4)))
+	}
+	if !m.showTools {
+		details = append(details, "")
+		details = append(details, styleMuted.Render("ctrl+o expands full context"))
+	}
+	detailsBlock := strings.Join(details, "\n")
+	maxDetailLines := innerHeight - len(lines) - 6
+	if maxDetailLines < 5 {
+		maxDetailLines = 5
+	}
+	detailsBlock = clampLines(detailsBlock, maxDetailLines)
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
-		styleMuted.Render("Active agents and session edits"),
+		styleMuted.Render("Live tool context and agent output"),
 		"",
 		strings.Join(lines, "\n"),
 		"",
-		strings.Join(details, "\n"),
+		detailsBlock,
 	)
+	content = clampLines(content, innerHeight)
 
 	return lipgloss.NewStyle().
 		Width(width).
+		Height(innerHeight).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(colorBorder).
 		Padding(0, 1).

@@ -246,6 +246,111 @@ func toolNounCount(name string, count int) string {
 	return fmt.Sprintf("%d calls", count)
 }
 
+func summarizeToolArgs(name, argsJSON string) string {
+	switch name {
+	case "file-read":
+		var args struct {
+			Path      string `json:"path"`
+			StartLine int    `json:"start_line"`
+			EndLine   int    `json:"end_line"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil {
+			if args.Path == "" {
+				return "Reads a file from the workspace."
+			}
+			if args.StartLine > 0 || args.EndLine > 0 {
+				return fmt.Sprintf("Reads %s (lines %d-%d).", args.Path, args.StartLine, args.EndLine)
+			}
+			return fmt.Sprintf("Reads %s.", args.Path)
+		}
+	case "file-write":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
+			return fmt.Sprintf("Writes %s.", args.Path)
+		}
+	case "repo-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil {
+			if args.Query == "" {
+				return "Scans the repository structure."
+			}
+			return fmt.Sprintf("Searches the repository for %q.", truncateLabel(args.Query, 80))
+		}
+	case "shell-exec", "bash":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
+			return fmt.Sprintf("Runs `%s`.", truncateLabel(args.Command, 120))
+		}
+	case "glob":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
+			return fmt.Sprintf("Finds files matching %q.", truncateLabel(args.Pattern, 100))
+		}
+	case "grep":
+		var args struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
+			if args.Path != "" {
+				return fmt.Sprintf("Searches %s for %q.", args.Path, truncateLabel(args.Pattern, 100))
+			}
+			return fmt.Sprintf("Searches file contents for %q.", truncateLabel(args.Pattern, 100))
+		}
+	case "agent":
+		var args struct {
+			Target string `json:"target"`
+			Task   string `json:"task"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil {
+			label := args.Target
+			if label == "" {
+				label = "sub-agent"
+			}
+			if args.Task != "" {
+				return fmt.Sprintf("Delegates to %s for %s.", label, truncateLabel(args.Task, 100))
+			}
+			return fmt.Sprintf("Delegates to %s.", label)
+		}
+	}
+	if strings.TrimSpace(argsJSON) == "" {
+		return ""
+	}
+	return truncateLabel(argsJSON, 120)
+}
+
+func sanitizeToolOutput(output string, maxLines int) string {
+	output = stripToolCallLines(output)
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	return trimToolOutput(output, maxLines)
+}
+
+func stripToolCallLines(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	filtered := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "TOOL_CALL") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.TrimSpace(strings.Join(filtered, "\n"))
+}
+
 func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) string {
 	if len(tools) == 0 {
 		return ""

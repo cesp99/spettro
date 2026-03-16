@@ -199,6 +199,7 @@ func (m *Model) refreshModifiedFiles() {
 }
 
 func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
+	m.recordToolActivity(t)
 	if t.Name != "agent" {
 		return
 	}
@@ -266,6 +267,123 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		Status:        status,
 		Summary:       t.Output,
 	})
+}
+
+func (m *Model) startAgentActivity(agentID, task string) {
+	m.ensureSession()
+	m.currentRunKey = fmt.Sprintf("run:%s:%d", agentID, time.Now().UnixNano())
+	m.upsertActivity(activityItem{
+		Key:     m.currentRunKey,
+		Kind:    "agent",
+		ID:      agentID,
+		AgentID: agentID,
+		Title:   fmt.Sprintf("%s session", agentID),
+		Detail:  truncateLabel(strings.TrimSpace(task), 120),
+		Body:    strings.TrimSpace(task),
+		Status:  "running",
+		At:      time.Now(),
+	})
+	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		AgentID:   agentID,
+		AgentType: "orchestrator",
+		Task:      task,
+		Status:    "running",
+	})
+}
+
+func (m *Model) finishAgentActivity(agentID, status, content, thinking string) {
+	if m.currentRunKey == "" {
+		return
+	}
+	bodyParts := []string{}
+	if strings.TrimSpace(content) != "" {
+		bodyParts = append(bodyParts, strings.TrimSpace(content))
+	}
+	if strings.TrimSpace(thinking) != "" {
+		bodyParts = append(bodyParts, "Reasoning\n"+strings.TrimSpace(thinking))
+	}
+	m.upsertActivity(activityItem{
+		Key:     m.currentRunKey,
+		Kind:    "agent",
+		ID:      agentID,
+		AgentID: agentID,
+		Title:   fmt.Sprintf("%s session", agentID),
+		Detail:  truncateLabel(strings.TrimSpace(content), 120),
+		Body:    strings.Join(bodyParts, "\n\n"),
+		Status:  status,
+		At:      time.Now(),
+	})
+	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		AgentID:   agentID,
+		AgentType: "orchestrator",
+		Status:    status,
+		Summary:   truncateLabel(strings.TrimSpace(content), 200),
+	})
+	m.currentRunKey = ""
+}
+
+func (m *Model) recordAssistantActivity(agentID, content, thinking string, isPlan bool) {
+	title := "Assistant response"
+	if isPlan {
+		title = "Plan output"
+	}
+	bodyParts := []string{}
+	if strings.TrimSpace(content) != "" {
+		bodyParts = append(bodyParts, strings.TrimSpace(content))
+	}
+	if strings.TrimSpace(thinking) != "" {
+		bodyParts = append(bodyParts, "Reasoning\n"+strings.TrimSpace(thinking))
+	}
+	m.upsertActivity(activityItem{
+		Key:     fmt.Sprintf("message:%d", time.Now().UnixNano()),
+		Kind:    "message",
+		ID:      title,
+		AgentID: agentID,
+		Title:   title,
+		Detail:  truncateLabel(strings.TrimSpace(content), 120),
+		Body:    strings.Join(bodyParts, "\n\n"),
+		Status:  "done",
+		At:      time.Now(),
+	})
+}
+
+func (m *Model) recordToolActivity(t agent.ToolTrace) {
+	key := fmt.Sprintf("tool:%s:%s", t.Name, t.Args)
+	title := formatToolLabel(t.Name, t.Args)
+	if t.Status == "running" {
+		title = formatRunningLabel(t.Name, t.Args)
+	}
+	bodyParts := []string{}
+	if summary := summarizeToolArgs(t.Name, t.Args); summary != "" {
+		bodyParts = append(bodyParts, summary)
+	}
+	if out := sanitizeToolOutput(t.Output, 24); out != "" {
+		bodyParts = append(bodyParts, out)
+	}
+	m.upsertActivity(activityItem{
+		Key:     key,
+		Kind:    "tool",
+		ID:      t.Name,
+		AgentID: m.mode,
+		Title:   title,
+		Detail:  summarizeToolArgs(t.Name, t.Args),
+		Body:    strings.Join(bodyParts, "\n\n"),
+		Status:  t.Status,
+		At:      time.Now(),
+	})
+}
+
+func (m *Model) upsertActivity(item activityItem) {
+	if item.At.IsZero() {
+		item.At = time.Now()
+	}
+	for i := range m.activityFeed {
+		if m.activityFeed[i].Key == item.Key {
+			m.activityFeed[i] = item
+			return
+		}
+	}
+	m.activityFeed = append(m.activityFeed, item)
 }
 
 func (m *Model) autoSave() {
