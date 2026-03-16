@@ -104,7 +104,10 @@ func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.showBanner("type what the agent should do instead, then press enter", "warn")
 				return m, nil
 			}
-			return m.resolveShellApprovalAlternative(raw), nil
+			m = m.resolveShellApproval(agent.ShellApprovalDeny, "command denied")
+			m.interruptRun("Command denied by user.", true)
+			m.ta.SetValue(raw)
+			return m, nil
 		case "esc":
 			m.approvalCursor = 0
 			m.ta.Reset()
@@ -134,14 +137,18 @@ func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case 1:
 			return m.resolveShellApproval(agent.ShellApprovalAllowAlways, "command approved and saved"), nil
 		case 2:
-			return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
+			m = m.resolveShellApproval(agent.ShellApprovalDeny, "command denied")
+			m.interruptRun("Command denied by user.", true)
+			return m, nil
 		case 3:
 			m.ta.Reset()
 			m.showBanner("type what the agent should do instead, then press enter", "info")
 			return m, nil
 		}
 	case "esc":
-		return m.resolveShellApproval(agent.ShellApprovalDeny, "command denied"), nil
+		m = m.resolveShellApproval(agent.ShellApprovalDeny, "command denied")
+		m.interruptRun("Command denied by user.", true)
+		return m, nil
 	}
 	return m, nil
 }
@@ -157,24 +164,6 @@ func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner
 	m.approvalCursor = 0
 	m.ta.Reset()
 	m.showBanner(banner, "info")
-	m.refreshViewport()
-	return m
-}
-
-func (m Model) resolveShellApprovalAlternative(instruction string) Model {
-	if m.pendingAuth != nil {
-		select {
-		case m.pendingAuth.response <- shellApprovalResponse{
-			decision: agent.ShellApprovalDeny,
-			err:      fmt.Errorf("shell-exec denied by user; do this instead: %s", instruction),
-		}:
-		default:
-		}
-	}
-	m.pendingAuth = nil
-	m.approvalCursor = 0
-	m.ta.Reset()
-	m.showBanner("alternative instruction sent", "info")
 	m.refreshViewport()
 	return m
 }
@@ -1136,6 +1125,14 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.progressNote = fmt.Sprintf("Okay, let me work on that with the %s agent.", spec.ID)
+	m.activePrompt = &queuedPrompt{
+		Input:          input,
+		Prompt:         input,
+		MentionedFiles: append([]string(nil), mentionedFiles...),
+		Images:         append([]string(nil), images...),
+	}
+	m.activeAgentID = spec.ID
 	m.startAgentActivity(spec.ID, input)
 	toolCh := make(chan agent.ToolTrace, 64)
 	m.toolCh = toolCh

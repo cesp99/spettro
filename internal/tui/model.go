@@ -181,6 +181,13 @@ type shellApprovalResponse struct {
 	err      error
 }
 
+type queuedPrompt struct {
+	Input          string
+	Prompt         string
+	MentionedFiles []string
+	Images         []string
+}
+
 type setupState struct {
 	step     int
 	provider string
@@ -246,13 +253,18 @@ type Model struct {
 
 	showTools bool
 
-	liveTools      []ToolItem
-	currentTool    *ToolItem
-	toolCh         chan agent.ToolTrace
-	approvalCh     chan shellApprovalRequestMsg
-	cancelAgent    context.CancelFunc
-	pendingAuth    *shellApprovalRequestMsg
-	approvalCursor int
+	liveTools       []ToolItem
+	currentTool     *ToolItem
+	toolCh          chan agent.ToolTrace
+	approvalCh      chan shellApprovalRequestMsg
+	cancelAgent     context.CancelFunc
+	pendingAuth     *shellApprovalRequestMsg
+	approvalCursor  int
+	progressNote    string
+	pendingPrompts  []queuedPrompt
+	awaitingInstead bool
+	activePrompt    *queuedPrompt
+	activeAgentID   string
 
 	showPlanApproval   bool
 	planApprovalCursor int
@@ -404,6 +416,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentTool = nil
 		m.pendingAuth = nil
 		m.parallelAgents = nil
+		m.progressNote = ""
+		m.activePrompt = nil
+		m.activeAgentID = ""
 		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
@@ -428,6 +443,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
 			cmds = append(cmds, cmd)
+		} else if _, nextCmd := m.maybeRunNextQueuedPrompt(); nextCmd != nil {
+			cmds = append(cmds, nextCmd)
 		}
 	case planDoneMsg:
 		if !m.thinking {
@@ -441,6 +458,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentTool = nil
 		m.pendingAuth = nil
 		m.parallelAgents = nil
+		m.progressNote = ""
+		m.activePrompt = nil
+		m.activeAgentID = ""
 		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
@@ -546,6 +566,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if t.Status == "running" {
 				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
 				m.currentTool = &item
+				m.setProgressNote("Okay, let me " + strings.TrimSuffix(strings.ToLower(formatRunningLabel(t.Name, t.Args)), "…") + ".")
 			} else {
 				m.liveTools = append(m.liveTools, ToolItem{
 					Name:   t.Name,
@@ -554,6 +575,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Output: t.Output,
 				})
 				m.currentTool = nil
+				if t.Status == "error" {
+					m.setProgressNote(fmt.Sprintf("That step failed while trying to %s.", strings.ToLower(toolActionVerb(t.Name))))
+				}
 			}
 			if m.toolCh != nil {
 				cmds = append(cmds, waitForTool(m.toolCh))
@@ -566,6 +590,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingAuth = &msg
 			m.approvalCursor = 0
 			m.ta.Reset()
+			m.setProgressNote("I need your approval before I run that command.")
 			m.showBanner("command approval required", "warn")
 			if m.approvalCh != nil {
 				cmds = append(cmds, waitForShellApproval(m.approvalCh))
@@ -791,9 +816,6 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
-		if m.thinking {
-			return m, nil
-		}
 		if len(m.cmdItems) > 0 {
 			chosen := m.cmdItems[m.cmdCursor].name
 			current := strings.TrimSpace(m.ta.Value())
@@ -827,13 +849,16 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handlePlanEdit(input)
 		}
 		if strings.HasPrefix(input, "/") {
+			if m.thinking {
+				m.showBanner("commands cannot be queued while an agent is running", "warn")
+				return m, nil
+			}
 			return m.handleCommand(input)
 		}
 		return m.handlePrompt(input)
 	case "esc":
 		if m.thinking {
-			m.stopAgent()
-			m.showBanner("stopped", "warn")
+			m.interruptRun("Stopped by user.", true)
 			m.refreshViewport()
 			return m, nil
 		}
@@ -990,14 +1015,29 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 	mentionedFiles := m.extractMentionedFiles(input)
 	prompt := injectMentionGuidance(input, mentionedFiles)
+	if m.thinking {
+		m.queuePrompt(input, prompt, mentionedFiles, nil)
+		m.pushSystemMsg(fmt.Sprintf("queued request: %s", truncateLabel(input, 140)))
+		m.showBanner("request queued for when the current run finishes", "info")
+		m.refreshViewport()
+		return m, nil
+	}
+	return m.startPromptRun(queuedPrompt{
+		Input:          input,
+		Prompt:         prompt,
+		MentionedFiles: mentionedFiles,
+	})
+}
 
+func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 	m.parallelAgents = nil
 	m.ensureSession()
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleUser,
-		Content: input,
+		Content: req.Input,
 		At:      time.Now(),
 	})
+	m.awaitingInstead = false
 	m.refreshViewport()
 
 	spec, ok := m.manifest.AgentByID(m.mode)
@@ -1005,7 +1045,19 @@ func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
 		m.showBanner("unknown agent: "+m.mode, "error")
 		return m, nil
 	}
-	return m.runAgent(spec, prompt, mentionedFiles, nil)
+	return m.runAgent(spec, req.Prompt, req.MentionedFiles, req.Images)
+}
+
+func (m Model) maybeRunNextQueuedPrompt() (tea.Model, tea.Cmd) {
+	if m.thinking || m.awaitingInstead {
+		return m, nil
+	}
+	next, ok := m.nextQueuedPrompt()
+	if !ok {
+		return m, nil
+	}
+	m.pushSystemMsg(fmt.Sprintf("continuing with queued request: %s", truncateLabel(next.Input, 140)))
+	return m.startPromptRun(next)
 }
 
 const helpText = `commands:

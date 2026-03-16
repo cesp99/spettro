@@ -37,6 +37,9 @@ func (m *Model) stopAgent() {
 	m.currentTool = nil
 	m.pendingAuth = nil
 	m.approvalCursor = 0
+	m.progressNote = ""
+	m.activePrompt = nil
+	m.activeAgentID = ""
 }
 
 func (m *Model) pushSystemMsg(content string) {
@@ -50,6 +53,94 @@ func (m *Model) pushSystemMsg(content string) {
 func (m *Model) showBanner(text, kind string) {
 	m.banner = text
 	m.bannerKind = kind
+}
+
+func (m *Model) setProgressNote(text string) {
+	m.progressNote = strings.TrimSpace(text)
+}
+
+func (m *Model) queuePrompt(input, prompt string, mentionedFiles, images []string) {
+	m.pendingPrompts = append(m.pendingPrompts, queuedPrompt{
+		Input:          input,
+		Prompt:         prompt,
+		MentionedFiles: append([]string(nil), mentionedFiles...),
+		Images:         append([]string(nil), images...),
+	})
+}
+
+func (m *Model) nextQueuedPrompt() (queuedPrompt, bool) {
+	if len(m.pendingPrompts) == 0 {
+		return queuedPrompt{}, false
+	}
+	next := m.pendingPrompts[0]
+	m.pendingPrompts = append([]queuedPrompt(nil), m.pendingPrompts[1:]...)
+	return next, true
+}
+
+func compactRunSummary(tools []ToolItem, current *ToolItem) string {
+	var parts []string
+	for _, t := range tools {
+		label := formatToolLabel(t.Name, t.Args)
+		if strings.TrimSpace(label) == "" {
+			label = t.Name
+		}
+		switch t.Status {
+		case "error":
+			parts = append(parts, label+" (failed)")
+		default:
+			parts = append(parts, label)
+		}
+	}
+	if current != nil {
+		label := formatRunningLabel(current.Name, current.Args)
+		if strings.TrimSpace(label) == "" {
+			label = current.Name
+		}
+		parts = append(parts, label+" (in progress)")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) > 5 {
+		extra := len(parts) - 5
+		parts = append(parts[:5], fmt.Sprintf("%d more step(s)", extra))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (m *Model) interruptRun(summaryPrefix string, askInstead bool) {
+	if !m.thinking {
+		return
+	}
+	agentID := m.activeAgentID
+	if agentID == "" {
+		agentID = m.mode
+	}
+	runSummary := compactRunSummary(m.liveTools, m.currentTool)
+	content := strings.TrimSpace(summaryPrefix)
+	if runSummary != "" {
+		if content != "" {
+			content += "\n\n"
+		}
+		content += "Progress kept:\n" + runSummary
+	}
+	if strings.TrimSpace(content) != "" {
+		m.messages = append(m.messages, ChatMessage{
+			Role:    RoleSystem,
+			Content: content,
+			At:      time.Now(),
+		})
+	}
+	m.finishAgentActivity(agentID, "cancelled", content, "")
+	m.stopAgent()
+	m.awaitingInstead = askInstead
+	if askInstead {
+		m.ta.Reset()
+		m.showBanner("what should I do instead?", "warn")
+	} else {
+		m.showBanner("stopped", "warn")
+	}
+	m.refreshViewport()
 }
 
 func (m *Model) ensureSession() {
@@ -501,6 +592,9 @@ func (m Model) renderMessages() string {
 	if m.thinking && (len(m.liveTools) > 0 || m.currentTool != nil) {
 		bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
 		var liveLines []string
+		if strings.TrimSpace(m.progressNote) != "" {
+			liveLines = append(liveLines, styleMuted.Render("  "+m.progressNote))
+		}
 		for _, t := range m.liveTools {
 			label := formatToolLabel(t.Name, t.Args)
 			suffix := lipgloss.NewStyle().Foreground(colorSuccess).Render(" ✓")

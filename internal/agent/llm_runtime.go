@@ -256,7 +256,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			for _, res := range results {
 				trace := ToolTrace{Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
 				traces = append(traces, trace)
-				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, truncate(res.output, 6000)))
+				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
 			}
 			for _, perr := range parseErrs {
 				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
@@ -298,6 +298,70 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		return lastContent, traces, totalTokens, nil
 	}
 	return "", traces, totalTokens, fmt.Errorf("max tool steps reached without final answer")
+}
+
+func summarizeLoopToolResult(name, args, status, output string) string {
+	var parts []string
+	status = strings.TrimSpace(status)
+	if status != "" {
+		parts = append(parts, "status="+status)
+	}
+	if summary := summarizeLoopToolArgs(name, args); summary != "" {
+		parts = append(parts, summary)
+	}
+	output = strings.TrimSpace(output)
+	if output != "" {
+		output = strings.Join(strings.Fields(output), " ")
+		parts = append(parts, "output="+truncate(output, 240))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func summarizeLoopToolArgs(name, args string) string {
+	switch name {
+	case "file-read", "file-write":
+		var payload struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(args), &payload) == nil && payload.Path != "" {
+			return "path=" + payload.Path
+		}
+	case "repo-search":
+		var payload struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(args), &payload) == nil && payload.Query != "" {
+			return "query=" + truncate(payload.Query, 120)
+		}
+	case "shell-exec", "bash":
+		var payload struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(args), &payload) == nil && payload.Command != "" {
+			return "command=" + truncate(payload.Command, 120)
+		}
+	case "glob":
+		var payload struct {
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal([]byte(args), &payload) == nil && payload.Pattern != "" {
+			return "pattern=" + truncate(payload.Pattern, 120)
+		}
+	case "grep":
+		var payload struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if json.Unmarshal([]byte(args), &payload) == nil {
+			if payload.Path != "" {
+				return "path=" + payload.Path + " pattern=" + truncate(payload.Pattern, 120)
+			}
+			if payload.Pattern != "" {
+				return "pattern=" + truncate(payload.Pattern, 120)
+			}
+		}
+	}
+	return truncate(strings.TrimSpace(args), 120)
 }
 
 func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {

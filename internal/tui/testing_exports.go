@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"spettro/internal/storage"
 )
 
 func RenderMarkdownForTesting(md string, width int) string {
@@ -34,7 +38,12 @@ func ShellApprovalOptionsForTesting() []string {
 func NewModelForTesting() Model {
 	ta := textarea.New()
 	ta.Focus()
-	return Model{ta: ta}
+	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
+	return Model{
+		ta:    ta,
+		cwd:   tmp,
+		store: &storage.Store{ProjectDir: filepath.Join(tmp, ".spettro"), GlobalDir: tmp},
+	}
 }
 
 func (m *Model) SetTextareaValueForTesting(v string) {
@@ -76,6 +85,40 @@ func (m Model) ApprovalCursorForTesting() int {
 
 func (m Model) HasPendingShellApprovalForTesting() bool {
 	return m.pendingAuth != nil
+}
+
+func (m *Model) SetThinkingForTesting(v bool) {
+	m.thinking = v
+}
+
+func (m *Model) SetActiveAgentForTesting(id string) {
+	m.activeAgentID = id
+}
+
+func (m *Model) SetLiveToolsForTesting(tools []ToolItem, current *ToolItem) {
+	m.liveTools = append([]ToolItem(nil), tools...)
+	if current == nil {
+		m.currentTool = nil
+		return
+	}
+	cp := *current
+	m.currentTool = &cp
+}
+
+func (m Model) PendingPromptCountForTesting() int {
+	return len(m.pendingPrompts)
+}
+
+func (m Model) AwaitingInsteadForTesting() bool {
+	return m.awaitingInstead
+}
+
+func (m Model) BannerForTesting() string {
+	return m.banner
+}
+
+func (m Model) ProgressNoteForTesting() string {
+	return m.progressNote
 }
 
 func (m Model) UpdateMainForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
