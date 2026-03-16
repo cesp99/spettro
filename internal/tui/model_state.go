@@ -15,7 +15,6 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
-	"spettro/internal/conversation"
 	"spettro/internal/session"
 )
 
@@ -743,19 +742,7 @@ func (m Model) recalcLayout() Model {
 }
 
 func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
-	if !sel.Legacy {
-		return session.Load(m.store.GlobalDir, sel.ID)
-	}
-	conv, err := conversation.Load(sel.Path)
-	if err != nil {
-		return session.State{}, err
-	}
-	state := session.StateFromLegacy(conv, m.cwd)
-	if state.Metadata.ID == "" {
-		state.Metadata.ID = session.NewID(m.cwd)
-	}
-	_ = session.Save(m.store.GlobalDir, state)
-	return state, nil
+	return session.Load(m.store.GlobalDir, sel.ID)
 }
 
 func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
