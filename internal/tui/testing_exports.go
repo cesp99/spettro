@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"spettro/internal/agent"
 	"spettro/internal/storage"
 )
 
@@ -141,6 +142,10 @@ func (m Model) RenderMessagesForTesting() string {
 	return m.renderMessages()
 }
 
+func (m Model) ActivityCountForTesting() int {
+	return len(m.activityFeed)
+}
+
 func (m Model) UpdateMainForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.updateMain(msg)
 }
@@ -151,6 +156,15 @@ func (m Model) UpdateForTesting(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) TriggerQuitWarningTimeoutForTesting() (tea.Model, tea.Cmd) {
 	return m.update(quitWarningMsg{})
+}
+
+func ToolProgressMsgForTesting(name, status, args, output string) tea.Msg {
+	return toolProgressMsg{trace: agent.ToolTrace{
+		Name:   name,
+		Status: status,
+		Args:   args,
+		Output: output,
+	}}
 }
 
 func (m Model) UpdateShellApprovalForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

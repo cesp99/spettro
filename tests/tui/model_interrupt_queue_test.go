@@ -139,6 +139,12 @@ func TestRenderMessages_KeepsCommentsAndToolEventsInOrder(t *testing.T) {
 		}
 		last = idx
 	}
+	if strings.Contains(rendered, "● Let me read the key files first.") {
+		t.Fatalf("expected comment text without dot prefix, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "● Read internal/tui/model.go") {
+		t.Fatalf("expected tool entry to keep dot prefix, got:\n%s", rendered)
+	}
 }
 
 func TestNew_RestoresLastAgentAndPanelState(t *testing.T) {
@@ -185,5 +191,21 @@ func TestQuitWarningMsg_ClearsExitHintAfterTimeout(t *testing.T) {
 	cleared := clearedModel.(tui.Model)
 	if cleared.BannerForTesting() != "" {
 		t.Fatalf("expected ctrl+c hint to clear after timeout, got %q", cleared.BannerForTesting())
+	}
+}
+
+func TestToolProgressMsg_CommentShowsInChatNotActivity(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetThinkingForTesting(true)
+
+	gotModel, _ := m.UpdateForTesting(tui.ToolProgressMsgForTesting("comment", "success", `{"message":"Inspecting remaining files."}`, "Inspecting remaining files."))
+	got := gotModel.(tui.Model)
+
+	msgs := got.MessagesForTesting()
+	if len(msgs) == 0 || msgs[len(msgs)-1].Kind != "comment" || !strings.Contains(msgs[len(msgs)-1].Content, "Inspecting remaining files.") {
+		t.Fatalf("expected comment tool output to appear in chat, got %+v", msgs)
+	}
+	if got.ActivityCountForTesting() != 0 {
+		t.Fatalf("expected comment tool to skip activity feed, got %d items", got.ActivityCountForTesting())
 	}
 }

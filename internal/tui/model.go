@@ -559,6 +559,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.thinking {
 			t := msg.trace
 			m.applyToolTraceToObservability(t)
+			if t.Name == "comment" {
+				if t.Status != "running" {
+					if message := extractCommentMessage(t.Args, t.Output); message != "" {
+						m.setProgressNote(message)
+					}
+				}
+				if m.toolCh != nil {
+					cmds = append(cmds, waitForTool(m.toolCh))
+				}
+				m.vp.SetContent(m.renderMessages())
+				m.vp.GotoBottom()
+				break
+			}
 			if t.Name == "todo-write" && t.Status != "running" {
 				m.syncTodosFromSession()
 			}

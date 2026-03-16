@@ -353,6 +353,9 @@ func (m *Model) refreshModifiedFiles() {
 }
 
 func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
+	if t.Name == "comment" {
+		return
+	}
 	m.recordToolActivity(t)
 	if t.Name != "agent" {
 		return
@@ -502,6 +505,9 @@ func (m *Model) recordAssistantActivity(agentID, content, thinking string, isPla
 }
 
 func (m *Model) recordToolActivity(t agent.ToolTrace) {
+	if t.Name == "comment" {
+		return
+	}
 	key := fmt.Sprintf("tool:%s:%s", t.Name, t.Args)
 	title := formatToolLabel(t.Name, t.Args)
 	if t.Status == "running" {
@@ -538,6 +544,16 @@ func (m *Model) upsertActivity(item activityItem) {
 		}
 	}
 	m.activityFeed = append(m.activityFeed, item)
+}
+
+func extractCommentMessage(argsJSON, output string) string {
+	var args struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Message) != "" {
+		return strings.TrimSpace(args.Message)
+	}
+	return strings.TrimSpace(output)
 }
 
 func (m *Model) autoSave() {
@@ -606,6 +622,13 @@ func (m Model) renderPlanMessage(msg ChatMessage, mc lipgloss.Color) string {
 	return indent(header+"\n"+box, "  ")
 }
 
+func renderAssistantTextBlock(body string) string {
+	if strings.TrimSpace(body) == "" {
+		return ""
+	}
+	return indent(body, "  ")
+}
+
 func (m Model) renderMessages() string {
 	if len(m.messages) == 0 {
 		return styleMuted.Render("  no messages yet — type a prompt or /help")
@@ -625,14 +648,13 @@ func (m Model) renderMessages() string {
 				parts = append(parts, m.renderPlanMessage(msg, mc))
 				continue
 			}
-			bullet := lipgloss.NewStyle().Foreground(mc).Bold(true).Render("  ●")
 			body := renderMarkdown(msg.Content, m.paneWidth()-8)
 			var entryLines []string
 			if len(msg.Tools) > 0 {
 				entryLines = append(entryLines, renderToolGroups(msg.Tools, m.showTools, mc))
 			}
 			if strings.TrimSpace(msg.Content) != "" {
-				entryLines = append(entryLines, prefixBlockWithBullet(bullet, body))
+				entryLines = append(entryLines, renderAssistantTextBlock(body))
 			}
 			if m.showTools && msg.Thinking != "" {
 				thinkStyle := lipgloss.NewStyle().Foreground(colorDim).Italic(true)
