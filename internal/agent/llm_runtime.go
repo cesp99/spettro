@@ -370,6 +370,13 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 	if base == "" {
 		base = "You are an assistant."
 	}
+	commentGuidance := ""
+	for _, tool := range cfg.AllowedTools {
+		if tool == "comment" {
+			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat before major transitions or grouped actions.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
+			break
+		}
+	}
 	requiredReadsSection := ""
 	if len(cfg.RequiredReads) > 0 {
 		paths := make([]string, 0, len(cfg.RequiredReads))
@@ -403,6 +410,7 @@ Rules:
 - Creating a brand-new file without reading is allowed.
 - Keep tool args minimal and valid JSON.
 - If a tool fails, adapt and continue.
+%s
 
 Task:
 %s
@@ -414,7 +422,7 @@ Working directory:
 Current step: %d/%d
 
 Previous tool interaction log:
-%s`, base, toolList, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
+%s`, base, toolList, commentGuidance, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.

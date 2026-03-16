@@ -209,3 +209,37 @@ func TestToolProgressMsg_CommentShowsInChatNotActivity(t *testing.T) {
 		t.Fatalf("expected comment tool to skip activity feed, got %d items", got.ActivityCountForTesting())
 	}
 }
+
+func TestToolProgressMsg_RunningToolDoesNotInjectHardcodedComment(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetThinkingForTesting(true)
+
+	gotModel, _ := m.UpdateForTesting(tui.ToolProgressMsgForTesting("shell-exec", "running", `{"command":"git status --porcelain"}`, ""))
+	got := gotModel.(tui.Model)
+
+	msgs := got.MessagesForTesting()
+	if len(msgs) != 1 {
+		t.Fatalf("expected only tool stream message, got %+v", msgs)
+	}
+	if msgs[0].Kind != "tool-stream" {
+		t.Fatalf("expected tool-stream message, got %+v", msgs[0])
+	}
+	if strings.Contains(msgs[0].Content, "Okay, let me") {
+		t.Fatalf("expected no hardcoded narration, got %+v", msgs[0])
+	}
+}
+
+func TestToolProgressMsg_FailedCommentStaysHidden(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetThinkingForTesting(true)
+
+	gotModel, _ := m.UpdateForTesting(tui.ToolProgressMsgForTesting("comment", "error", `{"message":"I am narrating."}`, "error: comment failed"))
+	got := gotModel.(tui.Model)
+
+	if len(got.MessagesForTesting()) != 0 {
+		t.Fatalf("expected failed comment to stay hidden, got %+v", got.MessagesForTesting())
+	}
+	if got.ActivityCountForTesting() != 0 {
+		t.Fatalf("expected failed comment to skip activity feed, got %d items", got.ActivityCountForTesting())
+	}
+}

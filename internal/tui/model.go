@@ -560,7 +560,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t := msg.trace
 			m.applyToolTraceToObservability(t)
 			if t.Name == "comment" {
-				if t.Status != "running" {
+				if t.Status == "success" {
 					if message := extractCommentMessage(t.Args, t.Output); message != "" {
 						m.setProgressNote(message)
 					}
@@ -585,7 +585,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if t.Status == "running" {
 				item := ToolItem{Name: t.Name, Args: t.Args, Status: "running"}
 				m.currentTool = &item
-				m.setProgressNote("Okay, let me " + strings.TrimSuffix(strings.ToLower(formatRunningLabel(t.Name, t.Args)), "…") + ".")
 				m.appendToolStreamMessage(item)
 			} else {
 				completed := ToolItem{
@@ -597,9 +596,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.liveTools = append(m.liveTools, completed)
 				m.currentTool = nil
 				m.updateToolStreamMessage(completed)
-				if t.Status == "error" {
-					m.setProgressNote(fmt.Sprintf("That step failed while trying to %s.", strings.ToLower(toolActionVerb(t.Name))))
-				}
 			}
 			if m.toolCh != nil {
 				cmds = append(cmds, waitForTool(m.toolCh))
@@ -612,7 +608,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingAuth = &msg
 			m.approvalCursor = 0
 			m.ta.Reset()
-			m.setProgressNote("I need your approval before I run that command.")
 			m.showBanner("command approval required", "warn")
 			if m.approvalCh != nil {
 				cmds = append(cmds, waitForShellApproval(m.approvalCh))
