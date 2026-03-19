@@ -99,3 +99,36 @@ func TestViewSidePanel_ShowsGitBranchAndChanges(t *testing.T) {
 		t.Fatalf("expected git file list to stay hidden, got: %s", view)
 	}
 }
+
+func TestViewSidePanel_HidesTextActivities(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(140, 40)
+	m.SetSidePanelVisibleForTesting(true)
+	m.SetShowToolsForTesting(true)
+	m.AddActivityForTesting(
+		"message",
+		"assistant",
+		"coding",
+		"Assistant response",
+		"This should be hidden",
+		"This should not appear in activity.",
+		"done",
+	)
+	m.AddActivityForTesting(
+		"tool",
+		"shell-exec",
+		"coding",
+		"$ go test ./...",
+		"Runs tests",
+		"Runs tests",
+		"done",
+	)
+
+	view := m.ViewSidePanelForTesting(m.SidePanelWidthForTesting())
+	if strings.Contains(view, "Assistant response") {
+		t.Fatalf("expected text activity to be hidden, got: %s", view)
+	}
+	if !strings.Contains(view, "$ go test ./...") {
+		t.Fatalf("expected tool activity to remain visible, got: %s", view)
+	}
+}

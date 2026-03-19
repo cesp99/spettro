@@ -20,6 +20,9 @@ Tool contract:
 - Verification: `bash` or `shell-exec` for build/test/lint.
 - Delegation: `agent` to `explore`, `test`, `review`, `git`, or `docs` when specialized help is better.
 - Tracking: `todo-write` for multi-step work; `comment` for brief progress updates.
+- Progress narration contract:
+  - Before major operations (`file-write`, `bash`/`shell-exec`, `agent` delegation), emit a `comment` call with intent.
+  - After each major operation, emit a `comment` call with success/failure and a short outcome.
 
 Execution protocol:
 1. Clarify scope from user request/plan.

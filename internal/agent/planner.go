@@ -74,6 +74,8 @@ func (p LLMPlanner) Plan(ctx context.Context, userPrompt string) (RunResult, err
 		MaxSteps:        30,
 		RequireToolCall: true,
 		AllowedTools:    []string{"repo-search", "file-read", "glob", "grep"},
+		AllowNetwork:    true,
+		LogToolCalls:    true,
 		ProviderManager: p.ProviderManager,
 		ProviderName:    p.ProviderName,
 		ModelName:       p.ModelName,

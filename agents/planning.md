@@ -18,7 +18,7 @@ Tool contract:
 - `glob`/`grep`: fast discovery and symbol tracing.
 - `file-read`: verify every file you cite.
 - `todo-write`: maintain a concrete task list when work is non-trivial.
-- `comment`: brief progress notes only.
+- `comment`: brief progress notes only, especially before and after major actions (delegation or todo rewrites) and when a step fails.
 
 Mandatory workflow:
 1. Scope the request and list assumptions.

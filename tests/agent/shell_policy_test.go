@@ -52,3 +52,16 @@ func TestAllowedCommandSetRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected file path: %q", path)
 	}
 }
+
+func TestSplitShellCommandSegments(t *testing.T) {
+	parts := agent.SplitShellCommandSegmentsForTesting(`cd src && git status | rg foo; echo "a && b"`)
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 command segments, got %d: %#v", len(parts), parts)
+	}
+	want := []string{"cd src", "git status", "rg foo", `echo "a && b"`}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("segment %d mismatch: want %q, got %q", i, want[i], parts[i])
+		}
+	}
+}

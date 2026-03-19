@@ -3,11 +3,13 @@ package app
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/session"
 )
 
 func (a *App) handlePlanning(ctx context.Context, prompt string) error {
@@ -21,6 +23,9 @@ func (a *App) handlePlanning(ctx context.Context, prompt string) error {
 		ProviderName:    func() string { return a.cfg.ActiveProvider },
 		ModelName:       func() string { return a.cfg.ActiveModel },
 		CWD:             a.cwd,
+		ToolCallback:    a.printToolProgress,
+		Manifest:        &a.manifest,
+		SessionDir:      a.cliSessionDir(),
 	}
 	result, err := ag.Run(ctx, prompt)
 	if err != nil {
@@ -49,7 +54,10 @@ func (a *App) handleCoding(ctx context.Context, prompt string) error {
 		ProviderName:    func() string { return a.cfg.ActiveProvider },
 		ModelName:       func() string { return a.cfg.ActiveModel },
 		CWD:             a.cwd,
+		ToolCallback:    a.printToolProgress,
 		ShellApproval:   a.promptShellApproval,
+		Manifest:        &a.manifest,
+		SessionDir:      a.cliSessionDir(),
 	}
 	ag.Spec.Permission = a.cfg.Permission
 	result, err := ag.Run(ctx, prompt)
@@ -72,6 +80,9 @@ func (a *App) handleChat(ctx context.Context, prompt string) error {
 		ModelName:       func() string { return a.cfg.ActiveModel },
 		CWD:             a.cwd,
 		Images:          a.pendingImgs,
+		ToolCallback:    a.printToolProgress,
+		Manifest:        &a.manifest,
+		SessionDir:      a.cliSessionDir(),
 	}
 	result, err := ag.Run(ctx, prompt)
 	if err != nil {
@@ -145,4 +156,40 @@ func FormatShellApprovalPrompt(command string) string {
 		"  3) no",
 		"  4) tell the agent what to do instead",
 	}, "\n")
+}
+
+func (a *App) printToolProgress(tr agent.ToolTrace) {
+	if tr.Status == "running" {
+		switch tr.Name {
+		case "file-write", "shell-exec", "bash", "agent":
+			a.printLine(a.ui.Info(fmt.Sprintf("running %s...", tr.Name)))
+		}
+		return
+	}
+	if tr.Name == "comment" && tr.Status == "success" {
+		if msg := commentMessage(tr.Args, tr.Output); msg != "" {
+			a.printLine(a.ui.Info(msg))
+		}
+		return
+	}
+	if tr.Status == "error" {
+		a.printLine(a.ui.Panel(string(a.mode), "Tool Error", fmt.Sprintf("%s failed.\n%s", tr.Name, strings.TrimSpace(tr.Output))))
+	}
+}
+
+func commentMessage(args, output string) string {
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if strings.TrimSpace(args) != "" {
+		if err := json.Unmarshal([]byte(args), &payload); err == nil && strings.TrimSpace(payload.Message) != "" {
+			return strings.TrimSpace(payload.Message)
+		}
+	}
+	return strings.TrimSpace(output)
+}
+
+func (a *App) cliSessionDir() string {
+	id := "cli-" + session.ProjectHash(a.cwd)
+	return session.SessionDir(a.store.GlobalDir, id)
 }

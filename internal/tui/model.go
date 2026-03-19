@@ -447,7 +447,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At:       time.Now(),
 			})
 			m.finishAgentActivity(m.mode, "done", main, thinking)
-			m.recordAssistantActivity(m.mode, main, thinking, false)
 		}
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
@@ -488,7 +487,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At:      time.Now(),
 			})
 			m.finishAgentActivity(m.mode, "done", msg.plan, "")
-			m.recordAssistantActivity(m.mode, msg.plan, "", true)
 			m.showPlanApproval = true
 			m.planApprovalCursor = 0
 		}

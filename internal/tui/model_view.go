@@ -490,6 +490,9 @@ func (m Model) sidePanelItems() []sidePanelItem {
 	items := make([]sidePanelItem, 0, len(m.activityFeed))
 	for i := len(m.activityFeed) - 1; i >= 0; i-- {
 		entry := m.activityFeed[i]
+		if entry.Kind != "tool" {
+			continue
+		}
 		if strings.TrimSpace(entry.Title) == "" && strings.TrimSpace(entry.Detail) == "" && strings.TrimSpace(entry.Body) == "" {
 			continue
 		}
@@ -571,12 +574,12 @@ func (m Model) viewSidePanel(width int) string {
 	if len(items) == 0 {
 		parts := []string{
 			lipgloss.NewStyle().Bold(true).Render("Activity"),
-			styleMuted.Render("Live tool context and agent output"),
+			styleMuted.Render("Operational tool activity"),
 		}
 		if gitSummary != "" {
 			parts = append(parts, "", gitSummary)
 		}
-		parts = append(parts, "", styleMuted.Render("Observability is on. Tool usage, reasoning, and agent output will appear here."))
+		parts = append(parts, "", styleMuted.Render("Observability is on. Commands, edits, and other tool activity will appear here."))
 		body := lipgloss.JoinVertical(lipgloss.Left, parts...)
 		box := lipgloss.NewStyle().
 			Width(width).
@@ -672,7 +675,7 @@ func (m Model) viewSidePanel(width int) string {
 
 	contentParts := []string{
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
-		styleMuted.Render("Live tool context and agent output"),
+		styleMuted.Render("Operational tool activity"),
 	}
 	if gitSummary != "" {
 		contentParts = append(contentParts, "", gitSummary)

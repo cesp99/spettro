@@ -85,7 +85,10 @@ func (a *App) handleCommand(line string) error {
 			ProviderName:    func() string { return a.cfg.ActiveProvider },
 			ModelName:       func() string { return a.cfg.ActiveModel },
 			CWD:             a.cwd,
+			ToolCallback:    a.printToolProgress,
 			ShellApproval:   a.promptShellApproval,
+			Manifest:        &a.manifest,
+			SessionDir:      a.cliSessionDir(),
 		}
 		ag.Spec.Permission = a.cfg.Permission
 		result, err := ag.Run(context.Background(), a.pendingPlan)

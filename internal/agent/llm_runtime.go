@@ -74,6 +74,8 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		MaxSteps:        24,
 		RequireToolCall: true,
 		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep"},
+		AllowNetwork:    true,
+		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
 		ModelName:       c.ModelName,
@@ -102,6 +104,9 @@ type toolLoopConfig struct {
 	MaxSteps        int
 	RequireToolCall bool
 	AllowedTools    []string
+	ToolPolicies    map[string]config.ToolSpec
+	AllowNetwork    bool
+	LogToolCalls    bool
 	ProviderManager *provider.Manager
 	ProviderName    func() string
 	ModelName       func() string
@@ -154,6 +159,9 @@ type toolRuntime struct {
 	permission    config.PermissionLevel
 	shellApproval ShellApprovalCallback
 	allowedShell  map[string]struct{}
+	toolPolicies  map[string]config.ToolSpec
+	allowNetwork  bool
+	logToolCalls  bool
 	// sub-agent support
 	manifest     *config.AgentManifest
 	providerMgr  *provider.Manager
@@ -204,6 +212,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		permission:      cfg.Permission,
 		shellApproval:   cfg.ShellApproval,
 		allowedShell:    map[string]struct{}{},
+		toolPolicies:    map[string]config.ToolSpec{},
+		allowNetwork:    cfg.AllowNetwork,
+		logToolCalls:    cfg.LogToolCalls,
 		manifest:        cfg.Manifest,
 		providerMgr:     cfg.ProviderManager,
 		providerName:    cfg.ProviderName,
@@ -214,6 +225,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		agentID:         cfg.AgentID,
 		parentID:        cfg.ParentAgentID,
 		delegationDepth: cfg.DelegationDepth,
+	}
+	if !cfg.LogToolCalls {
+		runtime.logToolCalls = false
+	}
+	for id, spec := range cfg.ToolPolicies {
+		runtime.toolPolicies[id] = spec
 	}
 	if cfg.MaxWorkers <= 0 {
 		cfg.MaxWorkers = 4
@@ -271,12 +288,16 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 				usedTool = true
 			}
 			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
-			// build history entry
 			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
 			for _, res := range results {
 				trace := ToolTrace{Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
 				traces = append(traces, trace)
-				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
+				if runtime.logToolCalls {
+					history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
+				}
+			}
+			if !runtime.logToolCalls {
+				history.WriteString(fmt.Sprintf("tool(%d): %d calls completed\n", step, len(results)))
 			}
 			for _, perr := range parseErrs {
 				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
@@ -393,7 +414,7 @@ func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
 	commentGuidance := ""
 	for _, tool := range cfg.AllowedTools {
 		if tool == "comment" {
-			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat before major transitions or grouped actions.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
+			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
 			break
 		}
 	}
@@ -473,6 +494,10 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 		go func(idx int, c toolCall) {
 			defer wg.Done()
 			callArgs := singleLine(string(c.Args))
+			if callback != nil && isMajorOperationTool(c.Tool) {
+				msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
+				callback(ToolTrace{Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+			}
 			if callback != nil {
 				callback(ToolTrace{Name: c.Tool, Args: callArgs, Status: "running"})
 			}
@@ -490,6 +515,13 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			}
 			if callback != nil {
 				callback(ToolTrace{Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600)})
+				if isMajorOperationTool(c.Tool) {
+					msg := fmt.Sprintf("Completed %s.", c.Tool)
+					if err != nil {
+						msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
+					}
+					callback(ToolTrace{Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+				}
 			}
 		}(i, call)
 	}
@@ -500,6 +532,9 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
 	if _, ok := allowed[call.Tool]; !ok {
 		return "", fmt.Errorf("tool %q not allowed", call.Tool)
+	}
+	if !r.allowNetwork && r.isNetworkTool(call.Tool) {
+		return "", fmt.Errorf("tool %q blocked: network tools are disabled by runtime policy", call.Tool)
 	}
 	if call.Tool != "file-read" && call.Tool != "glob" && call.Tool != "grep" {
 		if next, ok := r.nextRequiredRead(); ok {
@@ -607,7 +642,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if cmdText == "" {
 			return "", fmt.Errorf("shell-exec command is required")
 		}
-		if err := r.authorizeShellCommand(ctx, cmdText); err != nil {
+		if err := r.authorizeShellCommand(ctx, call.Tool, cmdText); err != nil {
 			return "", err
 		}
 		cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -778,7 +813,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if cmdText == "" {
 			return "", fmt.Errorf("bash: command is required")
 		}
-		if err := r.authorizeShellCommand(ctx, cmdText); err != nil {
+		if err := r.authorizeShellCommand(ctx, call.Tool, cmdText); err != nil {
 			return "", err
 		}
 		cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -1522,6 +1557,15 @@ func singleLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+func isMajorOperationTool(name string) bool {
+	switch name {
+	case "file-write", "shell-exec", "bash", "bash-output", "agent":
+		return true
+	default:
+		return false
+	}
+}
+
 // stripLeakedToolCalls removes any lines that start with TOOL_CALL (which the LLM
 // sometimes writes as plain text instead of executing), and trims stray blank lines.
 func stripLeakedToolCalls(s string) string {
@@ -1551,6 +1595,18 @@ func isBlockedCommand(cmd string) bool {
 	return false
 }
 
+func (r *toolRuntime) isNetworkTool(toolName string) bool {
+	if spec, ok := r.toolPolicies[toolName]; ok {
+		return toolAllowsNetwork(spec)
+	}
+	switch toolName {
+	case "web-fetch", "web-search":
+		return true
+	default:
+		return false
+	}
+}
+
 type allowedCommandsFile struct {
 	AllowedCommands []string `json:"allowed_commands"`
 }
@@ -1575,30 +1631,48 @@ var alwaysAllowedCommandPrefixes = []string{
 	"make build",
 }
 
-func (r *toolRuntime) authorizeShellCommand(ctx context.Context, command string) error {
+func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command string) error {
+	command = strings.TrimSpace(command)
 	normalized := normalizeCommand(command)
 	if normalized == "" {
 		return fmt.Errorf("shell-exec command is required")
 	}
-	if isBlockedCommand(normalized) {
-		return fmt.Errorf("blocked dangerous command")
+
+	segments := splitShellCommandSegments(command)
+	if len(segments) == 0 {
+		segments = []string{normalized}
 	}
-	if isAlwaysAllowedCommand(normalized) {
-		return nil
+	needsApproval := r.permission != config.PermissionYOLO
+	if spec, ok := r.toolPolicies[toolID]; ok && !spec.RequiresApproval {
+		needsApproval = false
 	}
 
+	missingApprovals := make([]string, 0, len(segments))
 	r.shellMu.Lock()
 	defer r.shellMu.Unlock()
+	for _, seg := range segments {
+		segNorm := normalizeCommand(seg)
+		if segNorm == "" {
+			continue
+		}
+		if isBlockedCommand(segNorm) {
+			return fmt.Errorf("blocked dangerous command")
+		}
+		if isAlwaysAllowedCommand(segNorm) {
+			continue
+		}
+		r.mu.Lock()
+		_, preapproved := r.allowedShell[segNorm]
+		r.mu.Unlock()
+		if preapproved {
+			continue
+		}
+		missingApprovals = append(missingApprovals, segNorm)
+	}
+	if len(missingApprovals) == 0 || !needsApproval {
+		return nil
+	}
 
-	r.mu.Lock()
-	_, preapproved := r.allowedShell[normalized]
-	r.mu.Unlock()
-	if preapproved {
-		return nil
-	}
-	if r.permission == config.PermissionYOLO {
-		return nil
-	}
 	if r.shellApproval == nil {
 		return fmt.Errorf("shell-exec requires approval outside yolo mode")
 	}
@@ -1612,7 +1686,9 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, command string)
 		return nil
 	case ShellApprovalAllowAlways:
 		r.mu.Lock()
-		r.allowedShell[normalized] = struct{}{}
+		for _, seg := range missingApprovals {
+			r.allowedShell[seg] = struct{}{}
+		}
 		r.mu.Unlock()
 		if err := saveAllowedCommandSet(r.cwd, r.allowedShell); err != nil {
 			return fmt.Errorf("persist allowed command: %w", err)
@@ -1625,6 +1701,87 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, command string)
 
 func normalizeCommand(command string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
+}
+
+func splitShellCommandSegments(command string) []string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+	var (
+		segments                []string
+		buf                     strings.Builder
+		inSingle, inDouble, esc bool
+	)
+	flush := func() {
+		seg := strings.TrimSpace(buf.String())
+		if seg != "" {
+			segments = append(segments, seg)
+		}
+		buf.Reset()
+	}
+
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if esc {
+			buf.WriteByte(ch)
+			esc = false
+			continue
+		}
+		switch ch {
+		case '\\':
+			esc = true
+			buf.WriteByte(ch)
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+			buf.WriteByte(ch)
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+			buf.WriteByte(ch)
+		case ';':
+			if inSingle || inDouble {
+				buf.WriteByte(ch)
+				continue
+			}
+			flush()
+		case '|':
+			if inSingle || inDouble {
+				buf.WriteByte(ch)
+				continue
+			}
+			if i+1 < len(command) && command[i+1] == '|' {
+				flush()
+				i++
+				continue
+			}
+			flush()
+		case '&':
+			if inSingle || inDouble {
+				buf.WriteByte(ch)
+				continue
+			}
+			if i+1 < len(command) && command[i+1] == '&' {
+				flush()
+				i++
+				continue
+			}
+			buf.WriteByte(ch)
+		case '\n':
+			if inSingle || inDouble {
+				buf.WriteByte(ch)
+				continue
+			}
+			flush()
+		default:
+			buf.WriteByte(ch)
+		}
+	}
+	flush()
+	return segments
 }
 
 func isAlwaysAllowedCommand(command string) bool {

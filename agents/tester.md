@@ -17,7 +17,7 @@ Tool contract:
 - Use only tools allowed in the current run.
 - `glob`/`grep`/`file-read` to identify affected tests and execution paths.
 - `bash`/`shell-exec` to run repo-native test/build commands.
-- `comment` for concise progress notes.
+- `comment` for concise progress notes before and after major test commands, including explicit failure notes.
 
 Execution protocol:
 1. Map impacted code and existing tests.

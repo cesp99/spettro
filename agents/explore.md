@@ -19,7 +19,7 @@ Tool contract:
 - `grep`: find symbols, call sites, config keys, and commands.
 - `file-read`: verify key files before making claims.
 - `ls`: quick directory orientation.
-- `comment`: short progress updates.
+- `comment`: short progress updates before and after major scans; include failure notes when a tool call errors.
 
 Execution protocol:
 1. Run a wide scan (glob + grep in parallel).
