@@ -21,7 +21,7 @@ This file lets you define, in one place:
 
 ### Root fields
 
-- `version` (int, required): schema version, currently `1`.
+- `version` (int, required): schema version, currently `2`.
 - `default_agent` (string, required): agent ID to start from.
 - `[metadata]` (table, optional): human-facing metadata.
 - `[runtime]` (table, required): global execution defaults.
@@ -32,8 +32,10 @@ This file lets you define, in one place:
 
 - `default_permission`: one of `ask-first`, `restricted`, `yolo`.
 - `default_timeout_sec`: positive integer.
-- `allow_network_tools`: boolean global network toggle.
+- `sandbox_mode`: `workspace-write`, `read-only`, or `full-access`.
 - `log_tool_calls`: boolean.
+- `permission_rules`: optional layered policy rules (`permission`, `pattern`, `action`).
+- `[runtime.delegation]`: defaults for `max_parallel_workers` and `max_depth`.
 
 ### `[[tools]]`
 
@@ -46,6 +48,11 @@ This file lets you define, in one place:
 - `timeout_sec`: positive integer
 - `requires_approval`: boolean
 - `permitted_actions`: non-empty string list, e.g. `read`, `write`, `search`, `execute`, `git`, `chat`, `network`
+- `aliases`: optional alternate tool IDs
+- `input_schema`: optional JSON-like schema metadata
+- `risk_level`: optional `low|medium|high`
+- `primary_only`: optional boolean (only primary/orchestrator agents can use)
+- `permission_rules`: optional tool-scoped policy rules
 
 ### `[[agents]]`
 
@@ -54,12 +61,14 @@ This file lets you define, in one place:
 - `description`
 - `skill` (short capability keyword)
 - `mode` (e.g. `planning`, `coding`, `chat`, `custom`)
+- `role`: `primary`, `subagent`, `orchestrator`, or `worker`
 - `model_provider` / `model` (optional override; fallback is active UI model)
 - `system_prompt` or `prompt_file`
 - `allowed_tools`: non-empty tool ID list
 - `permitted_actions`: action list for high-level policy
 - `permission`: `ask-first`, `restricted`, or `yolo`
 - `temperature`, `max_tokens`, `max_steps`
+- `permission_rules`: optional agent-scoped policy rules
 - `handoffs`: list of target agent IDs
 - `enabled`: boolean
 

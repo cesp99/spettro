@@ -11,11 +11,28 @@ func hasAnyAction(tool config.ToolSpec, allowed map[string]struct{}) bool {
 		return true
 	}
 	for _, action := range tool.PermittedActions {
-		if _, ok := allowed[action]; ok {
+		if _, ok := allowed[normalizePermissionFamily(action)]; ok {
 			return true
 		}
 	}
 	return false
+}
+
+func toolPermissionFamilies(tool config.ToolSpec) []string {
+	families := make([]string, 0, len(tool.PermittedActions))
+	seen := map[string]struct{}{}
+	for _, action := range tool.PermittedActions {
+		fam := normalizePermissionFamily(action)
+		if fam == "" {
+			continue
+		}
+		if _, ok := seen[fam]; ok {
+			continue
+		}
+		seen[fam] = struct{}{}
+		families = append(families, fam)
+	}
+	return families
 }
 
 func resolveToolPolicies(spec config.AgentSpec, manifest *config.AgentManifest) ([]string, map[string]config.ToolSpec) {
@@ -40,11 +57,17 @@ func resolveToolPolicies(spec config.AgentSpec, manifest *config.AgentManifest) 
 	toolByID := map[string]config.ToolSpec{}
 	for _, tool := range manifest.Tools {
 		toolByID[tool.ID] = tool
+		for _, alias := range tool.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias != "" {
+				toolByID[alias] = tool
+			}
+		}
 	}
 
 	agentActions := map[string]struct{}{}
 	for _, action := range spec.PermittedActions {
-		action = strings.TrimSpace(action)
+		action = normalizePermissionFamily(action)
 		if action != "" {
 			agentActions[action] = struct{}{}
 		}
@@ -57,10 +80,13 @@ func resolveToolPolicies(spec config.AgentSpec, manifest *config.AgentManifest) 
 		if !ok || !tool.Enabled {
 			continue
 		}
-		if !manifest.Runtime.AllowNetworkTools && toolAllowsNetwork(tool) {
+		if tool.PrimaryOnly && !spec.IsPrimaryRole() {
 			continue
 		}
 		if !hasAnyAction(tool, agentActions) {
+			continue
+		}
+		if !isToolAllowedByRules(spec, tool, manifest) {
 			continue
 		}
 		allowed = append(allowed, id)
@@ -70,16 +96,18 @@ func resolveToolPolicies(spec config.AgentSpec, manifest *config.AgentManifest) 
 	return allowed, policies
 }
 
-func toolAllowsNetwork(tool config.ToolSpec) bool {
-	for _, action := range tool.PermittedActions {
-		if strings.EqualFold(strings.TrimSpace(action), "network") {
-			return true
-		}
-	}
-	switch tool.ID {
-	case "web-fetch", "web-search":
+func isToolAllowedByRules(spec config.AgentSpec, tool config.ToolSpec, manifest *config.AgentManifest) bool {
+	if manifest == nil {
 		return true
-	default:
+	}
+	layers := [][]config.PermissionRule{manifest.Runtime.PermissionRules, spec.PermissionRules, tool.PermissionRules}
+	if evaluatePermissionRule("tool", tool.ID, layers...) == config.RuleDeny {
 		return false
 	}
+	for _, fam := range toolPermissionFamilies(tool) {
+		if evaluatePermissionRule(fam, tool.ID, layers...) == config.RuleDeny {
+			return false
+		}
+	}
+	return true
 }

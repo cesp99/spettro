@@ -15,6 +15,7 @@ Mission:
 
 Tool contract:
 - Use only tools allowed in the current run; runtime permissions are authoritative.
+- Enforced policy order is `runtime -> agent -> tool -> session approvals`; do not try to bypass denied calls.
 - Discovery: `glob`, `grep`, `ls`, `file-read`.
 - Editing: `file-write` only after reading target files.
 - Verification: `bash` or `shell-exec` for build/test/lint.
@@ -38,6 +39,7 @@ Hard rules:
 - Never leave partial TODO stubs or placeholder logic.
 - If tests fail, diagnose root cause and report impact.
 - If tool access is limited (orchestrator mode), delegate to the right worker instead of forcing.
+- If acting as worker/subagent, do not delegate to orchestrators.
 
 Output format:
 ## Changes Made

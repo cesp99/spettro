@@ -125,36 +125,43 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	if maxSteps <= 0 {
 		maxSteps = 8
 	}
-	allowNetworkTools := true
 	logToolCalls := true
+	maxWorkers := 4
+	maxDelegationDepth := 2
 	if a.Manifest != nil {
-		allowNetworkTools = a.Manifest.Runtime.AllowNetworkTools
 		logToolCalls = a.Manifest.Runtime.LogToolCalls
+		if a.Manifest.Runtime.Delegation.MaxParallelWorkers > 0 {
+			maxWorkers = a.Manifest.Runtime.Delegation.MaxParallelWorkers
+		}
+		if a.Manifest.Runtime.Delegation.MaxDepth > 0 {
+			maxDelegationDepth = a.Manifest.Runtime.Delegation.MaxDepth
+		}
 	}
 	out, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
-		SystemPrompt:    systemPrompt,
-		UserTask:        task,
-		CWD:             a.CWD,
-		AgentID:         a.Spec.ID,
-		MaxSteps:        maxSteps,
-		RequireToolCall: requireToolCall,
-		AllowedTools:    allowedTools,
-		ToolPolicies:    policies,
-		AllowNetwork:    allowNetworkTools,
-		LogToolCalls:    logToolCalls,
-		ProviderManager: a.ProviderManager,
-		ProviderName:    a.ProviderName,
-		ModelName:       a.ModelName,
-		MaxTokens:       a.MaxTokens,
-		RequiredReads:   a.RequiredReads,
-		Images:          a.Images,
-		ToolCallback:    a.ToolCallback,
-		Permission:      a.Spec.Permission,
-		ShellApproval:   a.ShellApproval,
-		Manifest:        a.Manifest,
-		SessionDir:      a.SessionDir,
-		DelegationDepth: a.DelegationDepth,
-		ParentAgentID:   a.ParentAgentID,
+		SystemPrompt:     systemPrompt,
+		UserTask:         task,
+		CWD:              a.CWD,
+		AgentID:          a.Spec.ID,
+		MaxSteps:         maxSteps,
+		RequireToolCall:  requireToolCall,
+		AllowedTools:     allowedTools,
+		ToolPolicies:     policies,
+		LogToolCalls:     logToolCalls,
+		ProviderManager:  a.ProviderManager,
+		ProviderName:     a.ProviderName,
+		ModelName:        a.ModelName,
+		MaxTokens:        a.MaxTokens,
+		RequiredReads:    a.RequiredReads,
+		Images:           a.Images,
+		ToolCallback:     a.ToolCallback,
+		Permission:       a.Spec.Permission,
+		ShellApproval:    a.ShellApproval,
+		Manifest:         a.Manifest,
+		SessionDir:       a.SessionDir,
+		DelegationDepth:  a.DelegationDepth,
+		ParentAgentID:    a.ParentAgentID,
+		MaxWorkers:       maxWorkers,
+		MaxDepth:         maxDelegationDepth,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)

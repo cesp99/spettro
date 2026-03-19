@@ -74,7 +74,6 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		MaxSteps:        24,
 		RequireToolCall: true,
 		AllowedTools:    []string{"repo-search", "file-read", "file-write", "shell-exec", "glob", "grep"},
-		AllowNetwork:    true,
 		LogToolCalls:    true,
 		ProviderManager: c.ProviderManager,
 		ProviderName:    c.ProviderName,
@@ -105,7 +104,6 @@ type toolLoopConfig struct {
 	RequireToolCall bool
 	AllowedTools    []string
 	ToolPolicies    map[string]config.ToolSpec
-	AllowNetwork    bool
 	LogToolCalls    bool
 	ProviderManager *provider.Manager
 	ProviderName    func() string
@@ -122,6 +120,7 @@ type toolLoopConfig struct {
 	ParentAgentID   string
 	MaxWorkers      int
 	MaxMicroagents  int
+	MaxDepth        int
 }
 
 type toolCall struct {
@@ -160,8 +159,9 @@ type toolRuntime struct {
 	shellApproval ShellApprovalCallback
 	allowedShell  map[string]struct{}
 	toolPolicies  map[string]config.ToolSpec
-	allowNetwork  bool
 	logToolCalls  bool
+	runtimeRules  []config.PermissionRule
+	agentRules    []config.PermissionRule
 	// sub-agent support
 	manifest     *config.AgentManifest
 	providerMgr  *provider.Manager
@@ -176,6 +176,7 @@ type toolRuntime struct {
 	delegationDepth      int
 	maxParallelWorkers   int
 	maxParallelMicroagnt int
+	maxDelegationDepth   int
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -204,6 +205,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	allowed := make(map[string]struct{}, len(cfg.AllowedTools))
 	for _, t := range cfg.AllowedTools {
 		allowed[t] = struct{}{}
+		if spec, ok := cfg.ToolPolicies[t]; ok {
+			for _, alias := range spec.Aliases {
+				alias = strings.TrimSpace(alias)
+				if alias != "" {
+					allowed[alias] = struct{}{}
+				}
+			}
+		}
 	}
 	runtime := toolRuntime{
 		cwd:             cfg.CWD,
@@ -213,7 +222,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		shellApproval:   cfg.ShellApproval,
 		allowedShell:    map[string]struct{}{},
 		toolPolicies:    map[string]config.ToolSpec{},
-		allowNetwork:    cfg.AllowNetwork,
 		logToolCalls:    cfg.LogToolCalls,
 		manifest:        cfg.Manifest,
 		providerMgr:     cfg.ProviderManager,
@@ -229,8 +237,20 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	if !cfg.LogToolCalls {
 		runtime.logToolCalls = false
 	}
+	if cfg.Manifest != nil {
+		runtime.runtimeRules = append(runtime.runtimeRules, cfg.Manifest.Runtime.PermissionRules...)
+		if spec, ok := cfg.Manifest.AgentByID(cfg.AgentID); ok {
+			runtime.agentRules = append(runtime.agentRules, spec.PermissionRules...)
+		}
+	}
 	for id, spec := range cfg.ToolPolicies {
 		runtime.toolPolicies[id] = spec
+		for _, alias := range spec.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias != "" {
+				runtime.toolPolicies[alias] = spec
+			}
+		}
 	}
 	if cfg.MaxWorkers <= 0 {
 		cfg.MaxWorkers = 4
@@ -238,8 +258,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 	if cfg.MaxMicroagents <= 0 {
 		cfg.MaxMicroagents = 2
 	}
+	if cfg.MaxDepth <= 0 {
+		cfg.MaxDepth = 2
+	}
 	runtime.maxParallelWorkers = cfg.MaxWorkers
 	runtime.maxParallelMicroagnt = cfg.MaxMicroagents
+	runtime.maxDelegationDepth = cfg.MaxDepth
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
 		return "", nil, 0, err
@@ -501,7 +525,7 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			if callback != nil {
 				callback(ToolTrace{Name: c.Tool, Args: callArgs, Status: "running"})
 			}
-			output, err := r.execute(ctx, c, allowed)
+			output, err := r.executeWithTimeout(ctx, c, allowed)
 			status := "success"
 			if err != nil {
 				status = "error"
@@ -529,12 +553,29 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 	return results
 }
 
+func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
+	timeoutSec := 45
+	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
+		timeoutSec = spec.TimeoutSec
+	}
+	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+	return r.execute(tctx, call, allowed)
+}
+
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
 	if _, ok := allowed[call.Tool]; !ok {
 		return "", fmt.Errorf("tool %q not allowed", call.Tool)
 	}
-	if !r.allowNetwork && r.isNetworkTool(call.Tool) {
-		return "", fmt.Errorf("tool %q blocked: network tools are disabled by runtime policy", call.Tool)
+	if spec, ok := r.toolPolicies[call.Tool]; ok {
+		if evaluatePermissionRule("tool", spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
+			return "", fmt.Errorf("tool %q denied by policy", call.Tool)
+		}
+		for _, fam := range toolPermissionFamilies(spec) {
+			if evaluatePermissionRule(fam, spec.ID, r.runtimeRules, r.agentRules, spec.PermissionRules) == config.RuleDeny {
+				return "", fmt.Errorf("tool %q denied by policy for permission %q", call.Tool, fam)
+			}
+		}
 	}
 	if call.Tool != "file-read" && call.Tool != "glob" && call.Tool != "grep" {
 		if next, ok := r.nextRequiredRead(); ok {
@@ -632,29 +673,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return fmt.Sprintf("created %s", rel), nil
 	case "shell-exec":
-		var args struct {
-			Command string `json:"command"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("shell-exec args: %w", err)
-		}
-		cmdText := strings.TrimSpace(args.Command)
-		if cmdText == "" {
-			return "", fmt.Errorf("shell-exec command is required")
-		}
-		if err := r.authorizeShellCommand(ctx, call.Tool, cmdText); err != nil {
-			return "", err
-		}
-		cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(cctx, "bash", "-lc", cmdText)
-		cmd.Dir = r.cwd
-		out, err := cmd.CombinedOutput()
-		text := truncate(string(out), 12000)
-		if err != nil {
-			return text, fmt.Errorf("command failed: %w", err)
-		}
-		return text, nil
+		return r.runShellTool(ctx, call.Tool, call.Args, "shell-exec")
 	case "glob":
 		var args struct {
 			Pattern string `json:"pattern"`
@@ -701,58 +720,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return strings.Join(lines, "\n"), nil
 	case "web-fetch":
-		var args struct {
-			URL string `json:"url"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("web-fetch args: %w", err)
-		}
-		if args.URL == "" {
-			return "", fmt.Errorf("web-fetch: url required")
-		}
-		client := &http.Client{Timeout: 15 * time.Second}
-		resp, err := client.Get(args.URL)
-		if err != nil {
-			return "", fmt.Errorf("web-fetch: %w", err)
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
-		if err != nil {
-			return "", fmt.Errorf("web-fetch: read: %w", err)
-		}
-		return string(body), nil
-	case "web-search":
-		var args struct {
-			Query string `json:"query"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("web-search args: %w", err)
-		}
-		if args.Query == "" {
-			return "", fmt.Errorf("web-search: query required")
-		}
-		apiKey := os.Getenv("SERPER_API_KEY")
-		if apiKey == "" {
-			return "Web search not configured. Set SERPER_API_KEY environment variable.", nil
-		}
-		payload, _ := json.Marshal(map[string]interface{}{"q": args.Query, "num": 5})
-		req, err := http.NewRequestWithContext(ctx, "POST", "https://google.serper.dev/search", bytes.NewReader(payload))
-		if err != nil {
-			return "", fmt.Errorf("web-search: %w", err)
-		}
-		req.Header.Set("X-API-KEY", apiKey)
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 15 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("web-search: %w", err)
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
-		if err != nil {
-			return "", fmt.Errorf("web-search: read: %w", err)
-		}
-		return string(body), nil
+		return r.runWebFetch(ctx, call.Args)
 	case "todo-write":
 		var args struct {
 			Todos []interface{} `json:"todos"`
@@ -803,29 +771,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "bash", "bash-output":
-		var args struct {
-			Command string `json:"command"`
-		}
-		if err := decodeJSONStrict(call.Args, &args); err != nil {
-			return "", fmt.Errorf("bash args: %w", err)
-		}
-		cmdText := strings.TrimSpace(args.Command)
-		if cmdText == "" {
-			return "", fmt.Errorf("bash: command is required")
-		}
-		if err := r.authorizeShellCommand(ctx, call.Tool, cmdText); err != nil {
-			return "", err
-		}
-		cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(cctx, "bash", "-lc", cmdText)
-		cmd.Dir = r.cwd
-		out, err := cmd.CombinedOutput()
-		text := truncate(string(out), 12000)
-		if err != nil {
-			return text, fmt.Errorf("command failed: %w", err)
-		}
-		return text, nil
+		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
 	case "comment":
 		var args struct {
 			Message string `json:"message"`
@@ -857,7 +803,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if target == "" || strings.TrimSpace(args.Task) == "" {
 			return "", fmt.Errorf("agent: target and task required")
 		}
-		if r.delegationDepth >= 2 {
+		if r.delegationDepth >= r.maxDelegationDepth {
 			return "", fmt.Errorf("agent: delegation depth exceeded")
 		}
 		if r.manifest == nil || r.providerMgr == nil {
@@ -890,13 +836,13 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				if !allowedHandoff {
 					return "", fmt.Errorf("agent: %q cannot delegate to %q (allowed handoffs: %s)", r.agentID, target, strings.Join(caller.Handoffs, ", "))
 				}
+				if !isDelegationRoleAllowed(caller.Role, spec.Role) {
+					return "", fmt.Errorf("agent: role %q cannot delegate to role %q", caller.Role, spec.Role)
+				}
+				if spec.Mode == "orchestrator" {
+					return "", fmt.Errorf("agent: delegation target %q must be worker/subagent role, got orchestrator mode", target)
+				}
 			}
-		}
-		if r.delegationDepth == 0 && spec.Mode == "orchestrator" {
-			return "", fmt.Errorf("agent: orchestrator can only delegate to workers")
-		}
-		if r.delegationDepth == 1 && spec.Mode == "orchestrator" {
-			return "", fmt.Errorf("agent: workers can only delegate to worker-style microagents")
 		}
 		// Create and run sub-agent
 		subTask := strings.TrimSpace(args.Task)
@@ -928,7 +874,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		if err != nil {
 			return "", fmt.Errorf("agent %s: %w", target, err)
 		}
-		return result.Content, nil
+		return marshalSubagentResult(target, result), nil
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}
@@ -1463,10 +1409,13 @@ func parseToolCall(s string) (toolCall, bool, error) {
 }
 
 func parseFinal(s string) (string, bool) {
-	if !strings.HasPrefix(s, finalPrefix) {
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, finalPrefix) {
 		return "", false
 	}
-	out := strings.TrimSpace(strings.TrimPrefix(s, finalPrefix))
+	out := strings.TrimSpace(strings.TrimPrefix(trimmed, finalPrefix))
+	out = strings.TrimPrefix(out, ":")
+	out = strings.TrimSpace(out)
 	return out, true
 }
 
@@ -1595,20 +1544,86 @@ func isBlockedCommand(cmd string) bool {
 	return false
 }
 
-func (r *toolRuntime) isNetworkTool(toolName string) bool {
-	if spec, ok := r.toolPolicies[toolName]; ok {
-		return toolAllowsNetwork(spec)
+func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs []byte, prefix string) (string, error) {
+	var args struct {
+		Command string `json:"command"`
 	}
-	switch toolName {
-	case "web-fetch", "web-search":
-		return true
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("%s args: %w", prefix, err)
+	}
+	cmdText := strings.TrimSpace(args.Command)
+	if cmdText == "" {
+		return "", fmt.Errorf("%s: command is required", prefix)
+	}
+	if err := r.authorizeShellCommand(ctx, toolID, cmdText); err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdText)
+	cmd.Dir = r.cwd
+	out, err := cmd.CombinedOutput()
+	text := truncate(string(out), 12000)
+	if err != nil {
+		return text, fmt.Errorf("command failed: %w", err)
+	}
+	return text, nil
+}
+
+func (r *toolRuntime) runWebFetch(ctx context.Context, rawArgs []byte) (string, error) {
+	var args struct {
+		URL string `json:"url"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("web-fetch args: %w", err)
+	}
+	urlText := strings.TrimSpace(args.URL)
+	if urlText == "" {
+		return "", fmt.Errorf("web-fetch: url required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlText, nil)
+	if err != nil {
+		return "", fmt.Errorf("web-fetch: %w", err)
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("web-fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
+	if err != nil {
+		return "", fmt.Errorf("web-fetch: read: %w", err)
+	}
+	return string(body), nil
+}
+
+type allowedCommandsFile struct {
+	AllowedCommands []string `json:"allowed_commands"`
+}
+
+func isDelegationRoleAllowed(caller, target config.AgentRole) bool {
+	switch caller {
+	case config.AgentRolePrimary, config.AgentRoleOrchestrator:
+		return target == config.AgentRoleWorker || target == config.AgentRoleSubagent
+	case config.AgentRoleWorker, config.AgentRoleSubagent:
+		return target == config.AgentRoleSubagent || target == config.AgentRoleWorker
 	default:
 		return false
 	}
 }
 
-type allowedCommandsFile struct {
-	AllowedCommands []string `json:"allowed_commands"`
+func marshalSubagentResult(agentID string, result RunResult) string {
+	payload := map[string]any{
+		"agent":            agentID,
+		"status":           "ok",
+		"summary":          truncate(strings.TrimSpace(result.Content), 1200),
+		"tool_trace_count": len(result.Tools),
+		"tokens_used":      result.TokensUsed,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf("{\"agent\":%q,\"status\":\"ok\",\"summary\":%q}", agentID, truncate(strings.TrimSpace(result.Content), 1200))
+	}
+	return string(raw)
 }
 
 var alwaysAllowedCommandPrefixes = []string{
@@ -1648,6 +1663,10 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 	}
 
 	missingApprovals := make([]string, 0, len(segments))
+	toolRules := []config.PermissionRule{}
+	if spec, ok := r.toolPolicies[toolID]; ok {
+		toolRules = append(toolRules, spec.PermissionRules...)
+	}
 	r.shellMu.Lock()
 	defer r.shellMu.Unlock()
 	for _, seg := range segments {
@@ -1659,6 +1678,12 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 			return fmt.Errorf("blocked dangerous command")
 		}
 		if isAlwaysAllowedCommand(segNorm) {
+			continue
+		}
+		switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
+		case config.RuleDeny:
+			return fmt.Errorf("shell-exec denied by policy for command segment %q", segNorm)
+		case config.RuleAllow:
 			continue
 		}
 		r.mu.Lock()
@@ -1712,6 +1737,7 @@ func splitShellCommandSegments(command string) []string {
 		segments                []string
 		buf                     strings.Builder
 		inSingle, inDouble, esc bool
+		subDepth                int
 	)
 	flush := func() {
 		seg := strings.TrimSpace(buf.String())
@@ -1742,14 +1768,24 @@ func splitShellCommandSegments(command string) []string {
 				inDouble = !inDouble
 			}
 			buf.WriteByte(ch)
+		case '(':
+			if !inSingle && !inDouble && i > 0 && command[i-1] == '$' {
+				subDepth++
+			}
+			buf.WriteByte(ch)
+		case ')':
+			if !inSingle && !inDouble && subDepth > 0 {
+				subDepth--
+			}
+			buf.WriteByte(ch)
 		case ';':
-			if inSingle || inDouble {
+			if inSingle || inDouble || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}
 			flush()
 		case '|':
-			if inSingle || inDouble {
+			if inSingle || inDouble || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}
@@ -1760,7 +1796,7 @@ func splitShellCommandSegments(command string) []string {
 			}
 			flush()
 		case '&':
-			if inSingle || inDouble {
+			if inSingle || inDouble || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}
@@ -1771,7 +1807,7 @@ func splitShellCommandSegments(command string) []string {
 			}
 			buf.WriteByte(ch)
 		case '\n':
-			if inSingle || inDouble {
+			if inSingle || inDouble || subDepth > 0 {
 				buf.WriteByte(ch)
 				continue
 			}

@@ -79,7 +79,6 @@ func (a *App) handleChat(ctx context.Context, prompt string) error {
 		ProviderName:    func() string { return a.cfg.ActiveProvider },
 		ModelName:       func() string { return a.cfg.ActiveModel },
 		CWD:             a.cwd,
-		Images:          a.pendingImgs,
 		ToolCallback:    a.printToolProgress,
 		Manifest:        &a.manifest,
 		SessionDir:      a.cliSessionDir(),
@@ -88,7 +87,6 @@ func (a *App) handleChat(ctx context.Context, prompt string) error {
 	if err != nil {
 		return err
 	}
-	a.pendingImgs = nil
 	a.printLine(a.ui.Panel(string(a.mode), "Assistant", result.Content))
 	return nil
 }

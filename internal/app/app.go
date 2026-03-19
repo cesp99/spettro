@@ -23,7 +23,6 @@ type App struct {
 	providers   *provider.Manager
 	manifest    config.AgentManifest
 	pendingPlan string
-	pendingImgs []string
 	ui          *ui.Renderer
 	setup       *setupWizard
 	modelPicker *modelPicker
