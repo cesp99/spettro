@@ -552,6 +552,10 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 	if t.Name == "comment" {
 		return
 	}
+	agentID := strings.TrimSpace(t.AgentID)
+	if agentID == "" {
+		agentID = m.mode
+	}
 	key := fmt.Sprintf("tool:%s:%s", t.Name, t.Args)
 	title := formatToolLabel(t.Name, t.Args)
 	if t.Status == "running" {
@@ -568,7 +572,7 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 		Key:     key,
 		Kind:    "tool",
 		ID:      t.Name,
-		AgentID: m.mode,
+		AgentID: agentID,
 		Title:   title,
 		Detail:  summarizeToolArgs(t.Name, t.Args),
 		Body:    strings.Join(bodyParts, "\n\n"),
@@ -578,7 +582,7 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 	m.ensureSession()
 	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
 		Kind:       "tool",
-		AgentID:    m.mode,
+		AgentID:    agentID,
 		Status:     t.Status,
 		Summary:    truncateLabel(strings.TrimSpace(strings.Join(bodyParts, " ")), 240),
 		ToolName:   t.Name,

@@ -33,10 +33,11 @@ type ExploreAgent interface {
 }
 
 type ToolTrace struct {
-	Name   string
-	Status string
-	Args   string
-	Output string
+	AgentID string
+	Name    string
+	Status  string
+	Args    string
+	Output  string
 }
 
 type RunResult struct {
@@ -138,30 +139,30 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		}
 	}
 	out, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
-		SystemPrompt:     systemPrompt,
-		UserTask:         task,
-		CWD:              a.CWD,
-		AgentID:          a.Spec.ID,
-		MaxSteps:         maxSteps,
-		RequireToolCall:  requireToolCall,
-		AllowedTools:     allowedTools,
-		ToolPolicies:     policies,
-		LogToolCalls:     logToolCalls,
-		ProviderManager:  a.ProviderManager,
-		ProviderName:     a.ProviderName,
-		ModelName:        a.ModelName,
-		MaxTokens:        a.MaxTokens,
-		RequiredReads:    a.RequiredReads,
-		Images:           a.Images,
-		ToolCallback:     a.ToolCallback,
-		Permission:       a.Spec.Permission,
-		ShellApproval:    a.ShellApproval,
-		Manifest:         a.Manifest,
-		SessionDir:       a.SessionDir,
-		DelegationDepth:  a.DelegationDepth,
-		ParentAgentID:    a.ParentAgentID,
-		MaxWorkers:       maxWorkers,
-		MaxDepth:         maxDelegationDepth,
+		SystemPrompt:    systemPrompt,
+		UserTask:        task,
+		CWD:             a.CWD,
+		AgentID:         a.Spec.ID,
+		MaxSteps:        maxSteps,
+		RequireToolCall: requireToolCall,
+		AllowedTools:    allowedTools,
+		ToolPolicies:    policies,
+		LogToolCalls:    logToolCalls,
+		ProviderManager: a.ProviderManager,
+		ProviderName:    a.ProviderName,
+		ModelName:       a.ModelName,
+		MaxTokens:       a.MaxTokens,
+		RequiredReads:   a.RequiredReads,
+		Images:          a.Images,
+		ToolCallback:    a.ToolCallback,
+		Permission:      a.Spec.Permission,
+		ShellApproval:   a.ShellApproval,
+		Manifest:        a.Manifest,
+		SessionDir:      a.SessionDir,
+		DelegationDepth: a.DelegationDepth,
+		ParentAgentID:   a.ParentAgentID,
+		MaxWorkers:      maxWorkers,
+		MaxDepth:        maxDelegationDepth,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)

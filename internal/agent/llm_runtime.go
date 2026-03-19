@@ -181,10 +181,11 @@ type toolRuntime struct {
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
 type parallelResult struct {
-	name   string
-	args   string
-	output string
-	status string
+	agentID string
+	name    string
+	args    string
+	output  string
+	status  string
 }
 
 func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, int, error) {
@@ -314,7 +315,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			results := runtime.parallelExec(ctx, calls, allowed, cfg.ToolCallback)
 			history.WriteString(fmt.Sprintf("assistant(%d): %s\n", step, singleLine(main)))
 			for _, res := range results {
-				trace := ToolTrace{Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
+				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
 				traces = append(traces, trace)
 				if runtime.logToolCalls {
 					history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
@@ -506,10 +507,11 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			agentCalls++
 			if agentCalls > agentBudget {
 				results[i] = parallelResult{
-					name:   call.Tool,
-					args:   singleLine(string(call.Args)),
-					output: fmt.Sprintf("error: delegation limit reached (max %d in parallel)", agentBudget),
-					status: "error",
+					agentID: r.agentID,
+					name:    call.Tool,
+					args:    singleLine(string(call.Args)),
+					output:  fmt.Sprintf("error: delegation limit reached (max %d in parallel)", agentBudget),
+					status:  "error",
 				}
 				continue
 			}
@@ -520,10 +522,10 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 			callArgs := singleLine(string(c.Args))
 			if callback != nil && isMajorOperationTool(c.Tool) {
 				msg := fmt.Sprintf("Starting %s (%s).", c.Tool, summarizeLoopToolArgs(c.Tool, callArgs))
-				callback(ToolTrace{Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+				callback(ToolTrace{AgentID: r.agentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 			}
 			if callback != nil {
-				callback(ToolTrace{Name: c.Tool, Args: callArgs, Status: "running"})
+				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Args: callArgs, Status: "running"})
 			}
 			output, err := r.executeWithTimeout(ctx, c, allowed)
 			status := "success"
@@ -532,19 +534,20 @@ func (r *toolRuntime) parallelExec(ctx context.Context, calls []toolCall, allowe
 				output = "error: " + err.Error()
 			}
 			results[idx] = parallelResult{
-				name:   c.Tool,
-				args:   callArgs,
-				output: output,
-				status: status,
+				agentID: r.agentID,
+				name:    c.Tool,
+				args:    callArgs,
+				output:  output,
+				status:  status,
 			}
 			if callback != nil {
-				callback(ToolTrace{Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600)})
+				callback(ToolTrace{AgentID: r.agentID, Name: c.Tool, Status: status, Args: callArgs, Output: truncate(output, 600)})
 				if isMajorOperationTool(c.Tool) {
 					msg := fmt.Sprintf("Completed %s.", c.Tool)
 					if err != nil {
 						msg = fmt.Sprintf("Failed %s: %s", c.Tool, truncate(err.Error(), 180))
 					}
-					callback(ToolTrace{Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
+					callback(ToolTrace{AgentID: r.agentID, Name: "comment", Status: "success", Args: fmt.Sprintf(`{"message":%q}`, msg), Output: msg})
 				}
 			}
 		}(i, call)

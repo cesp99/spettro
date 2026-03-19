@@ -156,6 +156,41 @@ func TestViewSidePanel_ShowsCommandActivities(t *testing.T) {
 	}
 }
 
+func TestViewSidePanel_GroupsEntriesUnderAgentHeaders(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(140, 40)
+	m.SetSidePanelVisibleForTesting(true)
+	m.SetShowToolsForTesting(true)
+	m.AddActivityForTesting(
+		"tool",
+		"shell-exec",
+		"review",
+		"$ go test ./...",
+		"Runs tests",
+		"Runs tests",
+		"done",
+	)
+	m.AddActivityForTesting(
+		"tool",
+		"grep",
+		"coding",
+		`Grep "TODO"`,
+		"Search",
+		"Search",
+		"done",
+	)
+
+	view := m.ViewSidePanelForTesting(m.SidePanelWidthForTesting())
+	for _, want := range []string{"review", "coding", "go test ./...", "Grep"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected hierarchical activity row %q, got: %s", want, view)
+		}
+	}
+	if !strings.Contains(view, "└") {
+		t.Fatalf("expected indented hierarchy marker in side panel, got: %s", view)
+	}
+}
+
 func TestRebuildActivitiesFromEventsForTesting_RestoresToolAndCommand(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetDimensionsForTesting(140, 40)

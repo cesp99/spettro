@@ -626,7 +626,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		onSidePanel := sideW > 0 && msg.X >= m.paneWidth()+1
 		if onSidePanel {
 			items := m.sidePanelItems()
-			_, rows := m.sideListGeometry()
+			innerHeight := m.sidePanelInnerHeight()
+			_, gitRows := m.sidePanelGitSummary(sideW)
+			_, _, rows := m.sidePanelWindow(items, innerHeight, gitRows)
 			maxStart := max(0, len(items)-rows)
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
@@ -649,9 +651,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				startY, _ := m.sideListGeometry()
 				row := msg.Y - startY
 				if row >= 0 {
-					idx := m.sideScroll + row
-					if idx >= 0 && idx < len(items) {
-						m.sideCursor = idx
+					cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
+					_, rowToItem := m.sidePanelLines(items, sideW, cursor, start, rows)
+					if row >= 0 && row < len(rowToItem) {
+						idx := rowToItem[row]
+						if idx >= 0 && idx < len(items) {
+							m.sideCursor = idx
+						}
+					}
+					if len(rowToItem) == 0 {
+						idx := m.sideScroll + row
+						if idx >= 0 && idx < len(items) {
+							m.sideCursor = idx
+						}
 					}
 				}
 				return m, tea.Batch(cmds...)
