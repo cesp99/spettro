@@ -32,10 +32,19 @@ var eyesPlanning = []string{
 
 // eyeArtFor returns the correct art for the given mode.
 func eyeArtFor(mode string) []string {
-	if mode == "planning" || mode == "research" || mode == "explore" {
+	if isPlanningEyeMode(mode) {
 		return eyesPlanning
 	}
 	return eyesActing
+}
+
+func isPlanningEyeMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "plan", "ask":
+		return true
+	default:
+		return false
+	}
 }
 
 // renderEyes renders the eye art with animation based on frame counter.

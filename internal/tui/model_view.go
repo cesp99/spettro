@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -486,7 +487,7 @@ func (m Model) paneWidth() int {
 }
 
 func (m Model) sidePanelItems() []sidePanelItem {
-	items := make([]sidePanelItem, 0, len(m.activityFeed)+len(m.modifiedFiles))
+	items := make([]sidePanelItem, 0, len(m.activityFeed))
 	for i := len(m.activityFeed) - 1; i >= 0; i-- {
 		entry := m.activityFeed[i]
 		if strings.TrimSpace(entry.Title) == "" && strings.TrimSpace(entry.Detail) == "" && strings.TrimSpace(entry.Body) == "" {
@@ -502,32 +503,41 @@ func (m Model) sidePanelItems() []sidePanelItem {
 			Status: entry.Status,
 		})
 	}
-	for _, f := range m.modifiedFiles {
-		if strings.TrimSpace(f.Path) == "" {
-			continue
-		}
-		detail := fmt.Sprintf("+%d  -%d", f.Added, f.Deleted)
-		if f.Untracked {
-			detail = "untracked"
-		}
-		items = append(items, sidePanelItem{
-			Kind:   "file",
-			ID:     f.Path,
-			Title:  f.Path,
-			Detail: detail,
-			Body:   detail,
-			Status: "changed",
-		})
-	}
 	return items
 }
 
+func (m Model) sidePanelGitSummary(width int) (string, int) {
+	if strings.TrimSpace(m.gitBranch) == "" {
+		return "", 0
+	}
+
+	added, deleted := 0, 0
+	for _, f := range m.modifiedFiles {
+		added += f.Added
+		deleted += f.Deleted
+	}
+
+	repo := filepath.Base(m.cwd)
+	branch := truncateLabel(m.gitBranch, max(12, width-20))
+	repo = truncateLabel(repo, max(10, width/2))
+
+	line := strings.Join([]string{
+		lipgloss.NewStyle().Foreground(colorMuted).Render("⎇"),
+		lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(branch),
+		styleMuted.Render(repo),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render(fmt.Sprintf("+%d", added)),
+		lipgloss.NewStyle().Bold(true).Foreground(colorError).Render(fmt.Sprintf("-%d", deleted)),
+	}, " ")
+	return line, 2
+}
+
 func (m Model) sideListGeometry() (startY, rows int) {
-	rows = m.sidePanelInnerHeight() / 2
+	_, gitRows := m.sidePanelGitSummary(m.sidePanelWidth())
+	rows = (m.sidePanelInnerHeight() - gitRows) / 2
 	if rows < 4 {
 		rows = 4
 	}
-	return 5, rows
+	return 5 + gitRows, rows
 }
 
 func (m Model) sidePanelInnerHeight() int {
@@ -556,14 +566,18 @@ func clampLines(s string, maxLines int) string {
 
 func (m Model) viewSidePanel(width int) string {
 	innerHeight := m.sidePanelInnerHeight()
+	gitSummary, gitRows := m.sidePanelGitSummary(width)
 	items := m.sidePanelItems()
 	if len(items) == 0 {
-		body := lipgloss.JoinVertical(lipgloss.Left,
+		parts := []string{
 			lipgloss.NewStyle().Bold(true).Render("Activity"),
 			styleMuted.Render("Live tool context and agent output"),
-			"",
-			styleMuted.Render("Observability is on. Tool usage, reasoning, and agent output will appear here."),
-		)
+		}
+		if gitSummary != "" {
+			parts = append(parts, "", gitSummary)
+		}
+		parts = append(parts, "", styleMuted.Render("Observability is on. Tool usage, reasoning, and agent output will appear here."))
+		body := lipgloss.JoinVertical(lipgloss.Left, parts...)
 		box := lipgloss.NewStyle().
 			Width(width).
 			Height(innerHeight).
@@ -581,7 +595,7 @@ func (m Model) viewSidePanel(width int) string {
 	if cursor >= len(items) {
 		cursor = len(items) - 1
 	}
-	availableRows := innerHeight - 10
+	availableRows := innerHeight - 10 - gitRows
 	if availableRows < 6 {
 		availableRows = 6
 	}
@@ -650,20 +664,21 @@ func (m Model) viewSidePanel(width int) string {
 		details = append(details, styleMuted.Render("ctrl+o expands full context"))
 	}
 	detailsBlock := strings.Join(details, "\n")
-	maxDetailLines := innerHeight - len(lines) - 6
+	maxDetailLines := innerHeight - len(lines) - 6 - gitRows
 	if maxDetailLines < 5 {
 		maxDetailLines = 5
 	}
 	detailsBlock = clampLines(detailsBlock, maxDetailLines)
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
+	contentParts := []string{
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
 		styleMuted.Render("Live tool context and agent output"),
-		"",
-		strings.Join(lines, "\n"),
-		"",
-		detailsBlock,
-	)
+	}
+	if gitSummary != "" {
+		contentParts = append(contentParts, "", gitSummary)
+	}
+	contentParts = append(contentParts, "", strings.Join(lines, "\n"), "", detailsBlock)
+	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 	content = clampLines(content, innerHeight)
 
 	return lipgloss.NewStyle().

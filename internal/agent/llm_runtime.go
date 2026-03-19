@@ -124,6 +124,26 @@ type toolCall struct {
 	Args json.RawMessage `json:"args"`
 }
 
+var (
+	allowedToolCallKeys = map[string]struct{}{
+		"tool":       {},
+		"name":       {},
+		"args":       {},
+		"arguments":  {},
+		"input":      {},
+		"parameters": {},
+		"tool_input": {},
+		"function":   {},
+		"type":       {},
+		"id":         {},
+		"call_id":    {},
+	}
+	allowedFunctionKeys = map[string]struct{}{
+		"name":      {},
+		"arguments": {},
+	}
+)
+
 type toolRuntime struct {
 	cwd           string
 	mu            sync.Mutex
@@ -398,13 +418,15 @@ Allowed tools: %s
 
 Output protocol (strict):
 1) To call tools (all executed in parallel), output one TOOL_CALL per line:
-TOOL_CALL {"tool":"<tool-name>","args":{...}}
-TOOL_CALL {"tool":"<another>","args":{...}}
+TOOL_CALL {"name":"<tool-name>","arguments":{...}}
+TOOL_CALL {"name":"<another>","arguments":{...}}
 2) When done, output exactly:
 FINAL
 <your final answer>
 
 Rules:
+- Known aliases accepted by runtime: tool/args and function{name,arguments}.
+- For the agent tool, arguments must include {"agent":"<handoff-id>","task":"..."}.
 - Prefer reading/searching before writing.
 - Never edit an existing file unless it has been read first.
 - Creating a brand-new file without reading is allowed.
@@ -489,7 +511,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			Query string `json:"query"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("repo-search args: %w", err)
 		}
 		out, err := r.searcher.Search(ctx, r.cwd, strings.TrimSpace(args.Query))
@@ -504,7 +526,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			StartLine int    `json:"start_line"`
 			EndLine   int    `json:"end_line"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("file-read args: %w", err)
 		}
 		abs, rel, err := r.resolvePath(args.Path)
@@ -530,7 +552,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			Content string `json:"content"`
 			Append  bool   `json:"append"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("file-write args: %w", err)
 		}
 		abs, rel, err := r.resolvePath(args.Path)
@@ -578,7 +600,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			Command string `json:"command"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("shell-exec args: %w", err)
 		}
 		cmdText := strings.TrimSpace(args.Command)
@@ -603,13 +625,13 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			Pattern string `json:"pattern"`
 			Path    string `json:"path"` // optional subdirectory
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("glob args: %w", err)
 		}
 		return r.runGlob(args.Pattern, args.Path)
 	case "grep":
 		var gargs grepArgs
-		if err := json.Unmarshal(call.Args, &gargs); err != nil {
+		if err := decodeJSONStrict(call.Args, &gargs); err != nil {
 			return "", fmt.Errorf("grep args: %w", err)
 		}
 		return r.runGrep(ctx, gargs)
@@ -617,7 +639,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			Path string `json:"path"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("ls args: %w", err)
 		}
 		dir := "."
@@ -647,7 +669,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			URL string `json:"url"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("web-fetch args: %w", err)
 		}
 		if args.URL == "" {
@@ -668,7 +690,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			Query string `json:"query"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("web-search args: %w", err)
 		}
 		if args.Query == "" {
@@ -700,7 +722,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			Todos []interface{} `json:"todos"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("todo-write args: %w", err)
 		}
 		if strings.TrimSpace(r.sessionDir) == "" {
@@ -749,7 +771,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			Command string `json:"command"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("bash args: %w", err)
 		}
 		cmdText := strings.TrimSpace(args.Command)
@@ -773,12 +795,13 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		var args struct {
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("comment args: %w", err)
 		}
 		return args.Message, nil
 	case "agent":
 		var args struct {
+			Agent          string `json:"agent"`
 			Target         string `json:"target"`
 			ID             string `json:"id"`
 			Task           string `json:"task"`
@@ -786,10 +809,13 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			ExpectedOutput string `json:"expected_output"`
 			ParentAgentID  string `json:"parent_agent_id"`
 		}
-		if err := json.Unmarshal(call.Args, &args); err != nil {
+		if err := decodeJSONStrict(call.Args, &args); err != nil {
 			return "", fmt.Errorf("agent args: %w", err)
 		}
-		target := strings.TrimSpace(args.Target)
+		target := strings.TrimSpace(args.Agent)
+		if target == "" {
+			target = strings.TrimSpace(args.Target)
+		}
 		if target == "" {
 			target = strings.TrimSpace(args.ID)
 		}
@@ -813,6 +839,23 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		if spec == nil {
 			return "", fmt.Errorf("agent: unknown agent %q", target)
+		}
+		if !spec.Enabled {
+			return "", fmt.Errorf("agent: target %q is disabled", target)
+		}
+		if strings.TrimSpace(r.agentID) != "" {
+			if caller, ok := r.manifest.AgentByID(r.agentID); ok {
+				allowedHandoff := false
+				for _, id := range caller.Handoffs {
+					if id == target {
+						allowedHandoff = true
+						break
+					}
+				}
+				if !allowedHandoff {
+					return "", fmt.Errorf("agent: %q cannot delegate to %q (allowed handoffs: %s)", r.agentID, target, strings.Join(caller.Handoffs, ", "))
+				}
+			}
 		}
 		if r.delegationDepth == 0 && spec.Mode == "orchestrator" {
 			return "", fmt.Errorf("agent: orchestrator can only delegate to workers")
@@ -1223,6 +1266,62 @@ func (r *toolRuntime) markReadFromSearch(out string) {
 	}
 }
 
+func decodeJSONStrict(data []byte, target any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(target); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON content")
+	}
+	return nil
+}
+
+func normalizeToolArgs(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return json.RawMessage(`{}`), nil
+	}
+	// Support OpenAI-style stringified arguments for compatibility.
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(trimmed, &encoded); err != nil {
+			return nil, fmt.Errorf("arguments must be valid JSON: %w", err)
+		}
+		trimmed = bytes.TrimSpace([]byte(encoded))
+		if len(trimmed) == 0 {
+			return json.RawMessage(`{}`), nil
+		}
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return nil, fmt.Errorf("arguments must be a JSON object: %w", err)
+	}
+	return json.RawMessage(trimmed), nil
+}
+
+func firstUnknownKey(m map[string]json.RawMessage, allowed map[string]struct{}) string {
+	for k := range m {
+		if _, ok := allowed[k]; !ok {
+			return k
+		}
+	}
+	return ""
+}
+
+func extractStringField(raw json.RawMessage, field string) (string, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("%s must be a string", field)
+	}
+	return strings.TrimSpace(value), nil
+}
+
 // parseAllToolCalls scans all lines of s and collects every TOOL_CALL entry.
 func parseAllToolCalls(s string) (calls []toolCall, parseErrs []error) {
 	scanner := bufio.NewScanner(strings.NewReader(s))
@@ -1252,14 +1351,80 @@ func parseToolCall(s string) (toolCall, bool, error) {
 	raw = strings.TrimPrefix(raw, "```")
 	raw = strings.TrimSuffix(raw, "```")
 	raw = strings.TrimSpace(raw)
-	var call toolCall
-	if err := json.Unmarshal([]byte(raw), &call); err != nil {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
 		return toolCall{}, true, fmt.Errorf("invalid tool call JSON: %w", err)
 	}
-	if strings.TrimSpace(call.Tool) == "" {
+	if unknown := firstUnknownKey(envelope, allowedToolCallKeys); unknown != "" {
+		return toolCall{}, true, fmt.Errorf("unsupported tool call field %q", unknown)
+	}
+
+	toolFromTool, err := extractStringField(envelope["tool"], "tool")
+	if err != nil {
+		return toolCall{}, true, err
+	}
+	toolFromName, err := extractStringField(envelope["name"], "name")
+	if err != nil {
+		return toolCall{}, true, err
+	}
+	toolName := toolFromTool
+	if toolName == "" {
+		toolName = toolFromName
+	} else if toolFromName != "" && toolFromName != toolFromTool {
+		return toolCall{}, true, fmt.Errorf("conflicting tool names %q and %q", toolFromTool, toolFromName)
+	}
+
+	var fn map[string]json.RawMessage
+	if fnRaw, ok := envelope["function"]; ok && len(bytes.TrimSpace(fnRaw)) > 0 && !bytes.Equal(bytes.TrimSpace(fnRaw), []byte("null")) {
+		if err := json.Unmarshal(fnRaw, &fn); err != nil {
+			return toolCall{}, true, fmt.Errorf("function must be an object")
+		}
+		if unknown := firstUnknownKey(fn, allowedFunctionKeys); unknown != "" {
+			return toolCall{}, true, fmt.Errorf("unsupported function field %q", unknown)
+		}
+		fnName, err := extractStringField(fn["name"], "function.name")
+		if err != nil {
+			return toolCall{}, true, err
+		}
+		if toolName == "" {
+			toolName = fnName
+		} else if fnName != "" && fnName != toolName {
+			return toolCall{}, true, fmt.Errorf("conflicting function name %q and tool name %q", fnName, toolName)
+		}
+	}
+
+	if toolName == "" {
 		return toolCall{}, true, fmt.Errorf("tool call missing tool name")
 	}
-	return call, true, nil
+
+	var argKeys []string
+	for _, key := range []string{"args", "arguments", "input", "parameters", "tool_input"} {
+		if rawArgs, ok := envelope[key]; ok && len(bytes.TrimSpace(rawArgs)) > 0 && !bytes.Equal(bytes.TrimSpace(rawArgs), []byte("null")) {
+			argKeys = append(argKeys, key)
+		}
+	}
+	if rawFnArgs, ok := fn["arguments"]; ok && len(bytes.TrimSpace(rawFnArgs)) > 0 && !bytes.Equal(bytes.TrimSpace(rawFnArgs), []byte("null")) {
+		argKeys = append(argKeys, "function.arguments")
+	}
+	if len(argKeys) > 1 {
+		return toolCall{}, true, fmt.Errorf("ambiguous arguments fields: %s", strings.Join(argKeys, ", "))
+	}
+
+	rawArgs := json.RawMessage(`{}`)
+	switch {
+	case len(argKeys) == 0:
+		// leave defaults
+	case argKeys[0] == "function.arguments":
+		rawArgs = fn["arguments"]
+	default:
+		rawArgs = envelope[argKeys[0]]
+	}
+	normalizedArgs, err := normalizeToolArgs(rawArgs)
+	if err != nil {
+		return toolCall{}, true, err
+	}
+
+	return toolCall{Tool: toolName, Args: normalizedArgs}, true, nil
 }
 
 func parseFinal(s string) (string, bool) {

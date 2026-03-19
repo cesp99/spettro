@@ -36,6 +36,10 @@ func ShellApprovalOptionsForTesting() []string {
 	return append([]string(nil), shellApprovalOptions...)
 }
 
+func IsPlanningEyeModeForTesting(mode string) bool {
+	return isPlanningEyeMode(mode)
+}
+
 func NewModelForTesting() Model {
 	ta := textarea.New()
 	ta.Focus()
@@ -195,6 +199,21 @@ func (m *Model) AddActivityForTesting(kind, id, agentID, title, detail, body, st
 		Body:    body,
 		Status:  status,
 		At:      time.Now(),
+	})
+}
+
+func (m *Model) SetGitBranchForTesting(branch string) {
+	m.gitBranch = branch
+}
+
+func (m *Model) AddModifiedFileForTesting(path string, added, deleted int, untracked, staged, unstaged bool) {
+	m.modifiedFiles = append(m.modifiedFiles, modifiedFileEntry{
+		Path:      path,
+		Added:     added,
+		Deleted:   deleted,
+		Untracked: untracked,
+		Staged:    staged,
+		Unstaged:  unstaged,
 	})
 }
 

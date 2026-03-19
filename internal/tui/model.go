@@ -145,6 +145,8 @@ type modifiedFileEntry struct {
 	Added     int
 	Deleted   int
 	Untracked bool
+	Staged    bool
+	Unstaged  bool
 }
 
 type sidePanelItem struct {
@@ -274,6 +276,7 @@ type Model struct {
 	sideCursor     int
 	sideScroll     int
 	modifiedFiles  []modifiedFileEntry
+	gitBranch      string
 	showSidePanel  bool
 	sessionEdits   map[string]struct{}
 	activityFeed   []activityItem

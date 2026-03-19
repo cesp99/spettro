@@ -289,14 +289,20 @@ func (m *Model) trackSessionEditFromTrace(t agent.ToolTrace) {
 }
 
 func (m *Model) refreshModifiedFiles() {
-	if len(m.sessionEdits) == 0 {
+	cmd := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = m.cwd
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		m.gitBranch = ""
 		m.modifiedFiles = nil
 		return
 	}
 
-	cmd := exec.Command("git", "status", "--porcelain")
+	m.gitBranch = readGitBranch(m.cwd)
+
+	cmd = exec.Command("git", "status", "--porcelain")
 	cmd.Dir = m.cwd
-	out, err := cmd.Output()
+	out, err = cmd.Output()
 	if err != nil {
 		m.modifiedFiles = nil
 		return
@@ -308,6 +314,7 @@ func (m *Model) refreshModifiedFiles() {
 		if len(line) < 4 {
 			continue
 		}
+		x, y := line[0], line[1]
 		path := strings.TrimSpace(line[3:])
 		if strings.Contains(path, " -> ") {
 			segs := strings.Split(path, " -> ")
@@ -320,12 +327,11 @@ func (m *Model) refreshModifiedFiles() {
 		if normPath == "" {
 			continue
 		}
-		if _, ok := m.sessionEdits[normPath]; !ok {
-			continue
-		}
 		entry := stat[normPath]
 		entry.Path = normPath
-		entry.Untracked = strings.HasPrefix(line, "??")
+		entry.Untracked = x == '?' && y == '?'
+		entry.Staged = !entry.Untracked && x != ' '
+		entry.Unstaged = !entry.Untracked && y != ' '
 		stat[normPath] = entry
 	}
 
@@ -349,6 +355,30 @@ func (m *Model) refreshModifiedFiles() {
 	sort.Slice(m.modifiedFiles, func(i, j int) bool {
 		return m.modifiedFiles[i].Path < m.modifiedFiles[j].Path
 	})
+}
+
+func readGitBranch(cwd string) string {
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err == nil {
+		branch := strings.TrimSpace(string(out))
+		if branch != "" {
+			return branch
+		}
+	}
+
+	cmd = exec.Command("git", "rev-parse", "--short", "HEAD")
+	cmd.Dir = cwd
+	out, err = cmd.Output()
+	if err != nil {
+		return "(unknown)"
+	}
+	hash := strings.TrimSpace(string(out))
+	if hash == "" {
+		return "(unknown)"
+	}
+	return "detached@" + hash
 }
 
 func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {

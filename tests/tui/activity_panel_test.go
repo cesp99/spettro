@@ -64,3 +64,38 @@ func TestViewSidePanel_IsHeightBounded(t *testing.T) {
 		t.Fatalf("expected side panel height to stay within terminal, got %d lines", got)
 	}
 }
+
+func TestViewSidePanel_ShowsGitBranchAndChanges(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(140, 40)
+	m.SetSidePanelVisibleForTesting(true)
+	m.SetGitBranchForTesting("feature/activity-panel")
+	m.AddModifiedFileForTesting("internal/tui/model_view.go", 32, 10, false, true, true)
+	m.AddModifiedFileForTesting("tests/tui/activity_panel_test.go", 18, 0, false, true, false)
+	m.AddModifiedFileForTesting("tmp/new-file.txt", 0, 0, true, false, false)
+	m.AddActivityForTesting(
+		"tool",
+		"grep",
+		"coding",
+		`Grep "panel"`,
+		`Search panel references`,
+		"Search panel references",
+		"done",
+	)
+
+	view := m.ViewSidePanelForTesting(m.SidePanelWidthForTesting())
+	for _, want := range []string{
+		"⎇",
+		"feature/activity-panel",
+		"spettro-tui-tests",
+		"+50",
+		"-10",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in side panel, got: %s", want, view)
+		}
+	}
+	if strings.Contains(view, "internal/tui/model_view.go") {
+		t.Fatalf("expected git file list to stay hidden, got: %s", view)
+	}
+}
