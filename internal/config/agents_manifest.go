@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -8,11 +9,48 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
 const AgentManifestFilename = "spettro.agents.toml"
+
+type SandboxMode string
+
+const (
+	SandboxWorkspaceWrite SandboxMode = "workspace-write"
+	SandboxReadOnly       SandboxMode = "read-only"
+	SandboxFullAccess     SandboxMode = "full-access"
+)
+
+type AgentRole string
+
+const (
+	AgentRolePrimary      AgentRole = "primary"
+	AgentRoleSubagent     AgentRole = "subagent"
+	AgentRoleOrchestrator AgentRole = "orchestrator"
+	AgentRoleWorker       AgentRole = "worker"
+)
+
+type RuleAction string
+
+const (
+	RuleAllow RuleAction = "allow"
+	RuleAsk   RuleAction = "ask"
+	RuleDeny  RuleAction = "deny"
+)
+
+type PermissionRule struct {
+	Permission string     `toml:"permission"`
+	Pattern    string     `toml:"pattern"`
+	Action     RuleAction `toml:"action"`
+}
+
+type DelegationPolicy struct {
+	MaxParallelWorkers int `toml:"max_parallel_workers"`
+	MaxDepth           int `toml:"max_depth"`
+}
 
 type AgentManifest struct {
 	Version      int           `toml:"version"`
@@ -29,48 +67,58 @@ type AgentMetadata struct {
 }
 
 type RuntimePolicy struct {
-	DefaultPermission PermissionLevel `toml:"default_permission"`
-	DefaultTimeoutSec int             `toml:"default_timeout_sec"`
-	AllowNetworkTools bool            `toml:"allow_network_tools"`
-	LogToolCalls      bool            `toml:"log_tool_calls"`
+	DefaultPermission PermissionLevel  `toml:"default_permission"`
+	DefaultTimeoutSec int              `toml:"default_timeout_sec"`
+	LogToolCalls      bool             `toml:"log_tool_calls"`
+	SandboxMode       SandboxMode      `toml:"sandbox_mode"`
+	Delegation        DelegationPolicy `toml:"delegation"`
+	PermissionRules   []PermissionRule `toml:"permission_rules"`
+	AllowNetworkTools bool             `toml:"allow_network_tools"` // legacy field; ignored
 }
 
 type ToolSpec struct {
-	ID               string   `toml:"id"`
-	Name             string   `toml:"name"`
-	Description      string   `toml:"description"`
-	Kind             string   `toml:"kind"`
-	Enabled          bool     `toml:"enabled"`
-	EntryPoint       string   `toml:"entry_point"`
-	TimeoutSec       int      `toml:"timeout_sec"`
-	RequiresApproval bool     `toml:"requires_approval"`
-	PermittedActions []string `toml:"permitted_actions"`
+	ID               string           `toml:"id"`
+	Name             string           `toml:"name"`
+	Description      string           `toml:"description"`
+	Kind             string           `toml:"kind"`
+	Enabled          bool             `toml:"enabled"`
+	EntryPoint       string           `toml:"entry_point"`
+	TimeoutSec       int              `toml:"timeout_sec"`
+	RequiresApproval bool             `toml:"requires_approval"`
+	PermittedActions []string         `toml:"permitted_actions"`
+	Aliases          []string         `toml:"aliases"`
+	InputSchema      map[string]any   `toml:"input_schema"`
+	RiskLevel        string           `toml:"risk_level"`
+	PrimaryOnly      bool             `toml:"primary_only"`
+	PermissionRules  []PermissionRule `toml:"permission_rules"`
 }
 
 type AgentSpec struct {
-	ID               string          `toml:"id"`
-	Name             string          `toml:"name"`
-	Description      string          `toml:"description"`
-	Skill            string          `toml:"skill"`
-	Mode             string          `toml:"mode"`
-	Color            string          `toml:"color"`
-	ModelProvider    string          `toml:"model_provider"`
-	Model            string          `toml:"model"`
-	SystemPrompt     string          `toml:"system_prompt"`
-	PromptFile       string          `toml:"prompt_file"`
-	AllowedTools     []string        `toml:"allowed_tools"`
-	PermittedActions []string        `toml:"permitted_actions"`
-	Permission       PermissionLevel `toml:"permission"`
-	Temperature      float64         `toml:"temperature"`
-	MaxTokens        int             `toml:"max_tokens"`
-	MaxSteps         int             `toml:"max_steps"`
-	Handoffs         []string        `toml:"handoffs"`
-	Enabled          bool            `toml:"enabled"`
+	ID               string           `toml:"id"`
+	Name             string           `toml:"name"`
+	Description      string           `toml:"description"`
+	Skill            string           `toml:"skill"`
+	Mode             string           `toml:"mode"`
+	Role             AgentRole        `toml:"role"`
+	Color            string           `toml:"color"`
+	ModelProvider    string           `toml:"model_provider"`
+	Model            string           `toml:"model"`
+	SystemPrompt     string           `toml:"system_prompt"`
+	PromptFile       string           `toml:"prompt_file"`
+	AllowedTools     []string         `toml:"allowed_tools"`
+	PermittedActions []string         `toml:"permitted_actions"`
+	Permission       PermissionLevel  `toml:"permission"`
+	PermissionRules  []PermissionRule `toml:"permission_rules"`
+	Temperature      float64          `toml:"temperature"`
+	MaxTokens        int              `toml:"max_tokens"`
+	MaxSteps         int              `toml:"max_steps"`
+	Handoffs         []string         `toml:"handoffs"`
+	Enabled          bool             `toml:"enabled"`
 }
 
 func DefaultAgentManifest() AgentManifest {
-	return AgentManifest{
-		Version:      1,
+	m := AgentManifest{
+		Version:      2,
 		DefaultAgent: "plan",
 		Metadata: AgentMetadata{
 			Name:        "Spettro default agents",
@@ -79,34 +127,37 @@ func DefaultAgentManifest() AgentManifest {
 		Runtime: RuntimePolicy{
 			DefaultPermission: PermissionAskFirst,
 			DefaultTimeoutSec: 120,
-			AllowNetworkTools: false,
 			LogToolCalls:      true,
+			SandboxMode:       SandboxWorkspaceWrite,
+			Delegation:        DelegationPolicy{MaxParallelWorkers: 4, MaxDepth: 2},
 		},
 		Tools: []ToolSpec{
-			{ID: "glob", Name: "Glob", Description: "Find files by name pattern.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
-			{ID: "grep", Name: "Grep", Description: "Search file contents with regex.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
-			{ID: "file-read", Name: "File Reader", Description: "Reads file contents in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}},
-			{ID: "file-write", Name: "File Writer", Description: "Creates and edits files in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}},
-			{ID: "shell-exec", Name: "Shell Executor", Description: "Runs shell commands in the project directory.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}},
-			{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
-			{ID: "ls", Name: "List Directory", Description: "List directory contents.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read", "search"}},
-			{ID: "todo-write", Name: "Todo Write", Description: "Write a list of todos to track task progress.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}},
-			{ID: "bash", Name: "Bash", Description: "Execute a bash command and return output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}},
-			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}},
-			{ID: "agent", Name: "Agent", Description: "Spawn a sub-agent to handle a subtask.", Kind: "builtin", Enabled: true, TimeoutSec: 300, RequiresApproval: false, PermittedActions: []string{"read", "write", "execute", "git", "search", "plan", "ask"}},
+			{ID: "glob", Name: "Glob", Description: "Find files by name pattern.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+			{ID: "grep", Name: "Grep", Description: "Search file contents with regex.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+			{ID: "file-read", Name: "File Reader", Description: "Reads file contents in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
+			{ID: "file-write", Name: "File Writer", Description: "Creates and edits files in the workspace.", Kind: "builtin", Enabled: true, TimeoutSec: 60, RequiresApproval: true, PermittedActions: []string{"write"}, RiskLevel: "high"},
+			{ID: "shell-exec", Name: "Shell Executor", Description: "Runs shell commands in the project directory.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
+			{ID: "repo-search", Name: "Repository Search", Description: "Searches file names and content inside the project.", Kind: "builtin", Enabled: true, TimeoutSec: 30, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+			{ID: "ls", Name: "List Directory", Description: "List directory contents.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read", "search"}, RiskLevel: "low"},
+			{ID: "todo-write", Name: "Todo Write", Description: "Write a list of todos to track task progress.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"write"}, RiskLevel: "medium"},
+			{ID: "bash", Name: "Bash", Description: "Execute a bash command and return output.", Kind: "builtin", Enabled: true, TimeoutSec: 120, RequiresApproval: true, PermittedActions: []string{"execute", "git"}, RiskLevel: "high"},
+			{ID: "comment", Name: "Comment", Description: "Emit a progress comment or note.", Kind: "builtin", Enabled: true, TimeoutSec: 5, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
+			{ID: "agent", Name: "Agent", Description: "Spawn a sub-agent to handle a subtask.", Kind: "builtin", Enabled: true, TimeoutSec: 300, RequiresApproval: false, PermittedActions: []string{"read", "write", "execute", "git", "search", "plan", "ask"}, RiskLevel: "medium", PrimaryOnly: true},
 		},
 		Agents: []AgentSpec{
-			{ID: "plan", Name: "Plan", Description: "Planning orchestrator", Skill: "planning", Mode: "orchestrator", Color: "blue", AllowedTools: []string{"agent", "glob", "grep", "file-read", "todo-write", "comment"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionAskFirst, MaxSteps: 30, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
-			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "todo-write", "comment"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionRestricted, MaxSteps: 32, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
-			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "comment"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, MaxSteps: 16, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
-			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, MaxSteps: 24, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
-			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment", "todo-write"}, PermittedActions: []string{"read", "search", "write", "execute", "git"}, Permission: PermissionRestricted, MaxSteps: 24, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/coding.md"},
-			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, MaxSteps: 20, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
-			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, MaxSteps: 20, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
-			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, MaxSteps: 20, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
-			{ID: "docs", Name: "Docs", Description: "Read-only documentation worker", Skill: "documentation", Mode: "worker", Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "comment"}, PermittedActions: []string{"read", "search", "ask"}, Permission: PermissionAskFirst, MaxSteps: 16, Enabled: true, Handoffs: []string{"explore"}, PromptFile: "agents/docs-writer.md"},
+			{ID: "plan", Name: "Plan", Description: "Planning orchestrator", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "glob", "grep", "file-read", "todo-write", "comment"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionAskFirst, MaxSteps: 30, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
+			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "todo-write", "comment"}, PermittedActions: []string{"read", "search", "plan", "write"}, Permission: PermissionRestricted, MaxSteps: 32, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
+			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "comment"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, MaxSteps: 16, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
+			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, MaxSteps: 24, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
+			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "comment", "todo-write"}, PermittedActions: []string{"read", "search", "write", "execute", "git"}, Permission: PermissionRestricted, MaxSteps: 24, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/coding.md"},
+			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, MaxSteps: 20, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
+			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, MaxSteps: 20, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
+			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Role: AgentRoleSubagent, Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, MaxSteps: 20, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
+			{ID: "docs", Name: "Docs", Description: "Read-only documentation worker", Skill: "documentation", Mode: "worker", Role: AgentRoleSubagent, Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "comment"}, PermittedActions: []string{"read", "search", "ask"}, Permission: PermissionAskFirst, MaxSteps: 16, Enabled: true, Handoffs: []string{"explore"}, PromptFile: "agents/docs-writer.md"},
 		},
 	}
+	_ = m.normalizeFromVersion()
+	return m
 }
 
 func AgentManifestPath(cwd string) string {
@@ -115,8 +166,13 @@ func AgentManifestPath(cwd string) string {
 
 func LoadAgentManifestForProject(cwd string) (AgentManifest, error) {
 	p := AgentManifestPath(cwd)
-	m, err := LoadAgentManifest(p)
+	m, originalVersion, changed, err := loadAgentManifestWithMigrationInfo(p)
 	if err == nil {
+		if changed || originalVersion == 1 {
+			if werr := backupAndWriteManifest(p, m); werr != nil {
+				return AgentManifest{}, werr
+			}
+		}
 		return m, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
@@ -126,28 +182,140 @@ func LoadAgentManifestForProject(cwd string) (AgentManifest, error) {
 }
 
 func LoadAgentManifest(path string) (AgentManifest, error) {
-	f, err := os.Open(path)
+	m, _, _, err := loadAgentManifestWithMigrationInfo(path)
 	if err != nil {
 		return AgentManifest{}, err
 	}
+	return m, nil
+}
+
+func loadAgentManifestWithMigrationInfo(path string) (AgentManifest, int, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return AgentManifest{}, 0, false, err
+	}
 	defer f.Close()
-	return DecodeAgentManifest(f)
+	return DecodeAgentManifestWithMigrationInfo(f)
 }
 
 func DecodeAgentManifest(r io.Reader) (AgentManifest, error) {
+	m, _, _, err := DecodeAgentManifestWithMigrationInfo(r)
+	return m, err
+}
+
+func DecodeAgentManifestWithMigrationInfo(r io.Reader) (AgentManifest, int, bool, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return AgentManifest{}, 0, false, fmt.Errorf("read agent manifest: %w", err)
+	}
+	var versionOnly struct {
+		Version int `toml:"version"`
+	}
+	if err := toml.Unmarshal(data, &versionOnly); err != nil {
+		return AgentManifest{}, 0, false, fmt.Errorf("decode manifest version: %w", err)
+	}
+	if versionOnly.Version <= 0 {
+		versionOnly.Version = 1
+	}
+
 	var manifest AgentManifest
-	decoder := toml.NewDecoder(r)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
-		return AgentManifest{}, fmt.Errorf("decode agent manifest: %w", err)
+	dec := toml.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&manifest); err != nil {
+		return AgentManifest{}, versionOnly.Version, false, fmt.Errorf("decode agent manifest: %w", err)
 	}
+	originalVersion := manifest.Version
+	if originalVersion == 0 {
+		originalVersion = versionOnly.Version
+	}
+	changed := manifest.normalizeFromVersion()
 	if err := manifest.Validate(); err != nil {
-		return AgentManifest{}, err
+		return AgentManifest{}, originalVersion, changed, err
 	}
-	return manifest, nil
+	return manifest, originalVersion, changed, nil
+}
+
+func backupAndWriteManifest(path string, m AgentManifest) error {
+	if _, err := os.Stat(path); err == nil {
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return fmt.Errorf("read manifest before migration backup: %w", rerr)
+		}
+		backup := fmt.Sprintf("%s.migrated-%s.bak", path, time.Now().UTC().Format("20060102-150405"))
+		if werr := os.WriteFile(backup, data, 0o644); werr != nil {
+			return fmt.Errorf("write migration backup: %w", werr)
+		}
+	}
+	raw, err := toml.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("encode migrated manifest: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return fmt.Errorf("write migrated manifest: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace migrated manifest: %w", err)
+	}
+	return nil
+}
+
+func (m *AgentManifest) normalizeFromVersion() bool {
+	changed := false
+	if m.Version <= 0 {
+		m.Version = 1
+	}
+	if m.Runtime.DefaultTimeoutSec <= 0 {
+		m.Runtime.DefaultTimeoutSec = 120
+		changed = true
+	}
+	if m.Runtime.SandboxMode == "" {
+		m.Runtime.SandboxMode = SandboxWorkspaceWrite
+		changed = true
+	}
+	if m.Runtime.Delegation.MaxParallelWorkers <= 0 {
+		m.Runtime.Delegation.MaxParallelWorkers = 4
+		changed = true
+	}
+	if m.Runtime.Delegation.MaxDepth <= 0 {
+		m.Runtime.Delegation.MaxDepth = 2
+		changed = true
+	}
+	for i := range m.Tools {
+		if m.Tools[i].RiskLevel == "" {
+			m.Tools[i].RiskLevel = "medium"
+			changed = true
+		}
+		if len(m.Tools[i].Aliases) == 0 {
+			switch m.Tools[i].ID {
+			case "bash":
+				m.Tools[i].Aliases = []string{"bash-output"}
+				changed = true
+			}
+		}
+	}
+	for i := range m.Agents {
+		if m.Agents[i].Role == "" {
+			switch strings.ToLower(strings.TrimSpace(m.Agents[i].Mode)) {
+			case "orchestrator":
+				m.Agents[i].Role = AgentRoleOrchestrator
+			case "worker":
+				m.Agents[i].Role = AgentRoleWorker
+			default:
+				m.Agents[i].Role = AgentRoleWorker
+			}
+			changed = true
+		}
+	}
+	if m.Version < 2 {
+		m.Version = 2
+		changed = true
+	}
+	return changed
 }
 
 func (m AgentManifest) Validate() error {
+	_ = m.normalizeFromVersion()
 	if m.Version <= 0 {
 		return fmt.Errorf("agent manifest: version must be > 0")
 	}
@@ -163,9 +331,20 @@ func (m AgentManifest) Validate() error {
 	if m.Runtime.DefaultTimeoutSec <= 0 {
 		return fmt.Errorf("agent manifest: runtime.default_timeout_sec must be > 0")
 	}
-
 	if err := validatePermissionLevel(m.Runtime.DefaultPermission); err != nil {
 		return fmt.Errorf("agent manifest: invalid runtime.default_permission: %w", err)
+	}
+	if err := validateSandboxMode(m.Runtime.SandboxMode); err != nil {
+		return fmt.Errorf("agent manifest: invalid runtime.sandbox_mode: %w", err)
+	}
+	if m.Runtime.Delegation.MaxParallelWorkers <= 0 {
+		return fmt.Errorf("agent manifest: runtime.delegation.max_parallel_workers must be > 0")
+	}
+	if m.Runtime.Delegation.MaxDepth <= 0 {
+		return fmt.Errorf("agent manifest: runtime.delegation.max_depth must be > 0")
+	}
+	if err := validatePermissionRules(m.Runtime.PermissionRules, "runtime.permission_rules"); err != nil {
+		return err
 	}
 
 	toolIDs := map[string]struct{}{}
@@ -178,7 +357,6 @@ func (m AgentManifest) Validate() error {
 			return fmt.Errorf("agent manifest: duplicate tool id %q", id)
 		}
 		toolIDs[id] = struct{}{}
-
 		if strings.TrimSpace(tool.Name) == "" {
 			return fmt.Errorf("agent manifest: tool %q name is required", id)
 		}
@@ -196,11 +374,22 @@ func (m AgentManifest) Validate() error {
 		if (tool.Kind == "script" || tool.Kind == "http" || tool.Kind == "mcp") && strings.TrimSpace(tool.EntryPoint) == "" {
 			return fmt.Errorf("agent manifest: tool %q requires entry_point for kind %q", id, tool.Kind)
 		}
+		for _, alias := range tool.Aliases {
+			if strings.TrimSpace(alias) == "" {
+				return fmt.Errorf("agent manifest: tool %q aliases cannot be blank", id)
+			}
+		}
+		if err := validateRiskLevel(tool.RiskLevel); err != nil {
+			return fmt.Errorf("agent manifest: invalid risk_level for tool %q: %w", id, err)
+		}
+		if err := validatePermissionRules(tool.PermissionRules, fmt.Sprintf("tool %q permission_rules", id)); err != nil {
+			return err
+		}
 	}
 
 	agentIDs := map[string]struct{}{}
-	for _, agent := range m.Agents {
-		id := strings.TrimSpace(agent.ID)
+	for _, ag := range m.Agents {
+		id := strings.TrimSpace(ag.ID)
 		if id == "" {
 			return fmt.Errorf("agent manifest: agent id is required")
 		}
@@ -208,46 +397,48 @@ func (m AgentManifest) Validate() error {
 			return fmt.Errorf("agent manifest: duplicate agent id %q", id)
 		}
 		agentIDs[id] = struct{}{}
-
-		if strings.TrimSpace(agent.Name) == "" {
+		if strings.TrimSpace(ag.Name) == "" {
 			return fmt.Errorf("agent manifest: agent %q name is required", id)
 		}
-		if strings.TrimSpace(agent.Mode) == "" {
+		if strings.TrimSpace(ag.Mode) == "" {
 			return fmt.Errorf("agent manifest: agent %q mode is required", id)
 		}
-		if agent.MaxSteps <= 0 {
+		if ag.MaxSteps <= 0 {
 			return fmt.Errorf("agent manifest: agent %q max_steps must be > 0", id)
 		}
-		if len(agent.AllowedTools) == 0 {
+		if len(ag.AllowedTools) == 0 {
 			return fmt.Errorf("agent manifest: agent %q must declare allowed_tools", id)
 		}
-		if err := validatePermissionLevel(agent.Permission); err != nil {
+		if err := validatePermissionLevel(ag.Permission); err != nil {
 			return fmt.Errorf("agent manifest: invalid permission for agent %q: %w", id, err)
 		}
-		if strings.TrimSpace(agent.Color) != "" {
-			if err := validateAgentColor(agent.Color); err != nil {
+		if err := validateAgentRole(ag.Role); err != nil {
+			return fmt.Errorf("agent manifest: invalid role for agent %q: %w", id, err)
+		}
+		if strings.TrimSpace(ag.Color) != "" {
+			if err := validateAgentColor(ag.Color); err != nil {
 				return fmt.Errorf("agent manifest: invalid color for agent %q: %w", id, err)
 			}
 		}
-		for _, toolID := range agent.AllowedTools {
+		for _, toolID := range ag.AllowedTools {
 			if _, exists := toolIDs[toolID]; !exists {
 				return fmt.Errorf("agent manifest: agent %q references unknown tool %q", id, toolID)
 			}
 		}
+		if err := validatePermissionRules(ag.PermissionRules, fmt.Sprintf("agent %q permission_rules", id)); err != nil {
+			return err
+		}
 	}
-
 	if _, exists := agentIDs[m.DefaultAgent]; !exists {
 		return fmt.Errorf("agent manifest: default_agent %q not found in agents", m.DefaultAgent)
 	}
-
-	for _, agent := range m.Agents {
-		for _, handoff := range agent.Handoffs {
+	for _, ag := range m.Agents {
+		for _, handoff := range ag.Handoffs {
 			if _, exists := agentIDs[handoff]; !exists {
-				return fmt.Errorf("agent manifest: agent %q handoff references unknown agent %q", agent.ID, handoff)
+				return fmt.Errorf("agent manifest: agent %q handoff references unknown agent %q", ag.ID, handoff)
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -258,6 +449,50 @@ func validatePermissionLevel(level PermissionLevel) error {
 	default:
 		return fmt.Errorf("unsupported permission level %q", level)
 	}
+}
+
+func validateSandboxMode(mode SandboxMode) error {
+	switch mode {
+	case SandboxWorkspaceWrite, SandboxReadOnly, SandboxFullAccess:
+		return nil
+	default:
+		return fmt.Errorf("unsupported sandbox mode %q", mode)
+	}
+}
+
+func validateRiskLevel(level string) error {
+	switch strings.TrimSpace(level) {
+	case "", "low", "medium", "high":
+		return nil
+	default:
+		return fmt.Errorf("unsupported risk level %q; must be low, medium, or high", level)
+	}
+}
+
+func validateAgentRole(role AgentRole) error {
+	switch role {
+	case AgentRolePrimary, AgentRoleSubagent, AgentRoleOrchestrator, AgentRoleWorker:
+		return nil
+	default:
+		return fmt.Errorf("unsupported role %q; must be primary, subagent, orchestrator, or worker", role)
+	}
+}
+
+func validatePermissionRules(rules []PermissionRule, field string) error {
+	for i, r := range rules {
+		if strings.TrimSpace(r.Permission) == "" {
+			return fmt.Errorf("agent manifest: %s[%d].permission is required", field, i)
+		}
+		if strings.TrimSpace(r.Pattern) == "" {
+			return fmt.Errorf("agent manifest: %s[%d].pattern is required", field, i)
+		}
+		switch r.Action {
+		case RuleAllow, RuleAsk, RuleDeny:
+		default:
+			return fmt.Errorf("agent manifest: %s[%d].action must be allow, ask, or deny", field, i)
+		}
+	}
+	return nil
 }
 
 var validAgentColors = map[string]struct{}{
@@ -301,12 +536,10 @@ func (m AgentManifest) EnabledToolsForAgent(agentID string) []ToolSpec {
 	if !ok {
 		return nil
 	}
-
 	allowed := map[string]struct{}{}
 	for _, id := range agent.AllowedTools {
 		allowed[id] = struct{}{}
 	}
-
 	out := make([]ToolSpec, 0)
 	for _, t := range m.Tools {
 		if !t.Enabled {
@@ -316,10 +549,26 @@ func (m AgentManifest) EnabledToolsForAgent(agentID string) []ToolSpec {
 			out = append(out, t)
 		}
 	}
-
 	slices.SortFunc(out, func(a, b ToolSpec) int {
 		return strings.Compare(a.ID, b.ID)
 	})
-
 	return out
+}
+
+func (m AgentManifest) ToolByID(id string) (ToolSpec, bool) {
+	for _, t := range m.Tools {
+		if t.ID == id {
+			return t, true
+		}
+		for _, alias := range t.Aliases {
+			if alias == id {
+				return t, true
+			}
+		}
+	}
+	return ToolSpec{}, false
+}
+
+func (a AgentSpec) IsPrimaryRole() bool {
+	return a.Role == AgentRolePrimary || a.Role == AgentRoleOrchestrator
 }

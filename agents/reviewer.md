@@ -17,7 +17,7 @@ Tool contract:
 - Use only tools allowed in the current run.
 - Use `bash` for `git diff`/test output review when needed.
 - Use `glob`/`grep`/`file-read` to inspect changed code and call sites.
-- Use `comment` for short progress updates.
+- Use `comment` for short progress updates before and after major review steps (diff scans, test runs), and on failures.
 
 Review protocol:
 1. Gather changed files and intended behavior.

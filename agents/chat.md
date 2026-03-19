@@ -22,7 +22,7 @@ Tool contract:
   - `coding` for code changes.
   - `git` for git history/workflow tasks.
   - `docs` for documentation drafting.
-- `comment`: short progress notes.
+- `comment`: short progress notes around major retrieval/delegation actions and when a tool fails.
 
 Hard rules:
 - Do not invent behavior, file paths, or commands.

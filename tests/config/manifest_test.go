@@ -134,3 +134,52 @@ enabled = true
 		t.Fatalf("expected unknown tool error, got %v", err)
 	}
 }
+
+func TestDecodeAgentManifest_V1IsAutoNormalizedToV2(t *testing.T) {
+	raw := `
+version = 1
+default_agent = "plan"
+
+[runtime]
+default_permission = "ask-first"
+default_timeout_sec = 60
+allow_network_tools = false
+log_tool_calls = true
+
+[[tools]]
+id = "repo-search"
+name = "Repository Search"
+description = "Searches files"
+kind = "builtin"
+enabled = true
+timeout_sec = 30
+requires_approval = false
+permitted_actions = ["read", "search"]
+
+[[agents]]
+id = "plan"
+name = "Planning"
+description = "Plans work"
+skill = "architecture"
+mode = "orchestrator"
+allowed_tools = ["repo-search"]
+permitted_actions = ["read", "search", "plan"]
+permission = "ask-first"
+max_steps = 10
+handoffs = []
+enabled = true
+`
+	m, original, changed, err := config.DecodeAgentManifestWithMigrationInfo(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if original != 1 {
+		t.Fatalf("expected original version 1, got %d", original)
+	}
+	if !changed {
+		t.Fatal("expected migration change flag for v1 manifest")
+	}
+	if m.Version != 2 {
+		t.Fatalf("expected normalized version 2, got %d", m.Version)
+	}
+}

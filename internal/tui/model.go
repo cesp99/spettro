@@ -3,8 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -62,7 +60,6 @@ var allCommands = []commandDef{
 	{"/approve", "execute pending plan"},
 	{"/permission", "set permission level"},
 	{"/budget", "set token budget per request  usage: /budget <n|0>"},
-	{"/image", "attach image to next message"},
 	{"/init", "analyze codebase and write SPETTRO.md"},
 	{"/compact", "summarize conversation (optionally focused)"},
 	{"/clear", "clear conversation history"},
@@ -145,6 +142,8 @@ type modifiedFileEntry struct {
 	Added     int
 	Deleted   int
 	Untracked bool
+	Staged    bool
+	Unstaged  bool
 }
 
 type sidePanelItem struct {
@@ -241,7 +240,6 @@ type Model struct {
 	favorites map[string]bool
 
 	pendingPlan string
-	pendingImgs []string
 
 	banner     string
 	bannerKind string
@@ -274,6 +272,7 @@ type Model struct {
 	sideCursor     int
 	sideScroll     int
 	modifiedFiles  []modifiedFileEntry
+	gitBranch      string
 	showSidePanel  bool
 	sessionEdits   map[string]struct{}
 	activityFeed   []activityItem
@@ -399,7 +398,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !config.IsTrusted(m.cwd) {
 				m.showTrust = true
 			} else {
-				m.pushSystemMsg("spettro ready — /help for commands, shift+tab to switch mode")
+				msg := "spettro ready — /help for commands, shift+tab to switch mode"
+				m.pushSystemMsg(msg)
 			}
 			m.refreshViewport()
 		}
@@ -444,7 +444,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At:       time.Now(),
 			})
 			m.finishAgentActivity(m.mode, "done", main, thinking)
-			m.recordAssistantActivity(m.mode, main, thinking, false)
 		}
 		m.refreshViewport()
 		if cmd := m.autoCompactIfNeeded(); cmd != nil {
@@ -485,7 +484,6 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				At:      time.Now(),
 			})
 			m.finishAgentActivity(m.mode, "done", msg.plan, "")
-			m.recordAssistantActivity(m.mode, msg.plan, "", true)
 			m.showPlanApproval = true
 			m.planApprovalCursor = 0
 		}
@@ -628,7 +626,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		onSidePanel := sideW > 0 && msg.X >= m.paneWidth()+1
 		if onSidePanel {
 			items := m.sidePanelItems()
-			_, rows := m.sideListGeometry()
+			innerHeight := m.sidePanelInnerHeight()
+			_, gitRows := m.sidePanelGitSummary(sideW)
+			_, _, rows := m.sidePanelWindow(items, innerHeight, gitRows)
 			maxStart := max(0, len(items)-rows)
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
@@ -651,9 +651,19 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				startY, _ := m.sideListGeometry()
 				row := msg.Y - startY
 				if row >= 0 {
-					idx := m.sideScroll + row
-					if idx >= 0 && idx < len(items) {
-						m.sideCursor = idx
+					cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
+					_, rowToItem := m.sidePanelLines(items, sideW, cursor, start, rows)
+					if row >= 0 && row < len(rowToItem) {
+						idx := rowToItem[row]
+						if idx >= 0 && idx < len(items) {
+							m.sideCursor = idx
+						}
+					}
+					if len(rowToItem) == 0 {
+						idx := m.sideScroll + row
+						if idx >= 0 && idx < len(items) {
+							m.sideCursor = idx
+						}
 					}
 				}
 				return m, tea.Batch(cmds...)
@@ -907,6 +917,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(input)
 	cmd := fields[0]
+	m.recordCommandEvent(input)
 
 	switch cmd {
 	case "/help":
@@ -986,21 +997,6 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				plan := m.pendingPlan
 				m.pendingPlan = ""
 				return m.runAgentApproved(spec, plan, nil, nil, true)
-			}
-		}
-	case "/image":
-		if len(fields) < 2 {
-			m.showBanner("usage: /image <path>", "info")
-		} else {
-			p := fields[1]
-			if !filepath.IsAbs(p) {
-				p = filepath.Join(m.cwd, p)
-			}
-			if _, err := os.Stat(p); err != nil {
-				m.showBanner("image not found: "+p, "error")
-			} else {
-				m.pendingImgs = append(m.pendingImgs, p)
-				m.showBanner("image queued for next message", "success")
 			}
 		}
 	case "/init":
@@ -1090,8 +1086,6 @@ const helpText = `commands:
   /connect       connect a provider or local endpoint
   /permission    set permission: yolo | restricted | ask-first
   /approve       approve and execute pending plan (coding mode)
-  /image <path>  queue image for next chat message
-  /images        list queued images
   /index         index project files → .spettro/index.json
   /coauthor      show co-author info for git commits
   /compact [x]   summarize conversation (optional focus instruction)

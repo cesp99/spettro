@@ -36,6 +36,7 @@ func (e LLMExplorer) Explore(ctx context.Context, task string) (RunResult, error
 		MaxSteps:        40,
 		RequireToolCall: true,
 		AllowedTools:    []string{"glob", "grep", "file-read"},
+		LogToolCalls:    true,
 		ProviderManager: e.ProviderManager,
 		ProviderName:    e.ProviderName,
 		ModelName:       e.ModelName,

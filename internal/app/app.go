@@ -23,7 +23,6 @@ type App struct {
 	providers   *provider.Manager
 	manifest    config.AgentManifest
 	pendingPlan string
-	pendingImgs []string
 	ui          *ui.Renderer
 	setup       *setupWizard
 	modelPicker *modelPicker
@@ -76,14 +75,14 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		pm.AddLocalModels(localModels)
 	}
 	manifest, _ := config.LoadAgentManifestForProject(cwd)
-	mode := ModePlanning
-	switch cfg.LastAgentID {
-	case string(ModePlanning):
+	mode := Mode(manifest.DefaultAgent)
+	if mode == "" {
 		mode = ModePlanning
-	case string(ModeCoding):
-		mode = ModeCoding
-	case string(ModeChat):
-		mode = ModeChat
+	}
+	if cfg.LastAgentID != "" {
+		if spec, ok := manifest.AgentByID(cfg.LastAgentID); ok && spec.Enabled {
+			mode = Mode(cfg.LastAgentID)
+		}
 	}
 	app := &App{
 		in:        in,

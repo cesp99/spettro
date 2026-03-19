@@ -33,10 +33,11 @@ type ExploreAgent interface {
 }
 
 type ToolTrace struct {
-	Name   string
-	Status string
-	Args   string
-	Output string
+	AgentID string
+	Name    string
+	Status  string
+	Args    string
+	Output  string
 }
 
 type RunResult struct {
@@ -119,10 +120,23 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("empty task")
 	}
 	systemPrompt := loadPromptOrFallback(a.CWD, a.Spec.PromptFile, a.Spec.Description)
-	requireToolCall := a.Spec.Mode != "ask" && len(a.Spec.AllowedTools) > 0
+	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
+	requireToolCall := a.Spec.Mode != "ask" && len(allowedTools) > 0
 	maxSteps := a.Spec.MaxSteps
 	if maxSteps <= 0 {
 		maxSteps = 8
+	}
+	logToolCalls := true
+	maxWorkers := 4
+	maxDelegationDepth := 2
+	if a.Manifest != nil {
+		logToolCalls = a.Manifest.Runtime.LogToolCalls
+		if a.Manifest.Runtime.Delegation.MaxParallelWorkers > 0 {
+			maxWorkers = a.Manifest.Runtime.Delegation.MaxParallelWorkers
+		}
+		if a.Manifest.Runtime.Delegation.MaxDepth > 0 {
+			maxDelegationDepth = a.Manifest.Runtime.Delegation.MaxDepth
+		}
 	}
 	out, traces, tokens, err := runToolLoop(ctx, toolLoopConfig{
 		SystemPrompt:    systemPrompt,
@@ -131,7 +145,9 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		AgentID:         a.Spec.ID,
 		MaxSteps:        maxSteps,
 		RequireToolCall: requireToolCall,
-		AllowedTools:    a.Spec.AllowedTools,
+		AllowedTools:    allowedTools,
+		ToolPolicies:    policies,
+		LogToolCalls:    logToolCalls,
 		ProviderManager: a.ProviderManager,
 		ProviderName:    a.ProviderName,
 		ModelName:       a.ModelName,
@@ -145,6 +161,8 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		SessionDir:      a.SessionDir,
 		DelegationDepth: a.DelegationDepth,
 		ParentAgentID:   a.ParentAgentID,
+		MaxWorkers:      maxWorkers,
+		MaxDepth:        maxDelegationDepth,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("%s agent: %w", a.Spec.ID, err)

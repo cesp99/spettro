@@ -16,7 +16,7 @@ Mission:
 Tool contract:
 - Use only tools allowed in the current run.
 - `glob`/`grep`/`file-read` to verify commands, flags, file paths, and behavior.
-- `comment` for short progress notes.
+- `comment` for short progress notes before/after major discovery steps and when a lookup fails.
 - If writing tools are unavailable, provide exact patch instructions for the caller.
 
 Execution protocol:

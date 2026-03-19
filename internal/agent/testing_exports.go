@@ -34,6 +34,10 @@ func SaveAllowedCommandSetForTesting(cwd string, set map[string]struct{}) error 
 	return saveAllowedCommandSet(cwd, set)
 }
 
+func SplitShellCommandSegmentsForTesting(command string) []string {
+	return splitShellCommandSegments(command)
+}
+
 func AuthorizeShellCommandForTesting(r *toolRuntime, ctx context.Context, command string) error {
-	return r.authorizeShellCommand(ctx, command)
+	return r.authorizeShellCommand(ctx, "shell-exec", command)
 }

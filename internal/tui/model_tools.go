@@ -307,11 +307,19 @@ func summarizeToolArgs(name, argsJSON string) string {
 		}
 	case "agent":
 		var args struct {
+			Agent  string `json:"agent"`
 			Target string `json:"target"`
+			ID     string `json:"id"`
 			Task   string `json:"task"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil {
-			label := args.Target
+			label := args.Agent
+			if label == "" {
+				label = args.Target
+			}
+			if label == "" {
+				label = args.ID
+			}
 			if label == "" {
 				label = "sub-agent"
 			}
@@ -333,7 +341,41 @@ func sanitizeToolOutput(output string, maxLines int) string {
 	if output == "" {
 		return ""
 	}
+	if pretty, ok := formatSubagentEnvelope(output); ok {
+		return trimToolOutput(pretty, maxLines)
+	}
 	return trimToolOutput(output, maxLines)
+}
+
+func formatSubagentEnvelope(output string) (string, bool) {
+	var payload struct {
+		Agent          string `json:"agent"`
+		Status         string `json:"status"`
+		Summary        string `json:"summary"`
+		ToolTraceCount int    `json:"tool_trace_count"`
+		TokensUsed     int    `json:"tokens_used"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		return "", false
+	}
+	if strings.TrimSpace(payload.Agent) == "" && strings.TrimSpace(payload.Summary) == "" {
+		return "", false
+	}
+	lines := []string{}
+	if payload.Agent != "" {
+		lines = append(lines, fmt.Sprintf("sub-agent: %s", payload.Agent))
+	}
+	if payload.Status != "" {
+		lines = append(lines, fmt.Sprintf("status: %s", payload.Status))
+	}
+	if payload.ToolTraceCount > 0 || payload.TokensUsed > 0 {
+		lines = append(lines, fmt.Sprintf("tools: %d  tokens: %d", payload.ToolTraceCount, payload.TokensUsed))
+	}
+	if strings.TrimSpace(payload.Summary) != "" {
+		lines = append(lines, "summary:")
+		lines = append(lines, payload.Summary)
+	}
+	return strings.Join(lines, "\n"), true
 }
 
 func stripToolCallLines(content string) string {
@@ -548,13 +590,7 @@ func truncateLabel(s string, max int) string {
 }
 
 func nextAgent(manifest config.AgentManifest, current string) string {
-	order := []string{"plan", "coding", "ask"}
-	var primary []string
-	for _, id := range order {
-		if spec, ok := manifest.AgentByID(id); ok && spec.Enabled {
-			primary = append(primary, id)
-		}
-	}
+	primary := primaryAgentIDs(manifest)
 	if len(primary) == 0 {
 		primary = []string{"plan", "coding", "ask"}
 	}
@@ -564,6 +600,29 @@ func nextAgent(manifest config.AgentManifest, current string) string {
 		}
 	}
 	return primary[0]
+}
+
+func primaryAgentIDs(manifest config.AgentManifest) []string {
+	preferred := []string{"plan", "coding", "ask"}
+	seen := map[string]struct{}{}
+	ids := make([]string, 0, len(manifest.Agents))
+	for _, id := range preferred {
+		if spec, ok := manifest.AgentByID(id); ok && spec.Enabled && spec.IsPrimaryRole() {
+			ids = append(ids, id)
+			seen[id] = struct{}{}
+		}
+	}
+	for _, spec := range manifest.Agents {
+		if !spec.Enabled || !spec.IsPrimaryRole() {
+			continue
+		}
+		if _, ok := seen[spec.ID]; ok {
+			continue
+		}
+		ids = append(ids, spec.ID)
+		seen[spec.ID] = struct{}{}
+	}
+	return ids
 }
 
 func nextMode(mode string) string {

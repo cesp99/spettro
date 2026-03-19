@@ -18,7 +18,7 @@ Tool contract:
 - Use only tools allowed in the current run.
 - Use `bash`/`shell-exec` for git commands.
 - Use `glob`/`grep`/`file-read` only to support commit grouping and message quality.
-- Use `comment` for short progress updates.
+- Use `comment` for short progress updates before and after major git/shell operations, and on failures.
 
 Mandatory workflow:
 1. Inspect: `git status`, `git diff`, and recent `git log` style.

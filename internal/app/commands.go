@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -17,7 +16,7 @@ func (a *App) handleCommand(line string) error {
 	fields := strings.Fields(line)
 	switch fields[0] {
 	case "/help":
-		a.printLine(a.ui.Panel(string(a.mode), "Commands", "/setup, /next (Shift+Tab), /mode, /models [provider:model] [api_key], /permission <yolo|restricted|ask-first>, /image <path>, /images, /index, /approve, /exit\nUse /models with no args for interactive picker."))
+		a.printLine(a.ui.Panel(string(a.mode), "Commands", "/setup, /next (Shift+Tab), /mode, /models [provider:model] [api_key], /permission <yolo|restricted|ask-first>, /index, /approve, /exit\nUse /models with no args for interactive picker."))
 	case "/exit", "/quit":
 		return io.EOF
 	case "/setup":
@@ -85,7 +84,10 @@ func (a *App) handleCommand(line string) error {
 			ProviderName:    func() string { return a.cfg.ActiveProvider },
 			ModelName:       func() string { return a.cfg.ActiveModel },
 			CWD:             a.cwd,
+			ToolCallback:    a.printToolProgress,
 			ShellApproval:   a.promptShellApproval,
+			Manifest:        &a.manifest,
+			SessionDir:      a.cliSessionDir(),
 		}
 		ag.Spec.Permission = a.cfg.Permission
 		result, err := ag.Run(context.Background(), a.pendingPlan)
@@ -94,25 +96,6 @@ func (a *App) handleCommand(line string) error {
 		}
 		a.printLine(a.ui.Panel(string(a.mode), "Assistant", result.Content))
 		a.pendingPlan = ""
-	case "/image":
-		if len(fields) < 2 {
-			return fmt.Errorf("usage: /image <path>")
-		}
-		target := fields[1]
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(a.cwd, target)
-		}
-		if _, err := os.Stat(target); err != nil {
-			return fmt.Errorf("image path error: %w", err)
-		}
-		a.pendingImgs = append(a.pendingImgs, target)
-		a.printLine("queued image for next chat request")
-	case "/images":
-		if len(a.pendingImgs) == 0 {
-			a.printLine(a.ui.Info("no queued images"))
-			return nil
-		}
-		a.printLine(a.ui.Panel(string(a.mode), "Queued Images", strings.Join(a.pendingImgs, "\n")))
 	case "/index":
 		snapshot, err := indexer.Build(a.cwd)
 		if err != nil {

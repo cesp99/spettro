@@ -20,6 +20,32 @@ func TestParseToolCall_Valid(t *testing.T) {
 	}
 }
 
+func TestParseToolCall_OpenAIPattern(t *testing.T) {
+	call, ok, err := agent.ParseToolCallForTesting(`TOOL_CALL {"name":"file-read","arguments":{"path":"go.mod"}}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if call.Tool != "file-read" {
+		t.Errorf("expected tool=file-read, got %q", call.Tool)
+	}
+}
+
+func TestParseToolCall_FunctionWrapperWithStringArgs(t *testing.T) {
+	call, ok, err := agent.ParseToolCallForTesting(`TOOL_CALL {"function":{"name":"grep","arguments":"{\"pattern\":\"ParseToolCall\"}"}}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if call.Tool != "grep" {
+		t.Errorf("expected tool=grep, got %q", call.Tool)
+	}
+}
+
 func TestParseToolCall_NotACall(t *testing.T) {
 	_, ok, err := agent.ParseToolCallForTesting("FINAL\nhello")
 	if err != nil || ok {
@@ -34,6 +60,26 @@ func TestParseToolCall_BadJSON(t *testing.T) {
 	}
 	if !ok {
 		t.Error("expected ok=true (starts with TOOL_CALL but has bad JSON)")
+	}
+}
+
+func TestParseToolCall_UnknownFieldRejected(t *testing.T) {
+	_, ok, err := agent.ParseToolCallForTesting(`TOOL_CALL {"tool":"file-read","args":{"path":"go.mod"},"bogus":true}`)
+	if err == nil {
+		t.Error("expected error for unknown field")
+	}
+	if !ok {
+		t.Error("expected ok=true")
+	}
+}
+
+func TestParseToolCall_AmbiguousArgsRejected(t *testing.T) {
+	_, ok, err := agent.ParseToolCallForTesting(`TOOL_CALL {"name":"file-read","args":{"path":"go.mod"},"arguments":{"path":"README.md"}}`)
+	if err == nil {
+		t.Error("expected ambiguous arguments error")
+	}
+	if !ok {
+		t.Error("expected ok=true")
 	}
 }
 

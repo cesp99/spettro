@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -65,7 +66,7 @@ func (m Model) viewHeader() string {
 	mc := m.currentColor()
 	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro")
 
-	primaryIDs := []string{"plan", "coding", "ask"}
+	primaryIDs := primaryAgentIDs(m.manifest)
 	var tabs []string
 	for _, id := range primaryIDs {
 		ag, ok := m.manifest.AgentByID(id)
@@ -486,9 +487,12 @@ func (m Model) paneWidth() int {
 }
 
 func (m Model) sidePanelItems() []sidePanelItem {
-	items := make([]sidePanelItem, 0, len(m.activityFeed)+len(m.modifiedFiles))
+	items := make([]sidePanelItem, 0, len(m.activityFeed))
 	for i := len(m.activityFeed) - 1; i >= 0; i-- {
 		entry := m.activityFeed[i]
+		if entry.Kind != "tool" && entry.Kind != "command" {
+			continue
+		}
 		if strings.TrimSpace(entry.Title) == "" && strings.TrimSpace(entry.Detail) == "" && strings.TrimSpace(entry.Body) == "" {
 			continue
 		}
@@ -502,32 +506,38 @@ func (m Model) sidePanelItems() []sidePanelItem {
 			Status: entry.Status,
 		})
 	}
-	for _, f := range m.modifiedFiles {
-		if strings.TrimSpace(f.Path) == "" {
-			continue
-		}
-		detail := fmt.Sprintf("+%d  -%d", f.Added, f.Deleted)
-		if f.Untracked {
-			detail = "untracked"
-		}
-		items = append(items, sidePanelItem{
-			Kind:   "file",
-			ID:     f.Path,
-			Title:  f.Path,
-			Detail: detail,
-			Body:   detail,
-			Status: "changed",
-		})
-	}
 	return items
 }
 
-func (m Model) sideListGeometry() (startY, rows int) {
-	rows = m.sidePanelInnerHeight() / 2
-	if rows < 4 {
-		rows = 4
+func (m Model) sidePanelGitSummary(width int) (string, int) {
+	if strings.TrimSpace(m.gitBranch) == "" {
+		return "", 0
 	}
-	return 5, rows
+
+	added, deleted := 0, 0
+	for _, f := range m.modifiedFiles {
+		added += f.Added
+		deleted += f.Deleted
+	}
+
+	repo := filepath.Base(m.cwd)
+	branch := truncateLabel(m.gitBranch, max(12, width-20))
+	repo = truncateLabel(repo, max(10, width/2))
+
+	line := strings.Join([]string{
+		lipgloss.NewStyle().Foreground(colorMuted).Render("⎇"),
+		lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(branch),
+		styleMuted.Render(repo),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E")).Render(fmt.Sprintf("+%d", added)),
+		lipgloss.NewStyle().Bold(true).Foreground(colorError).Render(fmt.Sprintf("-%d", deleted)),
+	}, " ")
+	return line, 2
+}
+
+func (m Model) sideListGeometry() (startY, rows int) {
+	_, gitRows := m.sidePanelGitSummary(m.sidePanelWidth())
+	_, _, rows = m.sidePanelWindow(m.sidePanelItems(), m.sidePanelInnerHeight(), gitRows)
+	return 5 + gitRows, rows
 }
 
 func (m Model) sidePanelInnerHeight() int {
@@ -536,6 +546,104 @@ func (m Model) sidePanelInnerHeight() int {
 		h = 12
 	}
 	return h
+}
+
+func (m Model) sidePanelWindow(items []sidePanelItem, innerHeight, gitRows int) (cursor, start, rows int) {
+	if len(items) == 0 {
+		return 0, 0, 4
+	}
+	cursor = m.sideCursor
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(items) {
+		cursor = len(items) - 1
+	}
+	availableRows := innerHeight - 10 - gitRows
+	if availableRows < 6 {
+		availableRows = 6
+	}
+	rows = min(max(4, availableRows/2), max(4, len(items)))
+	start = m.sideScroll
+	maxStart := max(0, len(items)-rows)
+	if start > maxStart {
+		start = maxStart
+	}
+	if cursor < start {
+		start = cursor
+	}
+	if cursor >= start+rows {
+		start = cursor - rows + 1
+	}
+	return cursor, start, rows
+}
+
+func activityAgentLabel(agent string) string {
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		return "agent"
+	}
+	if agent == "tui" {
+		return "session"
+	}
+	return agent
+}
+
+func (m Model) sidePanelLines(items []sidePanelItem, width, cursor, start, rows int) ([]string, []int) {
+	lines := make([]string, 0, rows+4)
+	rowToItem := make([]int, 0, rows+4)
+	rowBudget := max(12, width-6)
+	prevAgent := ""
+	renderedItems := 0
+	for idx := start; idx < len(items) && renderedItems < rows; idx++ {
+		it := items[idx]
+		agent := activityAgentLabel(it.Agent)
+		if agent != prevAgent {
+			header := lipgloss.NewStyle().Foreground(colorMuted).Bold(true).Render("  " + truncateLabel(agent, max(6, rowBudget-2)))
+			lines = append(lines, header)
+			rowToItem = append(rowToItem, -1)
+			prevAgent = agent
+		}
+		prefix := "    "
+		titleStyle := lipgloss.NewStyle().Foreground(colorMuted)
+		if idx == cursor {
+			prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("›   ")
+			titleStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
+		}
+		detailColor := colorDim
+		switch it.Status {
+		case "running":
+			detailColor = m.currentColor()
+		case "error", "failed":
+			detailColor = colorError
+		case "changed":
+			detailColor = lipgloss.Color("#22C55E")
+		default:
+			if it.Kind == "file" {
+				detailColor = lipgloss.Color("#22C55E")
+			}
+			if it.Kind == "command" {
+				detailColor = lipgloss.Color("#60A5FA")
+			}
+		}
+		titleRaw := strings.ReplaceAll(strings.TrimSpace(it.Title), "\n", " ")
+		detailRaw := strings.ReplaceAll(strings.TrimSpace(it.Detail), "\n", " ")
+		labelBudget := max(4, rowBudget-3)
+		label := truncateLabel(titleRaw, labelBudget)
+		row := prefix + "└ " + titleStyle.Render(label)
+		if detailRaw != "" {
+			baseWidth := lipgloss.Width("└ "+label) + 1
+			detailBudget := rowBudget - baseWidth
+			if detailBudget > 0 {
+				detail := lipgloss.NewStyle().Foreground(detailColor).Render(truncateLabel(detailRaw, detailBudget))
+				row += " " + detail
+			}
+		}
+		lines = append(lines, row)
+		rowToItem = append(rowToItem, idx)
+		renderedItems++
+	}
+	return lines, rowToItem
 }
 
 func clampLines(s string, maxLines int) string {
@@ -556,14 +664,18 @@ func clampLines(s string, maxLines int) string {
 
 func (m Model) viewSidePanel(width int) string {
 	innerHeight := m.sidePanelInnerHeight()
+	gitSummary, gitRows := m.sidePanelGitSummary(width)
 	items := m.sidePanelItems()
 	if len(items) == 0 {
-		body := lipgloss.JoinVertical(lipgloss.Left,
+		parts := []string{
 			lipgloss.NewStyle().Bold(true).Render("Activity"),
-			styleMuted.Render("Live tool context and agent output"),
-			"",
-			styleMuted.Render("Observability is on. Tool usage, reasoning, and agent output will appear here."),
-		)
+			styleMuted.Render("Operational tool activity"),
+		}
+		if gitSummary != "" {
+			parts = append(parts, "", gitSummary)
+		}
+		parts = append(parts, "", styleMuted.Render("Observability is on. Commands, edits, and other tool activity will appear here."))
+		body := lipgloss.JoinVertical(lipgloss.Left, parts...)
 		box := lipgloss.NewStyle().
 			Width(width).
 			Height(innerHeight).
@@ -574,56 +686,8 @@ func (m Model) viewSidePanel(width int) string {
 		return box
 	}
 
-	cursor := m.sideCursor
-	if cursor < 0 {
-		cursor = 0
-	}
-	if cursor >= len(items) {
-		cursor = len(items) - 1
-	}
-	availableRows := innerHeight - 10
-	if availableRows < 6 {
-		availableRows = 6
-	}
-	rows := min(max(4, availableRows/2), max(4, len(items)))
-	start := m.sideScroll
-	maxStart := max(0, len(items)-rows)
-	if start > maxStart {
-		start = maxStart
-	}
-	if cursor < start {
-		start = cursor
-	}
-	if cursor >= start+rows {
-		start = cursor - rows + 1
-	}
-
-	var lines []string
-	for idx := start; idx < len(items) && len(lines) < rows; idx++ {
-		it := items[idx]
-		prefix := "  "
-		titleStyle := lipgloss.NewStyle().Foreground(colorMuted)
-		if idx == cursor {
-			prefix = lipgloss.NewStyle().Foreground(m.currentColor()).Bold(true).Render("› ")
-			titleStyle = lipgloss.NewStyle().Foreground(colorText).Bold(true)
-		}
-		detailColor := colorDim
-		switch it.Status {
-		case "running":
-			detailColor = m.currentColor()
-		case "error", "failed":
-			detailColor = colorError
-		case "changed":
-			detailColor = lipgloss.Color("#22C55E")
-		default:
-			if it.Kind == "file" {
-				detailColor = lipgloss.Color("#22C55E")
-			}
-		}
-		detail := lipgloss.NewStyle().Foreground(detailColor).Render(truncateLabel(it.Detail, max(10, width-14)))
-		label := truncateLabel(it.Title, max(8, width-14))
-		lines = append(lines, prefix+titleStyle.Render(label)+" "+detail)
-	}
+	cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
+	lines, _ := m.sidePanelLines(items, width, cursor, start, rows)
 
 	selected := items[cursor]
 	detailsBody := strings.TrimSpace(selected.Detail)
@@ -650,20 +714,21 @@ func (m Model) viewSidePanel(width int) string {
 		details = append(details, styleMuted.Render("ctrl+o expands full context"))
 	}
 	detailsBlock := strings.Join(details, "\n")
-	maxDetailLines := innerHeight - len(lines) - 6
+	maxDetailLines := innerHeight - len(lines) - 6 - gitRows
 	if maxDetailLines < 5 {
 		maxDetailLines = 5
 	}
 	detailsBlock = clampLines(detailsBlock, maxDetailLines)
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
+	contentParts := []string{
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
-		styleMuted.Render("Live tool context and agent output"),
-		"",
-		strings.Join(lines, "\n"),
-		"",
-		detailsBlock,
-	)
+		styleMuted.Render("Operational tool activity"),
+	}
+	if gitSummary != "" {
+		contentParts = append(contentParts, "", gitSummary)
+	}
+	contentParts = append(contentParts, "", strings.Join(lines, "\n"), "", detailsBlock)
+	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 	content = clampLines(content, innerHeight)
 
 	return lipgloss.NewStyle().

@@ -9,6 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"spettro/internal/agent"
+	"spettro/internal/config"
+	"spettro/internal/session"
 	"spettro/internal/storage"
 )
 
@@ -34,6 +36,10 @@ func SanitizeToolOutputForTesting(output string, maxLines int) string {
 
 func ShellApprovalOptionsForTesting() []string {
 	return append([]string(nil), shellApprovalOptions...)
+}
+
+func IsPlanningEyeModeForTesting(mode string) bool {
+	return isPlanningEyeMode(mode)
 }
 
 func NewModelForTesting() Model {
@@ -198,10 +204,45 @@ func (m *Model) AddActivityForTesting(kind, id, agentID, title, detail, body, st
 	})
 }
 
+func (m *Model) SetGitBranchForTesting(branch string) {
+	m.gitBranch = branch
+}
+
+func (m *Model) AddModifiedFileForTesting(path string, added, deleted int, untracked, staged, unstaged bool) {
+	m.modifiedFiles = append(m.modifiedFiles, modifiedFileEntry{
+		Path:      path,
+		Added:     added,
+		Deleted:   deleted,
+		Untracked: untracked,
+		Staged:    staged,
+		Unstaged:  unstaged,
+	})
+}
+
 func (m Model) SidePanelWidthForTesting() int {
 	return m.sidePanelWidth()
 }
 
 func (m Model) ViewSidePanelForTesting(width int) string {
 	return m.viewSidePanel(width)
+}
+
+func (m Model) StatusBarMessageForTesting() string {
+	return m.statusBarMessage()
+}
+
+func PrimaryAgentIDsForTesting(manifest config.AgentManifest) []string {
+	return primaryAgentIDs(manifest)
+}
+
+func (m *Model) SetManifestForTesting(manifest config.AgentManifest) {
+	m.manifest = manifest
+}
+
+func (m *Model) SetModeForTesting(mode string) {
+	m.mode = mode
+}
+
+func (m *Model) RebuildActivitiesFromEventsForTesting(events []session.AgentEvent) {
+	m.rebuildActivitiesFromEvents(events)
 }
