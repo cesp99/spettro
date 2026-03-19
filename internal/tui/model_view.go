@@ -66,7 +66,7 @@ func (m Model) viewHeader() string {
 	mc := m.currentColor()
 	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro")
 
-	primaryIDs := []string{"plan", "coding", "ask"}
+	primaryIDs := primaryAgentIDs(m.manifest)
 	var tabs []string
 	for _, id := range primaryIDs {
 		ag, ok := m.manifest.AgentByID(id)
@@ -490,7 +490,7 @@ func (m Model) sidePanelItems() []sidePanelItem {
 	items := make([]sidePanelItem, 0, len(m.activityFeed))
 	for i := len(m.activityFeed) - 1; i >= 0; i-- {
 		entry := m.activityFeed[i]
-		if entry.Kind != "tool" {
+		if entry.Kind != "tool" && entry.Kind != "command" {
 			continue
 		}
 		if strings.TrimSpace(entry.Title) == "" && strings.TrimSpace(entry.Detail) == "" && strings.TrimSpace(entry.Body) == "" {
@@ -635,6 +635,9 @@ func (m Model) viewSidePanel(width int) string {
 		default:
 			if it.Kind == "file" {
 				detailColor = lipgloss.Color("#22C55E")
+			}
+			if it.Kind == "command" {
+				detailColor = lipgloss.Color("#60A5FA")
 			}
 		}
 		detail := lipgloss.NewStyle().Foreground(detailColor).Render(truncateLabel(it.Detail, max(10, width-14)))

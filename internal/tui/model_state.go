@@ -390,13 +390,17 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		return
 	}
 	var args struct {
+		Agent         string `json:"agent"`
 		Target        string `json:"target"`
 		ID            string `json:"id"`
 		Task          string `json:"task"`
 		ParentAgentID string `json:"parent_agent_id"`
 	}
 	_ = json.Unmarshal([]byte(t.Args), &args)
-	agentID := args.Target
+	agentID := args.Agent
+	if agentID == "" {
+		agentID = args.Target
+	}
 	if agentID == "" {
 		agentID = args.ID
 	}
@@ -426,6 +430,7 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		m.parallelAgents = append(m.parallelAgents, entry)
 		m.ensureSession()
 		_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+			Kind:          "agent",
 			AgentID:       agentID,
 			AgentType:     kind,
 			ParentAgentID: args.ParentAgentID,
@@ -446,13 +451,21 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		status = "failed"
 	}
 	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		Kind:          "agent",
 		AgentID:       agentID,
 		AgentType:     "worker",
 		ParentAgentID: args.ParentAgentID,
 		Task:          task,
 		Status:        status,
-		Summary:       t.Output,
+		Summary:       summarizeAgentToolOutput(t.Output),
 	})
+}
+
+func summarizeAgentToolOutput(output string) string {
+	if pretty, ok := formatSubagentEnvelope(strings.TrimSpace(output)); ok {
+		return truncateLabel(strings.ReplaceAll(pretty, "\n", " "), 200)
+	}
+	return truncateLabel(strings.TrimSpace(output), 200)
 }
 
 func (m *Model) startAgentActivity(agentID, task string) {
@@ -470,6 +483,7 @@ func (m *Model) startAgentActivity(agentID, task string) {
 		At:      time.Now(),
 	})
 	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		Kind:      "agent",
 		AgentID:   agentID,
 		AgentType: "orchestrator",
 		Task:      task,
@@ -500,6 +514,7 @@ func (m *Model) finishAgentActivity(agentID, status, content, thinking string) {
 		At:      time.Now(),
 	})
 	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		Kind:      "agent",
 		AgentID:   agentID,
 		AgentType: "orchestrator",
 		Status:    status,
@@ -560,6 +575,16 @@ func (m *Model) recordToolActivity(t agent.ToolTrace) {
 		Status:  t.Status,
 		At:      time.Now(),
 	})
+	m.ensureSession()
+	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		Kind:       "tool",
+		AgentID:    m.mode,
+		Status:     t.Status,
+		Summary:    truncateLabel(strings.TrimSpace(strings.Join(bodyParts, " ")), 240),
+		ToolName:   t.Name,
+		ToolArgs:   t.Args,
+		ToolOutput: sanitizeToolOutput(t.Output, 24),
+	})
 }
 
 func (m *Model) upsertActivity(item activityItem) {
@@ -583,6 +608,32 @@ func extractCommentMessage(argsJSON, output string) string {
 		return strings.TrimSpace(args.Message)
 	}
 	return strings.TrimSpace(output)
+}
+
+func (m *Model) recordCommandEvent(command string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return
+	}
+	m.ensureSession()
+	m.upsertActivity(activityItem{
+		Key:     fmt.Sprintf("command:%d", time.Now().UnixNano()),
+		Kind:    "command",
+		ID:      command,
+		AgentID: "tui",
+		Title:   command,
+		Detail:  "command",
+		Body:    command,
+		Status:  "done",
+		At:      time.Now(),
+	})
+	_ = session.AppendEvent(m.store.GlobalDir, m.sessionID, session.AgentEvent{
+		Kind:    "command",
+		AgentID: "tui",
+		Task:    command,
+		Status:  "done",
+		Summary: command,
+	})
 }
 
 func (m *Model) autoSave() {
@@ -775,6 +826,82 @@ func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
 	return session.Load(m.store.GlobalDir, sel.ID)
 }
 
+func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
+	m.activityFeed = nil
+	m.parallelAgents = nil
+	for i, ev := range events {
+		at := ev.At
+		if at.IsZero() {
+			at = time.Now()
+		}
+		kind := strings.TrimSpace(ev.Kind)
+		if kind == "" {
+			kind = "agent"
+		}
+		switch kind {
+		case "tool":
+			name := strings.TrimSpace(ev.ToolName)
+			if name == "" {
+				name = "tool"
+			}
+			title := formatToolLabel(name, ev.ToolArgs)
+			if ev.Status == "running" {
+				title = formatRunningLabel(name, ev.ToolArgs)
+			}
+			bodyParts := []string{}
+			if summary := summarizeToolArgs(name, ev.ToolArgs); summary != "" {
+				bodyParts = append(bodyParts, summary)
+			}
+			if out := sanitizeToolOutput(ev.ToolOutput, 24); out != "" {
+				bodyParts = append(bodyParts, out)
+			}
+			m.upsertActivity(activityItem{
+				Key:     fmt.Sprintf("resume:tool:%d:%s", i, name),
+				Kind:    "tool",
+				ID:      name,
+				AgentID: ev.AgentID,
+				Title:   title,
+				Detail:  summarizeToolArgs(name, ev.ToolArgs),
+				Body:    strings.Join(bodyParts, "\n\n"),
+				Status:  ev.Status,
+				At:      at,
+			})
+		case "command":
+			command := strings.TrimSpace(ev.Task)
+			if command == "" {
+				command = ev.Summary
+			}
+			m.upsertActivity(activityItem{
+				Key:     fmt.Sprintf("resume:command:%d", i),
+				Kind:    "command",
+				ID:      command,
+				AgentID: ev.AgentID,
+				Title:   command,
+				Detail:  "command",
+				Body:    command,
+				Status:  ev.Status,
+				At:      at,
+			})
+		default:
+			title := "agent event"
+			if strings.TrimSpace(ev.AgentID) != "" {
+				title = fmt.Sprintf("%s session", ev.AgentID)
+			}
+			m.upsertActivity(activityItem{
+				Key:     fmt.Sprintf("resume:agent:%d:%s", i, ev.AgentID),
+				Kind:    "agent",
+				ID:      ev.AgentID,
+				AgentID: ev.AgentID,
+				Title:   title,
+				Detail:  truncateLabel(strings.TrimSpace(ev.Task), 120),
+				Body:    strings.TrimSpace(ev.Summary),
+				Status:  ev.Status,
+				At:      at,
+			})
+		}
+	}
+}
+
 func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
@@ -799,6 +926,7 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sessionID = state.Metadata.ID
 			m.todos = state.Todos
 			m.parallelAgents = nil
+			m.activityFeed = nil
 			m.messages = make([]ChatMessage, 0, len(state.Messages))
 			for _, cm := range state.Messages {
 				m.messages = append(m.messages, ChatMessage{
@@ -809,6 +937,7 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					At:       cm.At,
 				})
 			}
+			m.rebuildActivitiesFromEvents(state.Events)
 			m.showResume = false
 			m.refreshViewport()
 			m.showBanner(fmt.Sprintf("resumed conversation from %s", state.Metadata.StartedAt.Format("2006-01-02 15:04")), "success")

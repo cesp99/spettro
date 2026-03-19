@@ -34,12 +34,16 @@ type Todo struct {
 
 type AgentEvent struct {
 	At            time.Time `json:"at"`
+	Kind          string    `json:"kind,omitempty"` // agent | tool | command
 	AgentID       string    `json:"agent_id"`
 	AgentType     string    `json:"agent_type,omitempty"`
 	ParentAgentID string    `json:"parent_agent_id,omitempty"`
 	Task          string    `json:"task,omitempty"`
 	Status        string    `json:"status"`
 	Summary       string    `json:"summary,omitempty"`
+	ToolName      string    `json:"tool_name,omitempty"`
+	ToolArgs      string    `json:"tool_args,omitempty"`
+	ToolOutput    string    `json:"tool_output,omitempty"`
 }
 
 type Metadata struct {

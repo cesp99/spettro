@@ -9,6 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"spettro/internal/agent"
+	"spettro/internal/config"
+	"spettro/internal/session"
 	"spettro/internal/storage"
 )
 
@@ -223,4 +225,24 @@ func (m Model) SidePanelWidthForTesting() int {
 
 func (m Model) ViewSidePanelForTesting(width int) string {
 	return m.viewSidePanel(width)
+}
+
+func (m Model) StatusBarMessageForTesting() string {
+	return m.statusBarMessage()
+}
+
+func PrimaryAgentIDsForTesting(manifest config.AgentManifest) []string {
+	return primaryAgentIDs(manifest)
+}
+
+func (m *Model) SetManifestForTesting(manifest config.AgentManifest) {
+	m.manifest = manifest
+}
+
+func (m *Model) SetModeForTesting(mode string) {
+	m.mode = mode
+}
+
+func (m *Model) RebuildActivitiesFromEventsForTesting(events []session.AgentEvent) {
+	m.rebuildActivitiesFromEvents(events)
 }

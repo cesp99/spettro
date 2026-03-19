@@ -1,4 +1,4 @@
-version = 1
+version = 2
 default_agent = "plan"
 
 [metadata]
@@ -8,8 +8,12 @@ description = "Lean orchestrator/worker setup for Spettro."
 [runtime]
 default_permission = "ask-first"
 default_timeout_sec = 120
-allow_network_tools = false
 log_tool_calls = true
+sandbox_mode = "workspace-write"
+
+[runtime.delegation]
+max_parallel_workers = 4
+max_depth = 2
 
 [[tools]]
 id = "glob"
@@ -20,6 +24,9 @@ enabled = true
 timeout_sec = 30
 requires_approval = false
 permitted_actions = ["read", "search"]
+aliases = []
+risk_level = "low"
+primary_only = false
 
 [[tools]]
 id = "grep"
@@ -30,6 +37,9 @@ enabled = true
 timeout_sec = 30
 requires_approval = false
 permitted_actions = ["read", "search"]
+aliases = []
+risk_level = "low"
+primary_only = false
 
 [[tools]]
 id = "repo-search"
@@ -40,6 +50,9 @@ enabled = true
 timeout_sec = 30
 requires_approval = false
 permitted_actions = ["read", "search"]
+aliases = []
+risk_level = "low"
+primary_only = false
 
 [[tools]]
 id = "file-read"
@@ -50,6 +63,9 @@ enabled = true
 timeout_sec = 30
 requires_approval = false
 permitted_actions = ["read"]
+aliases = []
+risk_level = "low"
+primary_only = false
 
 [[tools]]
 id = "file-write"
@@ -60,6 +76,9 @@ enabled = true
 timeout_sec = 60
 requires_approval = true
 permitted_actions = ["write"]
+aliases = []
+risk_level = "high"
+primary_only = false
 
 [[tools]]
 id = "shell-exec"
@@ -70,6 +89,9 @@ enabled = true
 timeout_sec = 120
 requires_approval = true
 permitted_actions = ["execute", "git"]
+aliases = []
+risk_level = "high"
+primary_only = false
 
 [[tools]]
 id = "ls"
@@ -80,6 +102,9 @@ enabled = true
 timeout_sec = 10
 requires_approval = false
 permitted_actions = ["read", "search"]
+aliases = []
+risk_level = "low"
+primary_only = false
 
 [[tools]]
 id = "todo-write"
@@ -90,6 +115,9 @@ enabled = true
 timeout_sec = 10
 requires_approval = false
 permitted_actions = ["write"]
+aliases = []
+risk_level = "medium"
+primary_only = false
 
 [[tools]]
 id = "bash"
@@ -100,6 +128,9 @@ enabled = true
 timeout_sec = 120
 requires_approval = true
 permitted_actions = ["execute", "git"]
+aliases = ["bash-output"]
+risk_level = "high"
+primary_only = false
 
 [[tools]]
 id = "comment"
@@ -110,6 +141,9 @@ enabled = true
 timeout_sec = 5
 requires_approval = false
 permitted_actions = ["read"]
+aliases = []
+risk_level = "low"
+primary_only = false
 
 [[tools]]
 id = "agent"
@@ -120,6 +154,9 @@ enabled = true
 timeout_sec = 300
 requires_approval = false
 permitted_actions = ["read", "write", "execute", "git", "search", "plan", "ask"]
+aliases = []
+risk_level = "medium"
+primary_only = true
 
 [[agents]]
 id = "plan"
@@ -127,6 +164,7 @@ name = "Plan"
 description = "Planning orchestrator that coordinates workers and todo state."
 skill = "planning"
 mode = "orchestrator"
+role = "orchestrator"
 color = "blue"
 prompt_file = "agents/planning.md"
 allowed_tools = ["agent", "glob", "grep", "file-read", "todo-write", "comment"]
@@ -144,6 +182,7 @@ name = "Coding"
 description = "Coding orchestrator that delegates implementation and verification."
 skill = "implementation"
 mode = "orchestrator"
+role = "primary"
 color = "green"
 prompt_file = "agents/coding.md"
 allowed_tools = ["agent", "glob", "grep", "file-read", "todo-write", "comment"]
@@ -161,6 +200,7 @@ name = "Ask"
 description = "Read-only orchestrator for Q&A and repository questions."
 skill = "conversation"
 mode = "orchestrator"
+role = "primary"
 color = "cyan"
 prompt_file = "agents/chat.md"
 allowed_tools = ["agent", "glob", "grep", "file-read", "comment"]
@@ -178,6 +218,7 @@ name = "Explore"
 description = "Read-only codebase exploration worker."
 skill = "analysis"
 mode = "worker"
+role = "worker"
 color = "blue"
 prompt_file = "agents/explore.md"
 allowed_tools = ["glob", "grep", "file-read", "ls", "comment"]
@@ -195,6 +236,7 @@ name = "Code"
 description = "Implementation worker that can edit files and run checks."
 skill = "implementation"
 mode = "worker"
+role = "worker"
 color = "green"
 prompt_file = "agents/coding.md"
 allowed_tools = ["agent", "glob", "grep", "file-read", "file-write", "shell-exec", "bash", "ls", "todo-write", "comment"]
@@ -212,6 +254,7 @@ name = "Git"
 description = "Git workflow worker."
 skill = "git"
 mode = "worker"
+role = "worker"
 color = "yellow"
 prompt_file = "agents/git.md"
 allowed_tools = ["glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"]
@@ -229,6 +272,7 @@ name = "Test"
 description = "Testing worker for verification commands."
 skill = "testing"
 mode = "worker"
+role = "worker"
 color = "yellow"
 prompt_file = "agents/tester.md"
 allowed_tools = ["glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"]
@@ -246,6 +290,7 @@ name = "Review"
 description = "Review worker for sanity checks and risk analysis."
 skill = "review"
 mode = "worker"
+role = "subagent"
 color = "red"
 prompt_file = "agents/reviewer.md"
 allowed_tools = ["glob", "grep", "file-read", "shell-exec", "bash", "ls", "comment"]
@@ -263,6 +308,7 @@ name = "Docs"
 description = "Read-only docs worker for extracting and summarizing docs."
 skill = "documentation"
 mode = "worker"
+role = "subagent"
 color = "cyan"
 prompt_file = "agents/docs-writer.md"
 allowed_tools = ["glob", "grep", "file-read", "comment"]

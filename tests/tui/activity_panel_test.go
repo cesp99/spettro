@@ -3,9 +3,11 @@ package tui_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
+	"spettro/internal/session"
 	"spettro/internal/tui"
 )
 
@@ -130,5 +132,59 @@ func TestViewSidePanel_HidesTextActivities(t *testing.T) {
 	}
 	if !strings.Contains(view, "$ go test ./...") {
 		t.Fatalf("expected tool activity to remain visible, got: %s", view)
+	}
+}
+
+func TestViewSidePanel_ShowsCommandActivities(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(140, 40)
+	m.SetSidePanelVisibleForTesting(true)
+	m.SetShowToolsForTesting(true)
+	m.AddActivityForTesting(
+		"command",
+		"/permission ask-first",
+		"tui",
+		"/permission ask-first",
+		"command",
+		"/permission ask-first",
+		"done",
+	)
+
+	view := m.ViewSidePanelForTesting(m.SidePanelWidthForTesting())
+	if !strings.Contains(view, "/permission ask-first") {
+		t.Fatalf("expected command activity in side panel, got: %s", view)
+	}
+}
+
+func TestRebuildActivitiesFromEventsForTesting_RestoresToolAndCommand(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(140, 40)
+	m.SetSidePanelVisibleForTesting(true)
+	m.SetShowToolsForTesting(true)
+	events := []session.AgentEvent{
+		{
+			At:      time.Now().Add(-time.Minute),
+			Kind:    "command",
+			AgentID: "tui",
+			Task:    "/models",
+			Status:  "done",
+			Summary: "/models",
+		},
+		{
+			At:         time.Now(),
+			Kind:       "tool",
+			AgentID:    "coding",
+			Status:     "error",
+			ToolName:   "shell-exec",
+			ToolArgs:   `{"command":"go test ./..."}`,
+			ToolOutput: "error: test failed",
+		},
+	}
+	m.RebuildActivitiesFromEventsForTesting(events)
+	view := m.ViewSidePanelForTesting(m.SidePanelWidthForTesting())
+	for _, want := range []string{"/models", "$ go test ./...", "error: test failed"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in resumed activity view, got: %s", want, view)
+		}
 	}
 }

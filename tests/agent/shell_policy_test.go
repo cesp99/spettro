@@ -65,3 +65,16 @@ func TestSplitShellCommandSegments(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitShellCommandSegments_RespectsQuotedAndSubshellOperators(t *testing.T) {
+	parts := agent.SplitShellCommandSegmentsForTesting("echo \"$(a && b)\" && printf \"x|y\"\ncat file")
+	want := []string{`echo "$(a && b)"`, `printf "x|y"`, "cat file"}
+	if len(parts) != len(want) {
+		t.Fatalf("expected %d segments, got %d: %#v", len(want), len(parts), parts)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("segment %d mismatch: want %q, got %q", i, want[i], parts[i])
+		}
+	}
+}
