@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide focuses on daily usage flow. For command details, see [`commands.md`](commands.md).
+This guide focuses on the daily usage flow. For command details, see [`commands.md`](commands.md).
 
 ## 1) Launch Spettro
 
@@ -8,45 +8,49 @@ This guide focuses on daily usage flow. For command details, see [`commands.md`]
 ./bin/spettro
 ```
 
-On first launch in a folder, Spettro asks whether to trust the directory for this session or permanently.
+On first launch in a folder, Spettro shows a trust dialog:
+
+- `Yes, trust this session`
+- `Yes, and remember this folder`
+- `No, exit`
 
 ## 2) Configure model access
 
-Use either:
+Use:
 
-- `/setup` for guided setup (provider → model → API key → permission), or
-- `/connect` then `/models` for manual selection.
+- `/connect` to add provider API key or a local endpoint
+- `/models` to select provider/model
 
 Spettro supports:
 
-- `anthropic` via native Anthropic API.
+- Native Anthropic API.
 - OpenAI-compatible providers through provider-specific base URLs.
-- Local OpenAI-compatible endpoints (for example LM Studio at `localhost:1234`) via `/connect`.
+- Local OpenAI-compatible endpoints (for example LM Studio/Ollama).
 
 Model metadata is loaded from `https://models.dev/api.json` and cached locally.
 
 ## 3) Work with the agent system
 
-Spettro starts with `default_agent` from manifest (planning).
+Spettro starts with `default_agent` from manifest (default: `plan`).
 
-- Use `glob`/`grep`/`file-read` for exploration (minimum required before edits).
+- Explore first with `glob`/`grep`/`file-read`.
 - Spawn sub-agents in parallel via `TOOL_CALL {"tool":"agent","args":{"id":"...","task":"..."}}`.
-- Switch mode/agent with `Shift+Tab` (or `/mode`).
+- Switch mode/agent with `Shift+Tab` or `/mode`.
 
-## 4) Approval flow (important)
+## 4) Approval flow
 
 If permission is `ask-first`:
 
-1. Prompt in planning.
-2. Manifest handoff to coding agent.
-3. Run `/approve` to execute the pending plan.
+1. Generate a plan.
+2. Review and refine if needed.
+3. Run `/approve` to execute through the `coding` agent.
 
 ## 5) Persist and resume conversations
 
-- `/compact` summarizes long threads to save context (or `/compact <focus...>` for focused summaries).
-- `/clear` saves current conversation and clears active messages.
-- `/resume` loads a prior conversation from the project’s conversation store.
+- `/compact` summarizes long threads (optionally focused).
+- `/clear` saves current conversation and clears the active thread.
+- `/resume` loads a prior saved conversation for the same project.
 
 ## 6) Customize
 
-Edit `spettro.agents.toml`, `agents/*.md` (e.g. `agents/docs-writer.md`) and restart.
+Edit `spettro.agents.toml` and `agents/*.md` (for example `agents/docs-writer.md`), then restart Spettro.

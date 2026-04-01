@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
+	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/session"
@@ -47,47 +48,7 @@ type ChatMessage struct {
 	At       time.Time
 }
 
-type commandDef struct {
-	name string
-	desc string
-}
-
-var allCommands = []commandDef{
-	{"/help", "show help"},
-	{"/models", "switch model"},
-	{"/connect", "connect a provider"},
-	{"/mode", "cycle mode"},
-	{"/approve", "execute pending plan"},
-	{"/permission", "set permission level"},
-	{"/budget", "set token budget per request  usage: /budget <n|0>"},
-	{"/init", "analyze codebase and write SPETTRO.md"},
-	{"/compact", "summarize conversation (optionally focused)"},
-	{"/clear", "clear conversation history"},
-	{"/resume", "resume a previous conversation"},
-	{"/exit", "exit spettro"},
-}
-
-var permissionCommands = []commandDef{
-	{"/permission yolo", "no approval required for any action"},
-	{"/permission restricted", "ask once, remember for session"},
-	{"/permission ask-first", "always ask before executing"},
-}
-
 const localConnectProviderID = "__local_endpoint__"
-
-func filterCommands(query string) []commandDef {
-	if query == "" {
-		return append([]commandDef(nil), allCommands...)
-	}
-	q := strings.ToLower(query)
-	var out []commandDef
-	for _, c := range allCommands {
-		if strings.Contains(c.name, q) || strings.Contains(c.desc, q) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
 
 type tickMsg time.Time
 
@@ -267,23 +228,29 @@ type Model struct {
 	showPlanApproval   bool
 	planApprovalCursor int
 
-	parallelAgents []parallelAgentEntry
-	tickCount      int
-	sideCursor     int
-	sideScroll     int
-	modifiedFiles  []modifiedFileEntry
-	gitBranch      string
-	showSidePanel  bool
-	sessionEdits   map[string]struct{}
-	activityFeed   []activityItem
-	currentRunKey  string
+	parallelAgents   []parallelAgentEntry
+	tickCount        int
+	sideCursor       int
+	sideScroll       int
+	sideDetailScroll int
+	modifiedFiles    []modifiedFileEntry
+	gitBranch        string
+	showSidePanel    bool
+	sessionEdits     map[string]struct{}
+	activityFeed     []activityItem
+	currentRunKey    string
+	recentApprovals  []session.AgentEvent
 
-	totalTokensUsed int
-	sessionID       string
+	totalTokensUsed     int
+	autoCompactFailures int
+	compactWarningLevel int
+	autoCompactInFlight bool
+	sessionID           string
 
 	showResume   bool
 	resumeItems  []session.Summary
 	resumeCursor int
+	resumeScroll int
 
 	todos []session.Todo
 
@@ -428,6 +395,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
@@ -469,6 +437,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
@@ -530,13 +499,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.thinking = false
 		m.cancelAgent = nil
+		wasAutoCompact := m.autoCompactInFlight
+		m.autoCompactInFlight = false
 		if msg.err != nil {
+			if wasAutoCompact {
+				m.autoCompactFailures++
+			}
 			m.showBanner("compact error: "+msg.err.Error(), "error")
 		} else {
+			m.autoCompactFailures = 0
 			m.autoSave()
 			m.sessionID = ""
 			m.todos = nil
 			m.totalTokensUsed = 0
+			m.compactWarningLevel = 0
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
 				Content: "── conversation compacted ──\n\n" + msg.summary,
@@ -622,6 +598,22 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ctrlCAt = time.Time{}
 		}
 	case tea.MouseMsg:
+		if m.showResume {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				if m.resumeCursor > 0 {
+					m.resumeCursor--
+				}
+				m.ensureResumeWindow()
+				return m, tea.Batch(cmds...)
+			case tea.MouseButtonWheelDown:
+				if m.resumeCursor < len(m.resumeItems)-1 {
+					m.resumeCursor++
+				}
+				m.ensureResumeWindow()
+				return m, tea.Batch(cmds...)
+			}
+		}
 		sideW := m.sidePanelWidth()
 		onSidePanel := sideW > 0 && msg.X >= m.paneWidth()+1
 		if onSidePanel {
@@ -632,19 +624,30 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			maxStart := max(0, len(items)-rows)
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
+				if m.sideDetailScroll > 0 {
+					m.sideDetailScroll--
+					return m, tea.Batch(cmds...)
+				}
 				if m.sideScroll > 0 {
 					m.sideScroll--
 				}
 				if m.sideCursor > 0 {
 					m.sideCursor--
+					m.sideDetailScroll = 0
 				}
 				return m, tea.Batch(cmds...)
 			case tea.MouseButtonWheelDown:
+				detailMax := m.sidePanelDetailMaxScroll(sideW)
+				if m.sideDetailScroll < detailMax {
+					m.sideDetailScroll++
+					return m, tea.Batch(cmds...)
+				}
 				if m.sideScroll < maxStart {
 					m.sideScroll++
 				}
 				if m.sideCursor < len(items)-1 {
 					m.sideCursor++
+					m.sideDetailScroll = 0
 				}
 				return m, tea.Batch(cmds...)
 			case tea.MouseButtonLeft:
@@ -656,12 +659,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if row >= 0 && row < len(rowToItem) {
 						idx := rowToItem[row]
 						if idx >= 0 && idx < len(items) {
+							if m.sideCursor != idx {
+								m.sideDetailScroll = 0
+							}
 							m.sideCursor = idx
 						}
 					}
 					if len(rowToItem) == 0 {
 						idx := m.sideScroll + row
 						if idx >= 0 && idx < len(items) {
+							if m.sideCursor != idx {
+								m.sideDetailScroll = 0
+							}
 							m.sideCursor = idx
 						}
 					}
@@ -793,6 +802,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+o":
 		m.showTools = !m.showTools
+		m.sideDetailScroll = 0
 		m.refreshViewport()
 		return m, nil
 	case "ctrl+b":
@@ -1002,8 +1012,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/init":
 		return m.runInit()
 	case "/compact":
-		focus := strings.TrimSpace(strings.TrimPrefix(input, cmd))
-		return m.runCompact(focus)
+		return m.handleCompactCommand(input)
 	case "/clear":
 		m.autoSave()
 		m.messages = nil
@@ -1011,6 +1020,18 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.todos = nil
 		m.pushSystemMsg("conversation cleared")
 		m.refreshViewport()
+	case "/tasks":
+		return m.handleTasksCommand(input)
+	case "/mcp":
+		return m.handleMCPCommand(input)
+	case "/skills":
+		return m.handleSkillsCommand()
+	case "/hooks":
+		return m.handleHooksCommand()
+	case "/plan":
+		return m.handlePlanCommand(input)
+	case "/permissions":
+		return m.handlePermissionsCommand(input)
 	case "/resume":
 		items, err := session.List(m.store.GlobalDir, m.cwd)
 		if err != nil || len(items) == 0 {
@@ -1019,6 +1040,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			m.showResume = true
 			m.resumeItems = items
 			m.resumeCursor = 0
+			m.resumeScroll = 0
 		}
 	default:
 		m.showBanner("unknown command: "+cmd, "error")
@@ -1029,6 +1051,22 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
+	window := m.contextWindow()
+	if window == 0 {
+		window = contextWindowDefault(m.cfg.ActiveProvider)
+	}
+	eval := compact.Evaluate(window, compact.Config{
+		AutoEnabled:      m.cfg.AutoCompactEnabled,
+		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+		MaxFailures:      m.cfg.AutoCompactMaxFailures,
+	}, compact.State{
+		TokensUsed:          m.totalTokensUsed,
+		ConsecutiveFailures: m.autoCompactFailures,
+	})
+	if eval.IsBlocking {
+		m.showBanner("context limit reached; run /compact before sending new prompts", "error")
+		return m, nil
+	}
 	mentionedFiles := m.extractMentionedFiles(input)
 	prompt := injectMentionGuidance(input, mentionedFiles)
 	if m.thinking {
@@ -1075,28 +1113,3 @@ func (m Model) maybeRunNextQueuedPrompt() (tea.Model, tea.Cmd) {
 	m.pushSystemMsg(fmt.Sprintf("continuing with queued request: %s", truncateLabel(next.Input, 140)))
 	return m.startPromptRun(next)
 }
-
-const helpText = `commands:
-  /help          this message
-  /exit /quit    quit spettro  (or ctrl+c twice)
-  /mode          cycle to next mode  (or shift+tab)
-  /setup         run setup wizard
-  /models        open model selector (connected providers only)
-  /models p:m    set model directly
-  /connect       connect a provider or local endpoint
-  /permission    set permission: yolo | restricted | ask-first
-  /approve       approve and execute pending plan (coding mode)
-  /index         index project files → .spettro/index.json
-  /coauthor      show co-author info for git commits
-  /compact [x]   summarize conversation (optional focus instruction)
-  /clear         clear conversation history (auto-saves first)
-  /resume        resume a previous saved conversation
-
-keys:
-  shift+tab      cycle mode (plan → coding → ask)
-  f2             cycle to next favorite model
-  shift+f2       cycle to previous favorite model
-
-in model selector:
-  f              toggle favorite (★) for highlighted model
-  c              open connect provider dialog`

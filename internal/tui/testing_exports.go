@@ -10,6 +10,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/provider"
 	"spettro/internal/session"
 	"spettro/internal/storage"
 )
@@ -30,6 +31,10 @@ func FormatRunningLabelForTesting(name, argsJSON string) string {
 	return formatRunningLabel(name, argsJSON)
 }
 
+func FormatApprovalCommandLabelForTesting(command string) string {
+	return formatApprovalCommandLabel(command)
+}
+
 func SanitizeToolOutputForTesting(output string, maxLines int) string {
 	return sanitizeToolOutput(output, maxLines)
 }
@@ -46,10 +51,14 @@ func NewModelForTesting() Model {
 	ta := textarea.New()
 	ta.Focus()
 	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
+	cfg := config.Default()
+	pm := provider.NewManager()
 	return Model{
-		ta:    ta,
-		cwd:   tmp,
-		store: &storage.Store{ProjectDir: filepath.Join(tmp, ".spettro"), GlobalDir: tmp},
+		ta:        ta,
+		cwd:       tmp,
+		cfg:       cfg,
+		providers: pm,
+		store:     &storage.Store{ProjectDir: filepath.Join(tmp, ".spettro"), GlobalDir: tmp},
 	}
 }
 
@@ -160,6 +169,10 @@ func (m Model) UpdateForTesting(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m.update(msg)
 }
 
+func (m Model) HandleCommandForTesting(input string) (tea.Model, tea.Cmd) {
+	return m.handleCommand(input)
+}
+
 func (m Model) TriggerQuitWarningTimeoutForTesting() (tea.Model, tea.Cmd) {
 	return m.update(quitWarningMsg{})
 }
@@ -188,6 +201,30 @@ func (m *Model) SetSidePanelVisibleForTesting(v bool) {
 
 func (m *Model) SetShowToolsForTesting(v bool) {
 	m.showTools = v
+}
+
+func (m *Model) SetSideDetailScrollForTesting(v int) {
+	m.sideDetailScroll = v
+}
+
+func (m Model) SideDetailScrollForTesting() int {
+	return m.sideDetailScroll
+}
+
+func (m *Model) SetResumeItemsForTesting(items []session.Summary) {
+	m.resumeItems = append([]session.Summary(nil), items...)
+}
+
+func (m *Model) SetShowResumeForTesting(v bool) {
+	m.showResume = v
+}
+
+func (m Model) ResumeCursorForTesting() int {
+	return m.resumeCursor
+}
+
+func (m Model) ViewForTesting() string {
+	return m.View()
 }
 
 func (m *Model) AddActivityForTesting(kind, id, agentID, title, detail, body, status string) {

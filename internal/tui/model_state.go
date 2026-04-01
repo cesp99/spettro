@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
+	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/session"
 )
@@ -221,6 +222,39 @@ func (m *Model) syncTodosFromSession() {
 	}
 }
 
+func (m *Model) updateCompactWarningState() {
+	window := m.contextWindow()
+	if window == 0 {
+		window = contextWindowDefault(m.cfg.ActiveProvider)
+	}
+	eval := compact.Evaluate(window, compact.Config{
+		AutoEnabled:      m.cfg.AutoCompactEnabled,
+		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+		MaxFailures:      m.cfg.AutoCompactMaxFailures,
+	}, compact.State{
+		TokensUsed:          m.totalTokensUsed,
+		ConsecutiveFailures: m.autoCompactFailures,
+	})
+	level := 0
+	if eval.IsError {
+		level = 2
+	} else if eval.IsWarning {
+		level = 1
+	}
+	if level == m.compactWarningLevel {
+		return
+	}
+	m.compactWarningLevel = level
+	switch level {
+	case 2:
+		m.showBanner("context is near limit; compacting soon is recommended", "warn")
+	case 1:
+		m.showBanner("context usage is getting high", "info")
+	default:
+		m.showBanner("context pressure normalized", "success")
+	}
+}
+
 func parseNumstat(text string, totals map[string][2]int) {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -385,6 +419,10 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 	if t.Name == "comment" {
 		return
 	}
+	if t.Name == "approval" {
+		m.recordApprovalTrace(t)
+		return
+	}
 	m.recordToolActivity(t)
 	if t.Name != "agent" {
 		return
@@ -458,6 +496,66 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		Task:          task,
 		Status:        status,
 		Summary:       summarizeAgentToolOutput(t.Output),
+	})
+}
+
+func (m *Model) recordApprovalTrace(t agent.ToolTrace) {
+	type approvalPayload struct {
+		Decision string `json:"decision"`
+		Source   string `json:"source"`
+		ToolID   string `json:"tool_id"`
+		Segment  string `json:"segment"`
+		Reason   string `json:"reason"`
+	}
+	var payload approvalPayload
+	_ = json.Unmarshal([]byte(t.Args), &payload)
+	decision := strings.TrimSpace(payload.Decision)
+	if decision == "" {
+		decision = "unknown"
+	}
+	toolID := strings.TrimSpace(payload.ToolID)
+	if toolID == "" {
+		toolID = "shell-exec"
+	}
+	segment := strings.TrimSpace(payload.Segment)
+	if segment == "" {
+		segment = "(unspecified)"
+	}
+	source := strings.TrimSpace(payload.Source)
+	if source == "" {
+		source = "unknown"
+	}
+	reason := strings.TrimSpace(payload.Reason)
+	if reason == "" {
+		reason = strings.TrimSpace(t.Output)
+	}
+	if reason == "" {
+		reason = "n/a"
+	}
+	ev := session.AgentEvent{
+		At:             time.Now(),
+		Kind:           "approval",
+		AgentID:        m.mode,
+		Status:         decision,
+		Task:           segment,
+		Summary:        reason,
+		ToolID:         toolID,
+		CommandSegment: segment,
+		Decision:       decision,
+		DecisionSource: source,
+		Reason:         reason,
+	}
+	m.recentApprovals = append(m.recentApprovals, ev)
+	m.upsertActivity(activityItem{
+		Key:     fmt.Sprintf("approval:%d", time.Now().UnixNano()),
+		Kind:    "approval",
+		ID:      toolID,
+		AgentID: m.mode,
+		Title:   fmt.Sprintf("approval %s (%s)", decision, source),
+		Detail:  truncateLabel(segment, 120),
+		Body:    reason,
+		Status:  decision,
+		At:      ev.At,
 	})
 }
 
@@ -833,6 +931,7 @@ func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
 func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 	m.activityFeed = nil
 	m.parallelAgents = nil
+	m.recentApprovals = nil
 	for i, ev := range events {
 		at := ev.At
 		if at.IsZero() {
@@ -843,6 +942,42 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 			kind = "agent"
 		}
 		switch kind {
+		case "approval":
+			decision := strings.TrimSpace(ev.Decision)
+			if decision == "" {
+				decision = strings.TrimSpace(ev.Status)
+			}
+			source := strings.TrimSpace(ev.DecisionSource)
+			if source == "" {
+				source = "unknown"
+			}
+			toolID := strings.TrimSpace(ev.ToolID)
+			if toolID == "" {
+				toolID = "shell-exec"
+			}
+			segment := strings.TrimSpace(ev.CommandSegment)
+			if segment == "" {
+				segment = strings.TrimSpace(ev.Task)
+			}
+			if segment == "" {
+				segment = "(unspecified)"
+			}
+			reason := strings.TrimSpace(ev.Reason)
+			if reason == "" {
+				reason = strings.TrimSpace(ev.Summary)
+			}
+			m.recentApprovals = append(m.recentApprovals, ev)
+			m.upsertActivity(activityItem{
+				Key:     fmt.Sprintf("resume:approval:%d", i),
+				Kind:    "approval",
+				ID:      toolID,
+				AgentID: ev.AgentID,
+				Title:   fmt.Sprintf("approval %s (%s)", decision, source),
+				Detail:  truncateLabel(segment, 120),
+				Body:    reason,
+				Status:  decision,
+				At:      at,
+			})
 		case "tool":
 			name := strings.TrimSpace(ev.ToolName)
 			if name == "" {
@@ -914,10 +1049,28 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.resumeCursor > 0 {
 			m.resumeCursor--
 		}
+		m.ensureResumeWindow()
 	case "down", "ctrl+n", "tab":
 		if m.resumeCursor < len(m.resumeItems)-1 {
 			m.resumeCursor++
 		}
+		m.ensureResumeWindow()
+	case "pgup":
+		step := max(1, m.resumeMaxRows()-2)
+		m.resumeCursor = max(0, m.resumeCursor-step)
+		m.ensureResumeWindow()
+	case "pgdown":
+		step := max(1, m.resumeMaxRows()-2)
+		m.resumeCursor = min(len(m.resumeItems)-1, m.resumeCursor+step)
+		m.ensureResumeWindow()
+	case "home":
+		m.resumeCursor = 0
+		m.ensureResumeWindow()
+	case "end":
+		if len(m.resumeItems) > 0 {
+			m.resumeCursor = len(m.resumeItems) - 1
+		}
+		m.ensureResumeWindow()
 	case "enter":
 		if len(m.resumeItems) > 0 {
 			sel := m.resumeItems[m.resumeCursor]
@@ -950,9 +1103,52 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) ensureResumeWindow() {
+	if len(m.resumeItems) == 0 {
+		m.resumeCursor = 0
+		m.resumeScroll = 0
+		return
+	}
+	if m.resumeCursor < 0 {
+		m.resumeCursor = 0
+	}
+	if m.resumeCursor >= len(m.resumeItems) {
+		m.resumeCursor = len(m.resumeItems) - 1
+	}
+	maxRows := m.resumeMaxRows()
+	maxStart := max(0, len(m.resumeItems)-maxRows)
+	if m.resumeScroll < 0 {
+		m.resumeScroll = 0
+	}
+	if m.resumeScroll > maxStart {
+		m.resumeScroll = maxStart
+	}
+	if m.resumeCursor < m.resumeScroll {
+		m.resumeScroll = m.resumeCursor
+	}
+	if m.resumeCursor >= m.resumeScroll+maxRows {
+		m.resumeScroll = m.resumeCursor - maxRows + 1
+	}
+}
+
+func (m Model) resumeMaxRows() int {
+	maxRows := m.height - 12
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	return maxRows
+}
+
 func (m Model) viewResume() string {
 	mc := m.currentColor()
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation")
+	dialogWidth := 72
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
 
 	var rows []string
 	for i, s := range m.resumeItems {
@@ -962,6 +1158,7 @@ func (m Model) viewResume() string {
 		if preview == "" {
 			preview = "(empty)"
 		}
+		preview = strings.ReplaceAll(preview, "\n", " ")
 		var prefix string
 		var timeStyle, previewStyle lipgloss.Style
 		if isSelected {
@@ -973,34 +1170,29 @@ func (m Model) viewResume() string {
 			timeStyle = lipgloss.NewStyle().Foreground(colorMuted)
 			previewStyle = lipgloss.NewStyle().Foreground(colorDim)
 		}
-		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(preview))
+		prefixWidth := lipgloss.Width(prefix)
+		timeWidth := lipgloss.Width(timeStr) + 2
+		previewBudget := max(8, dialogWidth-prefixWidth-timeWidth-6)
+		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(truncateLabel(preview, previewBudget)))
 	}
 	if len(rows) == 0 {
 		rows = append(rows, styleMuted.Render("  no saved conversations"))
 	}
 
-	hint := styleMuted.Render("↑↓ navigate  enter load  esc close")
-	dialogWidth := 72
-	if m.width < dialogWidth+4 {
-		dialogWidth = m.width - 4
-	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
-
-	maxRows := m.height - 12
-	if maxRows < 4 {
-		maxRows = 4
-	}
+	hint := styleMuted.Render("↑↓ navigate  pgup/pgdn jump  enter load  esc close")
+	maxRows := m.resumeMaxRows()
 	if len(rows) > maxRows {
-		start := m.resumeCursor - maxRows/2
+		start := m.resumeScroll
 		if start < 0 {
 			start = 0
 		}
 		if start+maxRows > len(rows) {
 			start = len(rows) - maxRows
 		}
-		rows = rows[start : start+maxRows]
+		if start < 0 {
+			start = 0
+		}
+		rows = rows[start:min(len(rows), start+maxRows)]
 	}
 
 	dialog := lipgloss.NewStyle().

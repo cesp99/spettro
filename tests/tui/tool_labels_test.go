@@ -32,3 +32,24 @@ func TestFormatRunningLabel_GlobAndGrepIncludePattern(t *testing.T) {
 		t.Fatalf("expected running grep label to include pattern, got: %q", grepLabel)
 	}
 }
+
+func TestFormatToolLabel_WebSearchUsesActionName(t *testing.T) {
+	got := tui.FormatToolLabelForTesting("web-search", `{"query":"best daft punk songs all time"}`)
+	if !strings.Contains(got, `Searched web for "best daft punk songs all time"`) {
+		t.Fatalf("expected humanized web-search label, got: %q", got)
+	}
+}
+
+func TestFormatRunningLabel_WebSearchUsesActionName(t *testing.T) {
+	got := tui.FormatRunningLabelForTesting("web-search", `{"query":"best daft punk songs all time"}`)
+	if !strings.Contains(got, `Searching web for "best daft punk songs all time"`) {
+		t.Fatalf("expected humanized running web-search label, got: %q", got)
+	}
+}
+
+func TestFormatApprovalCommandLabel_NetworkWebSearch(t *testing.T) {
+	got := tui.FormatApprovalCommandLabelForTesting("network web-search best daft punk songs all time")
+	if got != `Searching web for "best daft punk songs all time"` {
+		t.Fatalf("expected humanized approval label, got: %q", got)
+	}
+}

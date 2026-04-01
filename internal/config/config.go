@@ -17,27 +17,72 @@ const (
 )
 
 type UserConfig struct {
-	ActiveProvider string            `json:"active_provider"`
-	ActiveModel    string            `json:"active_model"`
-	Permission     PermissionLevel   `json:"permission"`
-	TokenBudget    int               `json:"token_budget,omitempty"` // max tokens per request; 0 = unlimited
-	APIKeys        map[string]string `json:"api_keys,omitempty"`
-	LocalEndpoints []string          `json:"local_endpoints,omitempty"`
-	Favorites      []string          `json:"favorites,omitempty"` // "provider:model"
-	LastAgentID    string            `json:"last_agent_id,omitempty"`
-	ShowSidePanel  bool              `json:"show_side_panel,omitempty"`
+	ActiveProvider          string            `json:"active_provider"`
+	ActiveModel             string            `json:"active_model"`
+	Permission              PermissionLevel   `json:"permission"`
+	TokenBudget             int               `json:"token_budget,omitempty"` // max tokens per request; 0 = unlimited
+	AutoCompactEnabled      bool              `json:"auto_compact_enabled"`
+	AutoCompactThresholdPct int               `json:"auto_compact_threshold_pct,omitempty"`
+	AutoCompactMaxFailures  int               `json:"auto_compact_max_failures,omitempty"`
+	APIKeys                 map[string]string `json:"api_keys,omitempty"`
+	LocalEndpoints          []string          `json:"local_endpoints,omitempty"`
+	Favorites               []string          `json:"favorites,omitempty"` // "provider:model"
+	LastAgentID             string            `json:"last_agent_id,omitempty"`
+	ShowSidePanel           bool              `json:"show_side_panel,omitempty"`
+	ShowPermissionDebug     bool              `json:"show_permission_debug,omitempty"`
 }
 
 func Default() UserConfig {
 	return UserConfig{
-		ActiveProvider: "openai-compatible",
-		ActiveModel:    "gpt-5-mini",
-		Permission:     PermissionAskFirst,
+		ActiveProvider:          "openai-compatible",
+		ActiveModel:             "gpt-5-mini",
+		Permission:              PermissionAskFirst,
+		AutoCompactEnabled:      true,
+		AutoCompactThresholdPct: 85,
+		AutoCompactMaxFailures:  3,
 		APIKeys: map[string]string{
 			"openai-compatible": "",
 			"anthropic":         "",
 		},
 	}
+}
+
+func normalize(cfg UserConfig) (UserConfig, bool) {
+	def := Default()
+	changed := false
+	legacyAutoCompactUnset := cfg.AutoCompactThresholdPct == 0 && cfg.AutoCompactMaxFailures == 0
+
+	if cfg.ActiveProvider == "" {
+		cfg.ActiveProvider = def.ActiveProvider
+		changed = true
+	}
+	if cfg.ActiveModel == "" {
+		cfg.ActiveModel = def.ActiveModel
+		changed = true
+	}
+	switch cfg.Permission {
+	case PermissionYOLO, PermissionRestricted, PermissionAskFirst:
+	default:
+		cfg.Permission = def.Permission
+		changed = true
+	}
+	if cfg.APIKeys == nil {
+		cfg.APIKeys = map[string]string{}
+		changed = true
+	}
+	if legacyAutoCompactUnset && !cfg.AutoCompactEnabled {
+		cfg.AutoCompactEnabled = true
+		changed = true
+	}
+	if cfg.AutoCompactThresholdPct <= 0 || cfg.AutoCompactThresholdPct >= 100 {
+		cfg.AutoCompactThresholdPct = def.AutoCompactThresholdPct
+		changed = true
+	}
+	if cfg.AutoCompactMaxFailures <= 0 {
+		cfg.AutoCompactMaxFailures = def.AutoCompactMaxFailures
+		changed = true
+	}
+	return cfg, changed
 }
 
 func Path() (string, error) {
@@ -75,9 +120,35 @@ func LoadOrCreate() (UserConfig, error) {
 		return UserConfig{}, fmt.Errorf("decode config: %w", err)
 	}
 
-	if cfg.APIKeys == nil {
-		cfg.APIKeys = map[string]string{}
+	var changed bool
+	cfg, changed = normalize(cfg)
+	if changed {
+		if err := Save(cfg); err != nil {
+			return UserConfig{}, err
+		}
 	}
+	return cfg, nil
+}
+
+// Load reads the config file without creating it and without persisting
+// normalization side effects. Missing files return defaults in-memory.
+func Load() (UserConfig, error) {
+	p, err := Path()
+	if err != nil {
+		return UserConfig{}, err
+	}
+	var cfg UserConfig
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Default(), nil
+		}
+		return UserConfig{}, fmt.Errorf("read config: %w", err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return UserConfig{}, fmt.Errorf("decode config: %w", err)
+	}
+	cfg, _ = normalize(cfg)
 	return cfg, nil
 }
 

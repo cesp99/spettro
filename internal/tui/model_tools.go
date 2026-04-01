@@ -85,47 +85,212 @@ func formatToolLabel(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
-			return "Write " + args.Path
+			return "Wrote " + args.Path
 		}
-		return "Write file"
+		return "Wrote file"
+	case "file-edit":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
+			return "Edited " + args.Path
+		}
+		return "Edited file"
 	case "repo-search":
 		var args struct {
 			Query string `json:"query"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
 			q := truncateLabel(args.Query, 50)
-			return fmt.Sprintf("Search %q", q)
+			return fmt.Sprintf("Searched repo for %q", q)
 		}
-		return "Search"
-	case "shell-exec":
+		return "Searched repository"
+	case "tool-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
+			q := truncateLabel(args.Query, 50)
+			return fmt.Sprintf("Searched tools for %q", q)
+		}
+		return "Searched tools"
+	case "web-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
+			q := truncateLabel(args.Query, 50)
+			return fmt.Sprintf("Searched web for %q", q)
+		}
+		return "Searched web"
+	case "web-fetch":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.URL != "" {
+			u := truncateLabel(args.URL, 60)
+			return fmt.Sprintf("Fetched %q", u)
+		}
+		return "Fetched web page"
+	case "shell-exec", "bash", "bash-output":
 		var args struct {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
 			cmd := truncateLabel(args.Command, 60)
-			return "$ " + cmd
+			return "Ran $ " + cmd
 		}
-		return "Run command"
+		return "Ran command"
 	case "glob":
 		var args struct {
 			Pattern string `json:"pattern"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
 			p := truncateLabel(args.Pattern, 50)
-			return fmt.Sprintf("Glob %q", p)
+			return fmt.Sprintf("Matched %q", p)
 		}
-		return "Glob"
+		return "Matched files"
 	case "grep":
 		var args struct {
 			Pattern string `json:"pattern"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
 			p := truncateLabel(args.Pattern, 50)
-			return fmt.Sprintf("Grep %q", p)
+			return fmt.Sprintf("Grepped %q", p)
 		}
-		return "Grep"
+		return "Grepped files"
+	case "ls":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
+			p := truncateLabel(args.Path, 60)
+			return fmt.Sprintf("Listed %s", p)
+		}
+		return "Listed directory"
+	case "todo-write":
+		var args struct {
+			Todos []json.RawMessage `json:"todos"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && len(args.Todos) > 0 {
+			if len(args.Todos) == 1 {
+				return "Wrote 1 todo"
+			}
+			return fmt.Sprintf("Wrote %d todos", len(args.Todos))
+		}
+		return "Wrote todos"
+	case "task-create":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ID) != "" {
+			return fmt.Sprintf("Created task %s", truncateLabel(args.ID, 40))
+		}
+		return "Created task"
+	case "task-get":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ID) != "" {
+			return fmt.Sprintf("Read task %s", truncateLabel(args.ID, 40))
+		}
+		return "Read task"
+	case "task-update":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ID) != "" {
+			return fmt.Sprintf("Updated task %s", truncateLabel(args.ID, 40))
+		}
+		return "Updated task"
+	case "task-list":
+		return "Listed tasks"
+	case "ask-user":
+		var args struct {
+			Question string `json:"question"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Question) != "" {
+			q := truncateLabel(args.Question, 50)
+			return fmt.Sprintf("Asked user %q", q)
+		}
+		return "Asked user"
+	case "enter-plan-mode":
+		return "Entered plan mode"
+	case "exit-plan-mode":
+		return "Exited plan mode"
+	case "mcp-list-resources":
+		var args struct {
+			ServerID string `json:"server_id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ServerID) != "" {
+			return fmt.Sprintf("Listed MCP resources for %s", truncateLabel(args.ServerID, 40))
+		}
+		return "Listed MCP resources"
+	case "mcp-read-resource":
+		var args struct {
+			ResourceID string `json:"resource_id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ResourceID) != "" {
+			return fmt.Sprintf("Read MCP resource %s", truncateLabel(args.ResourceID, 40))
+		}
+		return "Read MCP resource"
+	case "mcp-auth":
+		var args struct {
+			ServerID string `json:"server_id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ServerID) != "" {
+			return fmt.Sprintf("Updated MCP auth for %s", truncateLabel(args.ServerID, 40))
+		}
+		return "Updated MCP auth"
+	case "enter-worktree":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
+			return fmt.Sprintf("Entered worktree %s", truncateLabel(args.Path, 50))
+		}
+		return "Entered worktree"
+	case "exit-worktree":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
+			return fmt.Sprintf("Exited worktree %s", truncateLabel(args.Path, 50))
+		}
+		return "Exited worktree"
+	case "send-message":
+		var args struct {
+			Target string `json:"target"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Target) != "" {
+			return fmt.Sprintf("Sent message to %s", truncateLabel(args.Target, 40))
+		}
+		return "Sent message"
+	case "agent":
+		var args struct {
+			Agent  string `json:"agent"`
+			Target string `json:"target"`
+			ID     string `json:"id"`
+			Task   string `json:"task"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil {
+			label := args.Agent
+			if label == "" {
+				label = args.Target
+			}
+			if label == "" {
+				label = args.ID
+			}
+			if label == "" {
+				label = "sub-agent"
+			}
+			if args.Task != "" {
+				return fmt.Sprintf("Delegated to %s for %s", label, truncateLabel(args.Task, 80))
+			}
+			return fmt.Sprintf("Delegated to %s", label)
+		}
 	}
-	return name
+	return humanizeToolID(name)
 }
 
 func formatRunningLabel(name, argsJSON string) string {
@@ -146,22 +311,57 @@ func formatRunningLabel(name, argsJSON string) string {
 			return "Writing " + args.Path + "…"
 		}
 		return "Writing…"
+	case "file-edit":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Path != "" {
+			return "Editing " + args.Path + "…"
+		}
+		return "Editing…"
 	case "repo-search":
 		var args struct {
 			Query string `json:"query"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
 			q := truncateLabel(args.Query, 50)
-			return fmt.Sprintf("Searching %q…", q)
+			return fmt.Sprintf("Searching repo for %q…", q)
 		}
-		return "Searching…"
-	case "shell-exec":
+		return "Searching repository…"
+	case "tool-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
+			q := truncateLabel(args.Query, 50)
+			return fmt.Sprintf("Searching tools for %q…", q)
+		}
+		return "Searching tools…"
+	case "web-search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Query != "" {
+			q := truncateLabel(args.Query, 50)
+			return fmt.Sprintf("Searching web for %q…", q)
+		}
+		return "Searching web…"
+	case "web-fetch":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.URL != "" {
+			u := truncateLabel(args.URL, 60)
+			return fmt.Sprintf("Fetching %q…", u)
+		}
+		return "Fetching web page…"
+	case "shell-exec", "bash", "bash-output":
 		var args struct {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Command != "" {
 			cmd := truncateLabel(args.Command, 60)
-			return "Run $ " + cmd + "…"
+			return "Running $ " + cmd + "…"
 		}
 		return "Running…"
 	case "glob":
@@ -170,9 +370,9 @@ func formatRunningLabel(name, argsJSON string) string {
 		}
 		if json.Unmarshal([]byte(argsJSON), &args) == nil && args.Pattern != "" {
 			p := truncateLabel(args.Pattern, 50)
-			return fmt.Sprintf("Globbing %q…", p)
+			return fmt.Sprintf("Matching %q…", p)
 		}
-		return "Globbing…"
+		return "Matching files…"
 	case "grep":
 		var args struct {
 			Pattern string `json:"pattern"`
@@ -182,8 +382,46 @@ func formatRunningLabel(name, argsJSON string) string {
 			return fmt.Sprintf("Grepping %q…", p)
 		}
 		return "Grepping…"
+	case "ls":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
+			return fmt.Sprintf("Listing %s…", truncateLabel(args.Path, 60))
+		}
+		return "Listing directory…"
+	case "todo-write":
+		return "Writing todos…"
+	case "task-create":
+		return "Creating task…"
+	case "task-get":
+		return "Reading task…"
+	case "task-update":
+		return "Updating task…"
+	case "task-list":
+		return "Listing tasks…"
+	case "ask-user":
+		return "Asking user…"
+	case "enter-plan-mode":
+		return "Entering plan mode…"
+	case "exit-plan-mode":
+		return "Exiting plan mode…"
+	case "mcp-list-resources":
+		return "Listing MCP resources…"
+	case "mcp-read-resource":
+		return "Reading MCP resource…"
+	case "mcp-auth":
+		return "Updating MCP auth…"
+	case "enter-worktree":
+		return "Entering worktree…"
+	case "exit-worktree":
+		return "Exiting worktree…"
+	case "send-message":
+		return "Sending message…"
+	case "agent":
+		return "Delegating to sub-agent…"
 	}
-	return name + "…"
+	return "Using " + humanizeToolID(name) + "…"
 }
 
 func extractToolPath(name, argsJSON string) string {
@@ -204,41 +442,132 @@ func toolActionVerb(name string) string {
 	case "file-read":
 		return "Read"
 	case "file-write":
-		return "Write"
-	case "repo-search":
-		return "Search"
-	case "shell-exec":
-		return "Run"
+		return "Wrote"
+	case "file-edit":
+		return "Edited"
+	case "repo-search", "tool-search", "web-search":
+		return "Searched"
+	case "web-fetch":
+		return "Fetched"
+	case "shell-exec", "bash", "bash-output":
+		return "Ran"
 	case "glob":
-		return "Glob"
+		return "Matched"
 	case "grep":
-		return "Grep"
+		return "Grepped"
+	case "ls":
+		return "Listed"
+	case "todo-write":
+		return "Wrote"
+	case "task-create":
+		return "Created"
+	case "task-get":
+		return "Read"
+	case "task-update":
+		return "Updated"
+	case "task-list":
+		return "Listed"
+	case "ask-user":
+		return "Asked"
+	case "enter-plan-mode":
+		return "Entered"
+	case "exit-plan-mode":
+		return "Exited"
+	case "mcp-list-resources":
+		return "Listed"
+	case "mcp-read-resource":
+		return "Read"
+	case "mcp-auth":
+		return "Updated"
+	case "enter-worktree":
+		return "Entered"
+	case "exit-worktree":
+		return "Exited"
+	case "send-message":
+		return "Sent"
+	case "agent":
+		return "Delegated"
 	}
-	return name
+	return "Used"
 }
 
 func toolNounCount(name string, count int) string {
 	switch name {
-	case "file-read", "file-write":
+	case "file-read", "file-write", "file-edit":
 		if count == 1 {
 			return "1 file"
 		}
 		return fmt.Sprintf("%d files", count)
-	case "repo-search":
+	case "repo-search", "tool-search", "web-search", "grep":
 		if count == 1 {
-			return "1 search"
+			return "1 query"
 		}
-		return fmt.Sprintf("%d searches", count)
-	case "shell-exec":
+		return fmt.Sprintf("%d queries", count)
+	case "shell-exec", "bash", "bash-output":
 		if count == 1 {
 			return "1 command"
 		}
 		return fmt.Sprintf("%d commands", count)
-	case "glob", "grep":
+	case "glob":
 		if count == 1 {
 			return "1 pattern"
 		}
 		return fmt.Sprintf("%d patterns", count)
+	case "web-fetch":
+		if count == 1 {
+			return "1 page"
+		}
+		return fmt.Sprintf("%d pages", count)
+	case "ls":
+		if count == 1 {
+			return "1 listing"
+		}
+		return fmt.Sprintf("%d listings", count)
+	case "todo-write":
+		if count == 1 {
+			return "1 todo batch"
+		}
+		return fmt.Sprintf("%d todo batches", count)
+	case "task-create", "task-get", "task-update", "task-list":
+		if count == 1 {
+			return "1 task"
+		}
+		return fmt.Sprintf("%d tasks", count)
+	case "ask-user":
+		if count == 1 {
+			return "1 prompt"
+		}
+		return fmt.Sprintf("%d prompts", count)
+	case "enter-plan-mode", "exit-plan-mode":
+		if count == 1 {
+			return "1 mode change"
+		}
+		return fmt.Sprintf("%d mode changes", count)
+	case "mcp-list-resources", "mcp-read-resource":
+		if count == 1 {
+			return "1 MCP resource"
+		}
+		return fmt.Sprintf("%d MCP resources", count)
+	case "mcp-auth":
+		if count == 1 {
+			return "1 MCP auth update"
+		}
+		return fmt.Sprintf("%d MCP auth updates", count)
+	case "enter-worktree", "exit-worktree":
+		if count == 1 {
+			return "1 worktree"
+		}
+		return fmt.Sprintf("%d worktrees", count)
+	case "send-message":
+		if count == 1 {
+			return "1 message"
+		}
+		return fmt.Sprintf("%d messages", count)
+	case "agent":
+		if count == 1 {
+			return "1 delegation"
+		}
+		return fmt.Sprintf("%d delegations", count)
 	}
 	if count == 1 {
 		return "1 call"
@@ -447,10 +776,7 @@ func renderToolGroups(tools []ToolItem, showTools bool, mc lipgloss.Color) strin
 				}
 			}
 		} else {
-			label := fmt.Sprintf("%s %s", toolActionVerb(name), toolNounCount(name, count))
-			if hasRunningTool(group) {
-				label = formatRunningToolGroupLabel(name, count)
-			}
+			label := formatToolGroupLabel(name, group)
 			if !showTools {
 				label += "  " + styleMuted.Render("(ctrl+o to expand)")
 			}
@@ -502,7 +828,11 @@ func hasRunningTool(items []ToolItem) bool {
 	return false
 }
 
-func formatRunningToolGroupLabel(name string, count int) string {
+func formatRunningToolGroupLabel(name string, group []ToolItem) string {
+	count := len(group)
+	if desc := formatDetailedGroupLabel(name, true, group); desc != "" {
+		return desc
+	}
 	switch name {
 	case "file-read":
 		if count == 1 {
@@ -514,28 +844,334 @@ func formatRunningToolGroupLabel(name string, count int) string {
 			return "Writing 1 file…"
 		}
 		return fmt.Sprintf("Writing %d files…", count)
+	case "file-edit":
+		if count == 1 {
+			return "Editing 1 file…"
+		}
+		return fmt.Sprintf("Editing %d files…", count)
 	case "repo-search":
 		if count == 1 {
 			return "Searching 1 query…"
 		}
 		return fmt.Sprintf("Searching %d queries…", count)
-	case "shell-exec", "bash":
+	case "tool-search":
+		if count == 1 {
+			return "Searching 1 tool query…"
+		}
+		return fmt.Sprintf("Searching %d tool queries…", count)
+	case "web-search":
+		if count == 1 {
+			return "Searching 1 web query…"
+		}
+		return fmt.Sprintf("Searching %d web queries…", count)
+	case "web-fetch":
+		if count == 1 {
+			return "Fetching 1 page…"
+		}
+		return fmt.Sprintf("Fetching %d pages…", count)
+	case "shell-exec", "bash", "bash-output":
 		if count == 1 {
 			return "Running 1 command…"
 		}
 		return fmt.Sprintf("Running %d commands…", count)
 	case "glob":
 		if count == 1 {
-			return "Globbing 1 pattern…"
+			return "Matching 1 pattern…"
 		}
-		return fmt.Sprintf("Globbing %d patterns…", count)
+		return fmt.Sprintf("Matching %d patterns…", count)
 	case "grep":
 		if count == 1 {
 			return "Grepping 1 pattern…"
 		}
 		return fmt.Sprintf("Grepping %d patterns…", count)
+	case "ls":
+		if count == 1 {
+			return "Listing 1 directory…"
+		}
+		return fmt.Sprintf("Listing %d directories…", count)
+	case "task-create":
+		if count == 1 {
+			return "Creating 1 task…"
+		}
+		return fmt.Sprintf("Creating %d tasks…", count)
+	case "task-get":
+		if count == 1 {
+			return "Reading 1 task…"
+		}
+		return fmt.Sprintf("Reading %d tasks…", count)
+	case "task-update":
+		if count == 1 {
+			return "Updating 1 task…"
+		}
+		return fmt.Sprintf("Updating %d tasks…", count)
+	case "task-list":
+		if count == 1 {
+			return "Listing tasks…"
+		}
+		return fmt.Sprintf("Listing tasks %d times…", count)
+	case "ask-user":
+		if count == 1 {
+			return "Asking 1 question…"
+		}
+		return fmt.Sprintf("Asking %d questions…", count)
+	case "mcp-list-resources":
+		if count == 1 {
+			return "Listing MCP resources…"
+		}
+		return fmt.Sprintf("Listing MCP resources %d times…", count)
+	case "mcp-read-resource":
+		if count == 1 {
+			return "Reading 1 MCP resource…"
+		}
+		return fmt.Sprintf("Reading %d MCP resources…", count)
+	case "mcp-auth":
+		if count == 1 {
+			return "Updating MCP auth…"
+		}
+		return fmt.Sprintf("Updating MCP auth %d times…", count)
+	case "enter-worktree":
+		if count == 1 {
+			return "Entering 1 worktree…"
+		}
+		return fmt.Sprintf("Entering %d worktrees…", count)
+	case "exit-worktree":
+		if count == 1 {
+			return "Exiting 1 worktree…"
+		}
+		return fmt.Sprintf("Exiting %d worktrees…", count)
+	case "send-message":
+		if count == 1 {
+			return "Sending 1 message…"
+		}
+		return fmt.Sprintf("Sending %d messages…", count)
+	case "agent":
+		if count == 1 {
+			return "Delegating 1 task…"
+		}
+		return fmt.Sprintf("Delegating %d tasks…", count)
 	}
-	return fmt.Sprintf("%s %d call(s)…", toolActionVerb(name), count)
+	return fmt.Sprintf("Using %s %d time(s)…", humanizeToolID(name), count)
+}
+
+func formatToolGroupLabel(name string, group []ToolItem) string {
+	count := len(group)
+	if hasRunningTool(group) {
+		return formatRunningToolGroupLabel(name, group)
+	}
+	if desc := formatDetailedGroupLabel(name, false, group); desc != "" {
+		return desc
+	}
+	return fmt.Sprintf("%s %s", toolActionVerb(name), toolNounCount(name, count))
+}
+
+func formatDetailedGroupLabel(name string, running bool, group []ToolItem) string {
+	count := len(group)
+	if count <= 0 {
+		return ""
+	}
+	verb := toolActionVerb(name)
+	if running {
+		verb = runningVerb(name)
+	}
+	maxShown := len(group)
+	if maxShown > 3 {
+		maxShown = 3
+	}
+	labels := make([]string, 0, maxShown)
+	for i := 0; i < maxShown; i++ {
+		if d := toolDescriptor(name, group[i].Args); d != "" {
+			labels = append(labels, d)
+		}
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	prefix := ""
+	switch name {
+	case "repo-search", "tool-search", "web-search", "grep":
+		prefix = " for "
+	case "agent":
+		prefix = " to "
+	default:
+		prefix = " "
+	}
+	label := verb + prefix + strings.Join(labels, ", ")
+	if count > len(labels) {
+		label += fmt.Sprintf(" (+%d more)", count-len(labels))
+	}
+	if running {
+		label += "…"
+	}
+	return label
+}
+
+func toolDescriptor(name, argsJSON string) string {
+	switch name {
+	case "file-read", "file-write", "file-edit", "enter-worktree", "exit-worktree", "ls":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Path) != "" {
+			return truncateLabel(args.Path, 36)
+		}
+	case "repo-search", "tool-search", "web-search", "grep":
+		var args struct {
+			Query   string `json:"query"`
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil {
+			q := strings.TrimSpace(args.Query)
+			if q == "" {
+				q = strings.TrimSpace(args.Pattern)
+			}
+			if q != "" {
+				return fmt.Sprintf("%q", truncateLabel(q, 36))
+			}
+		}
+	case "web-fetch":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.URL) != "" {
+			return fmt.Sprintf("%q", truncateLabel(args.URL, 36))
+		}
+	case "shell-exec", "bash", "bash-output":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.Command) != "" {
+			return "$ " + truncateLabel(args.Command, 36)
+		}
+	case "mcp-read-resource":
+		var args struct {
+			ResourceID string `json:"resource_id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil && strings.TrimSpace(args.ResourceID) != "" {
+			return truncateLabel(args.ResourceID, 36)
+		}
+	case "agent":
+		var args struct {
+			Agent  string `json:"agent"`
+			Target string `json:"target"`
+			ID     string `json:"id"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &args) == nil {
+			target := strings.TrimSpace(args.Agent)
+			if target == "" {
+				target = strings.TrimSpace(args.Target)
+			}
+			if target == "" {
+				target = strings.TrimSpace(args.ID)
+			}
+			if target != "" {
+				return truncateLabel(target, 24)
+			}
+		}
+	}
+	return ""
+}
+
+func runningVerb(name string) string {
+	switch name {
+	case "file-read":
+		return "Reading"
+	case "file-write":
+		return "Writing"
+	case "file-edit":
+		return "Editing"
+	case "repo-search", "tool-search", "web-search":
+		return "Searching"
+	case "web-fetch":
+		return "Fetching"
+	case "shell-exec", "bash", "bash-output":
+		return "Running"
+	case "glob":
+		return "Matching"
+	case "grep":
+		return "Grepping"
+	case "ls":
+		return "Listing"
+	case "todo-write":
+		return "Writing"
+	case "task-create":
+		return "Creating"
+	case "task-get":
+		return "Reading"
+	case "task-update":
+		return "Updating"
+	case "task-list":
+		return "Listing"
+	case "ask-user":
+		return "Asking"
+	case "enter-plan-mode":
+		return "Entering"
+	case "exit-plan-mode":
+		return "Exiting"
+	case "mcp-list-resources":
+		return "Listing"
+	case "mcp-read-resource":
+		return "Reading"
+	case "mcp-auth":
+		return "Updating"
+	case "enter-worktree":
+		return "Entering"
+	case "exit-worktree":
+		return "Exiting"
+	case "send-message":
+		return "Sending"
+	case "agent":
+		return "Delegating"
+	}
+	return "Using"
+}
+
+func humanizeToolID(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "Tool"
+	}
+	name = strings.ReplaceAll(name, "-", " ")
+	name = strings.ReplaceAll(name, "_", " ")
+	parts := strings.Fields(name)
+	for i, p := range parts {
+		if p == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(p[:1]) + strings.ToLower(p[1:])
+	}
+	if len(parts) == 0 {
+		return "Tool"
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatApprovalCommandLabel(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	parts := strings.Fields(command)
+	if len(parts) >= 2 && parts[0] == "network" {
+		toolID := parts[1]
+		target := strings.TrimSpace(strings.Join(parts[2:], " "))
+		if target == "" {
+			target = "network target"
+		}
+		switch toolID {
+		case "web-search":
+			return fmt.Sprintf("Searching web for %q", truncateLabel(target, 60))
+		case "web-fetch":
+			return "Fetching a web page"
+		case "mcp-list-resources":
+			return fmt.Sprintf("Listing MCP resources for %s", truncateLabel(target, 40))
+		case "mcp-read-resource":
+			return fmt.Sprintf("Reading MCP resource %s", truncateLabel(target, 50))
+		case "mcp-auth":
+			return fmt.Sprintf("Updating MCP auth for %s", truncateLabel(target, 40))
+		default:
+			return fmt.Sprintf("Using network tool %s on %s", humanizeToolID(toolID), truncateLabel(target, 50))
+		}
+	}
+	return "$ " + command
 }
 
 func trimToolOutput(output string, maxLines int) string {

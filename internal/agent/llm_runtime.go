@@ -1,16 +1,12 @@
 package agent
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -20,6 +16,7 @@ import (
 
 	"spettro/internal/budget"
 	"spettro/internal/config"
+	"spettro/internal/hooks"
 	"spettro/internal/provider"
 	"spettro/internal/session"
 )
@@ -53,7 +50,10 @@ const (
 )
 
 type ShellApprovalRequest struct {
-	Command string
+	Command  string
+	ToolID   string
+	Segments []string
+	Reason   string
 }
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
@@ -128,26 +128,6 @@ type toolCall struct {
 	Args json.RawMessage `json:"args"`
 }
 
-var (
-	allowedToolCallKeys = map[string]struct{}{
-		"tool":       {},
-		"name":       {},
-		"args":       {},
-		"arguments":  {},
-		"input":      {},
-		"parameters": {},
-		"tool_input": {},
-		"function":   {},
-		"type":       {},
-		"id":         {},
-		"call_id":    {},
-	}
-	allowedFunctionKeys = map[string]struct{}{
-		"name":      {},
-		"arguments": {},
-	}
-)
-
 type toolRuntime struct {
 	cwd           string
 	mu            sync.Mutex
@@ -177,6 +157,9 @@ type toolRuntime struct {
 	maxParallelWorkers   int
 	maxParallelMicroagnt int
 	maxDelegationDepth   int
+	hooksConfig          hooks.EffectiveConfig
+	stopRequested        bool
+	stopReason           string
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -270,6 +253,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		return "", nil, 0, err
 	}
 	runtime.allowedShell = allowedShell
+	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	runtime.hooksConfig = hooksCfg
+	if err := runtime.runSessionStartHooks(ctx); err != nil {
+		return "", nil, 0, err
+	}
 	for _, p := range cfg.RequiredReads {
 		p = filepath.ToSlash(strings.TrimSpace(p))
 		if p != "" {
@@ -324,6 +315,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			if !runtime.logToolCalls {
 				history.WriteString(fmt.Sprintf("tool(%d): %d calls completed\n", step, len(results)))
 			}
+			if runtime.shouldStop() {
+				return runtime.stopMessage(), traces, totalTokens, nil
+			}
 			for _, perr := range parseErrs {
 				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
 			}
@@ -364,133 +358,6 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		return lastContent, traces, totalTokens, nil
 	}
 	return "", traces, totalTokens, fmt.Errorf("max tool steps reached without final answer")
-}
-
-func summarizeLoopToolResult(name, args, status, output string) string {
-	var parts []string
-	status = strings.TrimSpace(status)
-	if status != "" {
-		parts = append(parts, "status="+status)
-	}
-	if summary := summarizeLoopToolArgs(name, args); summary != "" {
-		parts = append(parts, summary)
-	}
-	output = strings.TrimSpace(output)
-	if output != "" {
-		output = strings.Join(strings.Fields(output), " ")
-		parts = append(parts, "output="+truncate(output, 240))
-	}
-	return strings.Join(parts, " | ")
-}
-
-func summarizeLoopToolArgs(name, args string) string {
-	switch name {
-	case "file-read", "file-write":
-		var payload struct {
-			Path string `json:"path"`
-		}
-		if json.Unmarshal([]byte(args), &payload) == nil && payload.Path != "" {
-			return "path=" + payload.Path
-		}
-	case "repo-search":
-		var payload struct {
-			Query string `json:"query"`
-		}
-		if json.Unmarshal([]byte(args), &payload) == nil && payload.Query != "" {
-			return "query=" + truncate(payload.Query, 120)
-		}
-	case "shell-exec", "bash":
-		var payload struct {
-			Command string `json:"command"`
-		}
-		if json.Unmarshal([]byte(args), &payload) == nil && payload.Command != "" {
-			return "command=" + truncate(payload.Command, 120)
-		}
-	case "glob":
-		var payload struct {
-			Pattern string `json:"pattern"`
-		}
-		if json.Unmarshal([]byte(args), &payload) == nil && payload.Pattern != "" {
-			return "pattern=" + truncate(payload.Pattern, 120)
-		}
-	case "grep":
-		var payload struct {
-			Pattern string `json:"pattern"`
-			Path    string `json:"path"`
-		}
-		if json.Unmarshal([]byte(args), &payload) == nil {
-			if payload.Path != "" {
-				return "path=" + payload.Path + " pattern=" + truncate(payload.Pattern, 120)
-			}
-			if payload.Pattern != "" {
-				return "pattern=" + truncate(payload.Pattern, 120)
-			}
-		}
-	}
-	return truncate(strings.TrimSpace(args), 120)
-}
-
-func buildLoopPrompt(cfg toolLoopConfig, history string, step int) string {
-	toolList := strings.Join(cfg.AllowedTools, ", ")
-	base := strings.TrimSpace(cfg.SystemPrompt)
-	if base == "" {
-		base = "You are an assistant."
-	}
-	commentGuidance := ""
-	for _, tool := range cfg.AllowedTools {
-		if tool == "comment" {
-			commentGuidance = "\n- Use the comment tool to narrate meaningful progress in the chat.\n- Before major operations (file-write, shell/batch commands, sub-agent delegation), emit a short comment about what you are about to do.\n- After major operations, emit a short success/failure comment including what happened.\n- Prefer a small number of useful comments over narrating every single tool call.\n- Do not narrate with plain text when you still plan to continue; use comment for progress updates and FINAL only when actually done."
-			break
-		}
-	}
-	requiredReadsSection := ""
-	if len(cfg.RequiredReads) > 0 {
-		paths := make([]string, 0, len(cfg.RequiredReads))
-		for _, p := range cfg.RequiredReads {
-			p = filepath.ToSlash(strings.TrimSpace(p))
-			if p != "" {
-				paths = append(paths, p)
-			}
-		}
-		sort.Strings(paths)
-		if len(paths) > 0 {
-			requiredReadsSection = "\nRequired first reads (must be done with file-read before anything else):\n- " + strings.Join(paths, "\n- ")
-		}
-	}
-	return fmt.Sprintf(`%s
-
-You can use tools iteratively.
-Allowed tools: %s
-
-Output protocol (strict):
-1) To call tools (all executed in parallel), output one TOOL_CALL per line:
-TOOL_CALL {"name":"<tool-name>","arguments":{...}}
-TOOL_CALL {"name":"<another>","arguments":{...}}
-2) When done, output exactly:
-FINAL
-<your final answer>
-
-Rules:
-- Known aliases accepted by runtime: tool/args and function{name,arguments}.
-- For the agent tool, arguments must include {"agent":"<handoff-id>","task":"..."}.
-- Prefer reading/searching before writing.
-- Never edit an existing file unless it has been read first.
-- Creating a brand-new file without reading is allowed.
-- Keep tool args minimal and valid JSON.
-- If a tool fails, adapt and continue.
-%s
-
-Task:
-%s
-%s
-
-Working directory:
-%s
-
-Current step: %d/%d
-
-Previous tool interaction log:
-%s`, base, toolList, commentGuidance, cfg.UserTask, requiredReadsSection, cfg.CWD, step, cfg.MaxSteps, emptyIfBlank(history))
 }
 
 // parallelExec fires one goroutine per call and collects results in original order.
@@ -563,7 +430,9 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	}
 	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
-	return r.execute(tctx, call, allowed)
+	out, err := r.execute(tctx, call, allowed)
+	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
+	return out, err
 }
 
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
@@ -579,6 +448,16 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				return "", fmt.Errorf("tool %q denied by policy for permission %q", call.Tool, fam)
 			}
 		}
+	}
+	updatedArgs, denyReason, err := r.runPreToolHooks(ctx, call.Tool, call.Args)
+	if err != nil {
+		return "", err
+	}
+	if denyReason != "" {
+		return "", fmt.Errorf("tool %q blocked by hook: %s", call.Tool, denyReason)
+	}
+	if len(updatedArgs) > 0 {
+		call.Args = updatedArgs
 	}
 	if call.Tool != "file-read" && call.Tool != "glob" && call.Tool != "grep" {
 		if next, ok := r.nextRequiredRead(); ok {
@@ -723,7 +602,38 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		}
 		return strings.Join(lines, "\n"), nil
 	case "web-fetch":
+		if err := r.authorizeNetworkAccess(ctx, "web-fetch", "web-fetch"); err != nil {
+			return "", err
+		}
 		return r.runWebFetch(ctx, call.Args)
+	case "web-search":
+		return r.runWebSearch(ctx, call.Args)
+	case "ask-user":
+		return r.runAskUser(call.Args)
+	case "enter-plan-mode":
+		return r.runPlanModeToggle(call.Args, true)
+	case "exit-plan-mode":
+		return r.runPlanModeToggle(call.Args, false)
+	case "task-create":
+		return r.runTaskCreate(call.Args)
+	case "task-get":
+		return r.runTaskGet(call.Args)
+	case "task-update":
+		return r.runTaskUpdate(call.Args)
+	case "task-list":
+		return r.runTaskList(call.Args)
+	case "task-stop":
+		return r.runTaskStop(call.Args)
+	case "tool-search":
+		return r.runToolSearch(allowed, call.Args)
+	case "config":
+		return r.runConfigTool(call.Args)
+	case "mcp-list-resources":
+		return r.runMCPListResources(ctx, call.Args)
+	case "mcp-read-resource":
+		return r.runMCPReadResource(ctx, call.Args)
+	case "mcp-auth":
+		return r.runMCPAuth(ctx, call.Args)
 	case "todo-write":
 		var args struct {
 			Todos []interface{} `json:"todos"`
@@ -752,13 +662,24 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			}
 			owner, _ := m["owner"].(string)
 			source, _ := m["source"].(string)
+			priority, _ := m["priority"].(string)
+			var deps []string
+			if rawDeps, ok := m["dependencies"].([]interface{}); ok {
+				for _, d := range rawDeps {
+					if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
+						deps = append(deps, strings.TrimSpace(s))
+					}
+				}
+			}
 			out = append(out, session.Todo{
-				ID:        id,
-				Content:   content,
-				Status:    status,
-				Owner:     owner,
-				Source:    source,
-				UpdatedAt: now,
+				ID:           id,
+				Content:      content,
+				Status:       status,
+				Owner:        owner,
+				Source:       source,
+				Priority:     priority,
+				Dependencies: deps,
+				UpdatedAt:    now,
 			})
 		}
 		raw, err := json.MarshalIndent(out, "", "  ")
@@ -766,13 +687,25 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("todo-write: marshal: %w", err)
 		}
 		todosPath := filepath.Join(r.sessionDir, "todos.json")
+		tasksPath := filepath.Join(r.sessionDir, "tasks.json")
 		if err := os.MkdirAll(filepath.Dir(todosPath), 0o700); err != nil {
 			return "", fmt.Errorf("todo-write: mkdir: %w", err)
 		}
 		if err := os.WriteFile(todosPath, raw, 0o644); err != nil {
 			return "", fmt.Errorf("todo-write: write: %w", err)
 		}
+		if err := os.WriteFile(tasksPath, raw, 0o644); err != nil {
+			return "", fmt.Errorf("todo-write: write tasks: %w", err)
+		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
+	case "file-edit":
+		return r.runFileEdit(call.Args)
+	case "enter-worktree":
+		return r.runEnterWorktree(call.Args)
+	case "exit-worktree":
+		return r.runExitWorktree(call.Args)
+	case "send-message":
+		return r.runSendMessage(call.Args)
 	case "bash", "bash-output":
 		return r.runShellTool(ctx, call.Tool, call.Args, "bash")
 	case "comment":
@@ -1248,637 +1181,4 @@ func (r *toolRuntime) markReadFromSearch(out string) {
 		r.readSet[strings.TrimSpace(parts[0])] = struct{}{}
 		r.mu.Unlock()
 	}
-}
-
-func decodeJSONStrict(data []byte, target any) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(target); err != nil {
-		return err
-	}
-	var extra json.RawMessage
-	if err := dec.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("unexpected trailing JSON content")
-	}
-	return nil
-}
-
-func normalizeToolArgs(raw json.RawMessage) (json.RawMessage, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return json.RawMessage(`{}`), nil
-	}
-	// Support OpenAI-style stringified arguments for compatibility.
-	if len(trimmed) > 0 && trimmed[0] == '"' {
-		var encoded string
-		if err := json.Unmarshal(trimmed, &encoded); err != nil {
-			return nil, fmt.Errorf("arguments must be valid JSON: %w", err)
-		}
-		trimmed = bytes.TrimSpace([]byte(encoded))
-		if len(trimmed) == 0 {
-			return json.RawMessage(`{}`), nil
-		}
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &obj); err != nil {
-		return nil, fmt.Errorf("arguments must be a JSON object: %w", err)
-	}
-	return json.RawMessage(trimmed), nil
-}
-
-func firstUnknownKey(m map[string]json.RawMessage, allowed map[string]struct{}) string {
-	for k := range m {
-		if _, ok := allowed[k]; !ok {
-			return k
-		}
-	}
-	return ""
-}
-
-func extractStringField(raw json.RawMessage, field string) (string, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return "", nil
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", fmt.Errorf("%s must be a string", field)
-	}
-	return strings.TrimSpace(value), nil
-}
-
-// parseAllToolCalls scans all lines of s and collects every TOOL_CALL entry.
-func parseAllToolCalls(s string) (calls []toolCall, parseErrs []error) {
-	scanner := bufio.NewScanner(strings.NewReader(s))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(strings.TrimSpace(line), toolCallPrefix) {
-			continue
-		}
-		call, hasCall, err := parseToolCall(strings.TrimSpace(line))
-		if err != nil {
-			parseErrs = append(parseErrs, err)
-			continue
-		}
-		if hasCall {
-			calls = append(calls, call)
-		}
-	}
-	return calls, parseErrs
-}
-
-func parseToolCall(s string) (toolCall, bool, error) {
-	if !strings.HasPrefix(s, toolCallPrefix) {
-		return toolCall{}, false, nil
-	}
-	raw := strings.TrimSpace(strings.TrimPrefix(s, toolCallPrefix))
-	raw = strings.TrimPrefix(raw, "```json")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
-	raw = strings.TrimSpace(raw)
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
-		return toolCall{}, true, fmt.Errorf("invalid tool call JSON: %w", err)
-	}
-	if unknown := firstUnknownKey(envelope, allowedToolCallKeys); unknown != "" {
-		return toolCall{}, true, fmt.Errorf("unsupported tool call field %q", unknown)
-	}
-
-	toolFromTool, err := extractStringField(envelope["tool"], "tool")
-	if err != nil {
-		return toolCall{}, true, err
-	}
-	toolFromName, err := extractStringField(envelope["name"], "name")
-	if err != nil {
-		return toolCall{}, true, err
-	}
-	toolName := toolFromTool
-	if toolName == "" {
-		toolName = toolFromName
-	} else if toolFromName != "" && toolFromName != toolFromTool {
-		return toolCall{}, true, fmt.Errorf("conflicting tool names %q and %q", toolFromTool, toolFromName)
-	}
-
-	var fn map[string]json.RawMessage
-	if fnRaw, ok := envelope["function"]; ok && len(bytes.TrimSpace(fnRaw)) > 0 && !bytes.Equal(bytes.TrimSpace(fnRaw), []byte("null")) {
-		if err := json.Unmarshal(fnRaw, &fn); err != nil {
-			return toolCall{}, true, fmt.Errorf("function must be an object")
-		}
-		if unknown := firstUnknownKey(fn, allowedFunctionKeys); unknown != "" {
-			return toolCall{}, true, fmt.Errorf("unsupported function field %q", unknown)
-		}
-		fnName, err := extractStringField(fn["name"], "function.name")
-		if err != nil {
-			return toolCall{}, true, err
-		}
-		if toolName == "" {
-			toolName = fnName
-		} else if fnName != "" && fnName != toolName {
-			return toolCall{}, true, fmt.Errorf("conflicting function name %q and tool name %q", fnName, toolName)
-		}
-	}
-
-	if toolName == "" {
-		return toolCall{}, true, fmt.Errorf("tool call missing tool name")
-	}
-
-	var argKeys []string
-	for _, key := range []string{"args", "arguments", "input", "parameters", "tool_input"} {
-		if rawArgs, ok := envelope[key]; ok && len(bytes.TrimSpace(rawArgs)) > 0 && !bytes.Equal(bytes.TrimSpace(rawArgs), []byte("null")) {
-			argKeys = append(argKeys, key)
-		}
-	}
-	if rawFnArgs, ok := fn["arguments"]; ok && len(bytes.TrimSpace(rawFnArgs)) > 0 && !bytes.Equal(bytes.TrimSpace(rawFnArgs), []byte("null")) {
-		argKeys = append(argKeys, "function.arguments")
-	}
-	if len(argKeys) > 1 {
-		return toolCall{}, true, fmt.Errorf("ambiguous arguments fields: %s", strings.Join(argKeys, ", "))
-	}
-
-	rawArgs := json.RawMessage(`{}`)
-	switch {
-	case len(argKeys) == 0:
-		// leave defaults
-	case argKeys[0] == "function.arguments":
-		rawArgs = fn["arguments"]
-	default:
-		rawArgs = envelope[argKeys[0]]
-	}
-	normalizedArgs, err := normalizeToolArgs(rawArgs)
-	if err != nil {
-		return toolCall{}, true, err
-	}
-
-	return toolCall{Tool: toolName, Args: normalizedArgs}, true, nil
-}
-
-func parseFinal(s string) (string, bool) {
-	trimmed := strings.TrimSpace(s)
-	if !strings.HasPrefix(trimmed, finalPrefix) {
-		return "", false
-	}
-	out := strings.TrimSpace(strings.TrimPrefix(trimmed, finalPrefix))
-	out = strings.TrimPrefix(out, ":")
-	out = strings.TrimSpace(out)
-	return out, true
-}
-
-func stripThinkTags(content string) (main, thinking string) {
-	var sb, tb strings.Builder
-	remaining := content
-	for {
-		start := strings.Index(remaining, "<think>")
-		if start == -1 {
-			sb.WriteString(remaining)
-			break
-		}
-		sb.WriteString(remaining[:start])
-		remaining = remaining[start+len("<think>"):]
-		end := strings.Index(remaining, "</think>")
-		if end == -1 {
-			tb.WriteString(remaining)
-			break
-		}
-		tb.WriteString(remaining[:end])
-		remaining = remaining[end+len("</think>"):]
-	}
-	return strings.TrimSpace(sb.String()), strings.TrimSpace(tb.String())
-}
-
-// stripFrontmatter removes a YAML frontmatter block (between --- delimiters)
-// from content loaded from agent .md files. The system prompt is everything after
-// the second --- marker.
-func stripFrontmatter(content string) string {
-	content = strings.TrimSpace(content)
-	if !strings.HasPrefix(content, "---") {
-		return content
-	}
-	rest := content[3:]
-	idx := strings.Index(rest, "\n---")
-	if idx == -1 {
-		return content
-	}
-	return strings.TrimSpace(rest[idx+4:])
-}
-
-func loadPromptOrFallback(cwd, relative, fallback string) string {
-	if strings.TrimSpace(cwd) != "" && strings.TrimSpace(relative) != "" {
-		p := filepath.Join(cwd, relative)
-		if data, err := os.ReadFile(p); err == nil {
-			text := strings.TrimSpace(string(data))
-			if text != "" {
-				return stripFrontmatter(text)
-			}
-		}
-	}
-	return fallback
-}
-
-func sliceLines(content string, start, end int) string {
-	lines := strings.Split(content, "\n")
-	if start < 1 {
-		start = 1
-	}
-	if end < 1 || end > len(lines) {
-		end = len(lines)
-	}
-	if start > len(lines) || start > end {
-		return ""
-	}
-	var b strings.Builder
-	for i := start - 1; i < end; i++ {
-		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, lines[i]))
-	}
-	return b.String()
-}
-
-func truncate(s string, max int) string {
-	if max <= 0 || len(s) <= max {
-		return s
-	}
-	return s[:max] + "\n... (truncated)"
-}
-
-func emptyIfBlank(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "(none)"
-	}
-	return s
-}
-
-func singleLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
-}
-
-func isMajorOperationTool(name string) bool {
-	switch name {
-	case "file-write", "shell-exec", "bash", "bash-output", "agent":
-		return true
-	default:
-		return false
-	}
-}
-
-// stripLeakedToolCalls removes any lines that start with TOOL_CALL (which the LLM
-// sometimes writes as plain text instead of executing), and trims stray blank lines.
-func stripLeakedToolCalls(s string) string {
-	lines := strings.Split(s, "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), toolCallPrefix) {
-			continue
-		}
-		out = append(out, line)
-	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
-}
-
-func isBlockedCommand(cmd string) bool {
-	l := strings.ToLower(cmd)
-	blocked := []string{
-		"git reset --hard",
-		"git checkout --",
-		"rm -rf /",
-	}
-	for _, b := range blocked {
-		if strings.Contains(l, b) {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *toolRuntime) runShellTool(ctx context.Context, toolID string, rawArgs []byte, prefix string) (string, error) {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("%s args: %w", prefix, err)
-	}
-	cmdText := strings.TrimSpace(args.Command)
-	if cmdText == "" {
-		return "", fmt.Errorf("%s: command is required", prefix)
-	}
-	if err := r.authorizeShellCommand(ctx, toolID, cmdText); err != nil {
-		return "", err
-	}
-	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdText)
-	cmd.Dir = r.cwd
-	out, err := cmd.CombinedOutput()
-	text := truncate(string(out), 12000)
-	if err != nil {
-		return text, fmt.Errorf("command failed: %w", err)
-	}
-	return text, nil
-}
-
-func (r *toolRuntime) runWebFetch(ctx context.Context, rawArgs []byte) (string, error) {
-	var args struct {
-		URL string `json:"url"`
-	}
-	if err := decodeJSONStrict(rawArgs, &args); err != nil {
-		return "", fmt.Errorf("web-fetch args: %w", err)
-	}
-	urlText := strings.TrimSpace(args.URL)
-	if urlText == "" {
-		return "", fmt.Errorf("web-fetch: url required")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlText, nil)
-	if err != nil {
-		return "", fmt.Errorf("web-fetch: %w", err)
-	}
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("web-fetch: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
-	if err != nil {
-		return "", fmt.Errorf("web-fetch: read: %w", err)
-	}
-	return string(body), nil
-}
-
-type allowedCommandsFile struct {
-	AllowedCommands []string `json:"allowed_commands"`
-}
-
-func isDelegationRoleAllowed(caller, target config.AgentRole) bool {
-	switch caller {
-	case config.AgentRolePrimary, config.AgentRoleOrchestrator:
-		return target == config.AgentRoleWorker || target == config.AgentRoleSubagent
-	case config.AgentRoleWorker, config.AgentRoleSubagent:
-		return target == config.AgentRoleSubagent || target == config.AgentRoleWorker
-	default:
-		return false
-	}
-}
-
-func marshalSubagentResult(agentID string, result RunResult) string {
-	payload := map[string]any{
-		"agent":            agentID,
-		"status":           "ok",
-		"summary":          truncate(strings.TrimSpace(result.Content), 1200),
-		"tool_trace_count": len(result.Tools),
-		"tokens_used":      result.TokensUsed,
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Sprintf("{\"agent\":%q,\"status\":\"ok\",\"summary\":%q}", agentID, truncate(strings.TrimSpace(result.Content), 1200))
-	}
-	return string(raw)
-}
-
-var alwaysAllowedCommandPrefixes = []string{
-	"ls",
-	"pwd",
-	"cat",
-	"head",
-	"tail",
-	"wc",
-	"grep",
-	"rg",
-	"find",
-	"stat",
-	"git status",
-	"git diff",
-	"go test",
-	"go build",
-	"go vet",
-	"make test",
-	"make build",
-}
-
-func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command string) error {
-	command = strings.TrimSpace(command)
-	normalized := normalizeCommand(command)
-	if normalized == "" {
-		return fmt.Errorf("shell-exec command is required")
-	}
-
-	segments := splitShellCommandSegments(command)
-	if len(segments) == 0 {
-		segments = []string{normalized}
-	}
-	needsApproval := r.permission != config.PermissionYOLO
-	if spec, ok := r.toolPolicies[toolID]; ok && !spec.RequiresApproval {
-		needsApproval = false
-	}
-
-	missingApprovals := make([]string, 0, len(segments))
-	toolRules := []config.PermissionRule{}
-	if spec, ok := r.toolPolicies[toolID]; ok {
-		toolRules = append(toolRules, spec.PermissionRules...)
-	}
-	r.shellMu.Lock()
-	defer r.shellMu.Unlock()
-	for _, seg := range segments {
-		segNorm := normalizeCommand(seg)
-		if segNorm == "" {
-			continue
-		}
-		if isBlockedCommand(segNorm) {
-			return fmt.Errorf("blocked dangerous command")
-		}
-		if isAlwaysAllowedCommand(segNorm) {
-			continue
-		}
-		switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
-		case config.RuleDeny:
-			return fmt.Errorf("shell-exec denied by policy for command segment %q", segNorm)
-		case config.RuleAllow:
-			continue
-		}
-		r.mu.Lock()
-		_, preapproved := r.allowedShell[segNorm]
-		r.mu.Unlock()
-		if preapproved {
-			continue
-		}
-		missingApprovals = append(missingApprovals, segNorm)
-	}
-	if len(missingApprovals) == 0 || !needsApproval {
-		return nil
-	}
-
-	if r.shellApproval == nil {
-		return fmt.Errorf("shell-exec requires approval outside yolo mode")
-	}
-
-	decision, err := r.shellApproval(ctx, ShellApprovalRequest{Command: command})
-	if err != nil {
-		return fmt.Errorf("shell approval failed: %w", err)
-	}
-	switch decision {
-	case ShellApprovalAllowOnce:
-		return nil
-	case ShellApprovalAllowAlways:
-		r.mu.Lock()
-		for _, seg := range missingApprovals {
-			r.allowedShell[seg] = struct{}{}
-		}
-		r.mu.Unlock()
-		if err := saveAllowedCommandSet(r.cwd, r.allowedShell); err != nil {
-			return fmt.Errorf("persist allowed command: %w", err)
-		}
-		return nil
-	default:
-		return fmt.Errorf("shell-exec denied by user")
-	}
-}
-
-func normalizeCommand(command string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(command)), " ")
-}
-
-func splitShellCommandSegments(command string) []string {
-	command = strings.TrimSpace(command)
-	if command == "" {
-		return nil
-	}
-	var (
-		segments                []string
-		buf                     strings.Builder
-		inSingle, inDouble, esc bool
-		subDepth                int
-	)
-	flush := func() {
-		seg := strings.TrimSpace(buf.String())
-		if seg != "" {
-			segments = append(segments, seg)
-		}
-		buf.Reset()
-	}
-
-	for i := 0; i < len(command); i++ {
-		ch := command[i]
-		if esc {
-			buf.WriteByte(ch)
-			esc = false
-			continue
-		}
-		switch ch {
-		case '\\':
-			esc = true
-			buf.WriteByte(ch)
-		case '\'':
-			if !inDouble {
-				inSingle = !inSingle
-			}
-			buf.WriteByte(ch)
-		case '"':
-			if !inSingle {
-				inDouble = !inDouble
-			}
-			buf.WriteByte(ch)
-		case '(':
-			if !inSingle && !inDouble && i > 0 && command[i-1] == '$' {
-				subDepth++
-			}
-			buf.WriteByte(ch)
-		case ')':
-			if !inSingle && !inDouble && subDepth > 0 {
-				subDepth--
-			}
-			buf.WriteByte(ch)
-		case ';':
-			if inSingle || inDouble || subDepth > 0 {
-				buf.WriteByte(ch)
-				continue
-			}
-			flush()
-		case '|':
-			if inSingle || inDouble || subDepth > 0 {
-				buf.WriteByte(ch)
-				continue
-			}
-			if i+1 < len(command) && command[i+1] == '|' {
-				flush()
-				i++
-				continue
-			}
-			flush()
-		case '&':
-			if inSingle || inDouble || subDepth > 0 {
-				buf.WriteByte(ch)
-				continue
-			}
-			if i+1 < len(command) && command[i+1] == '&' {
-				flush()
-				i++
-				continue
-			}
-			buf.WriteByte(ch)
-		case '\n':
-			if inSingle || inDouble || subDepth > 0 {
-				buf.WriteByte(ch)
-				continue
-			}
-			flush()
-		default:
-			buf.WriteByte(ch)
-		}
-	}
-	flush()
-	return segments
-}
-
-func isAlwaysAllowedCommand(command string) bool {
-	for _, prefix := range alwaysAllowedCommandPrefixes {
-		if command == prefix || strings.HasPrefix(command, prefix+" ") {
-			return true
-		}
-	}
-	return false
-}
-
-func allowedCommandsPath(cwd string) string {
-	return filepath.Join(cwd, ".spettro", "allowed_commands.json")
-}
-
-func loadAllowedCommandSet(cwd string) (map[string]struct{}, error) {
-	out := map[string]struct{}{}
-	data, err := os.ReadFile(allowedCommandsPath(cwd))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return out, nil
-		}
-		return nil, fmt.Errorf("read allowed commands: %w", err)
-	}
-	var parsed allowedCommandsFile
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil, fmt.Errorf("decode allowed commands: %w", err)
-	}
-	for _, cmd := range parsed.AllowedCommands {
-		norm := normalizeCommand(cmd)
-		if norm != "" {
-			out[norm] = struct{}{}
-		}
-	}
-	return out, nil
-}
-
-func saveAllowedCommandSet(cwd string, set map[string]struct{}) error {
-	cmds := make([]string, 0, len(set))
-	for cmd := range set {
-		if strings.TrimSpace(cmd) != "" {
-			cmds = append(cmds, cmd)
-		}
-	}
-	sort.Strings(cmds)
-	payload := allowedCommandsFile{AllowedCommands: cmds}
-	raw, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode allowed commands: %w", err)
-	}
-
-	path := allowedCommandsPath(cwd)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create .spettro dir: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return fmt.Errorf("write allowed commands temp: %w", err)
-	}
-	return os.Rename(tmp, path)
 }
