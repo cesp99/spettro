@@ -12,6 +12,7 @@ const (
 	metadataFilename = "session.json"
 	messagesFilename = "messages.json"
 	todosFilename    = "todos.json"
+	tasksFilename    = "tasks.json"
 	agentsFilename   = "agents.jsonl"
 )
 
@@ -58,6 +59,7 @@ type State struct {
 	Metadata Metadata
 	Messages []Message
 	Todos    []Todo
+	Tasks    []Todo
 	Events   []AgentEvent
 }
 

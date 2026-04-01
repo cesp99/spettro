@@ -35,7 +35,14 @@ func Save(globalDir string, state State) error {
 	if err := writeJSON(filepath.Join(dir, messagesFilename), state.Messages); err != nil {
 		return err
 	}
-	if err := writeJSON(filepath.Join(dir, todosFilename), state.Todos); err != nil {
+	tasks := state.Tasks
+	if len(tasks) == 0 {
+		tasks = state.Todos
+	}
+	if err := writeJSON(filepath.Join(dir, tasksFilename), tasks); err != nil {
+		return err
+	}
+	if err := writeJSON(filepath.Join(dir, todosFilename), tasks); err != nil {
 		return err
 	}
 	return rewriteEvents(filepath.Join(dir, agentsFilename), state.Events)
@@ -72,6 +79,7 @@ func Load(globalDir, sessionID string) (State, error) {
 	metaPath := filepath.Join(dir, metadataFilename)
 	msgPath := filepath.Join(dir, messagesFilename)
 	todoPath := filepath.Join(dir, todosFilename)
+	taskPath := filepath.Join(dir, tasksFilename)
 	agentPath := filepath.Join(dir, agentsFilename)
 
 	var meta Metadata
@@ -86,11 +94,18 @@ func Load(globalDir, sessionID string) (State, error) {
 	if err := readJSONIfExists(todoPath, &todos); err != nil {
 		return State{}, err
 	}
+	var tasks []Todo
+	if err := readJSONIfExists(taskPath, &tasks); err != nil {
+		return State{}, err
+	}
+	if len(tasks) == 0 {
+		tasks = todos
+	}
 	events, err := readEvents(agentPath)
 	if err != nil {
 		return State{}, err
 	}
-	return State{Metadata: meta, Messages: messages, Todos: todos, Events: events}, nil
+	return State{Metadata: meta, Messages: messages, Todos: tasks, Tasks: tasks, Events: events}, nil
 }
 
 func LoadTodos(globalDir, sessionID string) ([]Todo, error) {
@@ -98,8 +113,79 @@ func LoadTodos(globalDir, sessionID string) ([]Todo, error) {
 		return nil, nil
 	}
 	var todos []Todo
-	err := readJSONIfExists(filepath.Join(SessionDir(globalDir, sessionID), todosFilename), &todos)
+	taskPath := filepath.Join(SessionDir(globalDir, sessionID), tasksFilename)
+	err := readJSONIfExists(taskPath, &todos)
+	if err != nil {
+		return nil, err
+	}
+	if len(todos) == 0 {
+		err = readJSONIfExists(filepath.Join(SessionDir(globalDir, sessionID), todosFilename), &todos)
+	}
 	return todos, err
+}
+
+func SaveTodos(globalDir, sessionID string, todos []Todo) error {
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	dir := SessionDir(globalDir, sessionID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := writeJSON(filepath.Join(dir, tasksFilename), todos); err != nil {
+		return err
+	}
+	return writeJSON(filepath.Join(dir, todosFilename), todos)
+}
+
+func UpsertTodo(globalDir, sessionID string, t Todo) (Todo, error) {
+	if sessionID == "" {
+		return Todo{}, fmt.Errorf("session id is required")
+	}
+	t.ID = strings.TrimSpace(t.ID)
+	if t.ID == "" {
+		return Todo{}, fmt.Errorf("todo id is required")
+	}
+	t.Content = strings.TrimSpace(t.Content)
+	if t.Content == "" {
+		return Todo{}, fmt.Errorf("todo content is required")
+	}
+	if strings.TrimSpace(t.Status) == "" {
+		t.Status = "pending"
+	}
+	t.UpdatedAt = time.Now()
+	todos, err := LoadTodos(globalDir, sessionID)
+	if err != nil {
+		return Todo{}, err
+	}
+	replaced := false
+	for i := range todos {
+		if todos[i].ID == t.ID {
+			todos[i] = t
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		todos = append(todos, t)
+	}
+	if err := SaveTodos(globalDir, sessionID, todos); err != nil {
+		return Todo{}, err
+	}
+	return t, nil
+}
+
+func GetTodo(globalDir, sessionID, id string) (Todo, bool, error) {
+	todos, err := LoadTodos(globalDir, sessionID)
+	if err != nil {
+		return Todo{}, false, err
+	}
+	for _, t := range todos {
+		if t.ID == id {
+			return t, true, nil
+		}
+	}
+	return Todo{}, false, nil
 }
 
 func readEvents(path string) ([]AgentEvent, error) {

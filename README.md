@@ -58,6 +58,11 @@ Spettro commands are entered in the input box with a leading `/`.
 - `/connect` also supports local endpoints (e.g. LM Studio `localhost:1234`)
 - `/models` open model selector (supports `/models provider:model`)
 - `/permission <ask-first|restricted|yolo>`
+- `/permissions [ask-first|restricted|yolo]` show/set permission alias
+- `/plan [prompt]` switch to plan mode or run plan directly
+- `/tasks [list|add|done|set|show]` manage session tasks
+- `/mcp <list|read|auth>` manage MCP resources and auth
+- `/skills` list local skills/prompts
 - `/approve` execute pending plan in coding mode (routes via manifest handoff)
 - `/search [query]` search repository files/content
 - `/compact [focus]` summarize conversation history (optionally focused)

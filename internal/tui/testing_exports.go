@@ -160,6 +160,10 @@ func (m Model) UpdateForTesting(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m.update(msg)
 }
 
+func (m Model) HandleCommandForTesting(input string) (tea.Model, tea.Cmd) {
+	return m.handleCommand(input)
+}
+
 func (m Model) TriggerQuitWarningTimeoutForTesting() (tea.Model, tea.Cmd) {
 	return m.update(quitWarningMsg{})
 }

@@ -12,8 +12,13 @@
 | `/models` | Open model selector dialog. |
 | `/models <provider:model>` | Set model directly. |
 | `/permission <ask-first\|restricted\|yolo>` | Set execution policy. |
+| `/permissions [ask-first\|restricted\|yolo]` | Show or set execution policy alias. |
 | `/budget <n>` | Set request token budget (`min 1000`). |
 | `/approve` | Execute pending plan (routes via manifest handoff to coding agent). |
+| `/plan [prompt]` | Switch to planning mode or execute a plan prompt directly. |
+| `/tasks [list\|add\|done\|set\|show]` | Manage structured session tasks. |
+| `/mcp <list\|read\|auth>` | Manage MCP resources and auth. |
+| `/skills` | List local skills/prompts available in `agents/`. |
 | `/image <path>` | Queue image for next chat request. |
 | `/commit` | Generate commit message and commit tracked changes (adds Co-Authored-By trailer). |
 | `/search [query]` | Search repository files and contents. |
