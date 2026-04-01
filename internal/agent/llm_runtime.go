@@ -16,6 +16,7 @@ import (
 
 	"spettro/internal/budget"
 	"spettro/internal/config"
+	"spettro/internal/hooks"
 	"spettro/internal/provider"
 	"spettro/internal/session"
 )
@@ -49,7 +50,10 @@ const (
 )
 
 type ShellApprovalRequest struct {
-	Command string
+	Command  string
+	ToolID   string
+	Segments []string
+	Reason   string
 }
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
@@ -153,6 +157,9 @@ type toolRuntime struct {
 	maxParallelWorkers   int
 	maxParallelMicroagnt int
 	maxDelegationDepth   int
+	hooksConfig          hooks.EffectiveConfig
+	stopRequested        bool
+	stopReason           string
 }
 
 // parallelResult holds the outcome of a single tool execution in a parallel batch.
@@ -246,6 +253,14 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		return "", nil, 0, err
 	}
 	runtime.allowedShell = allowedShell
+	hooksCfg, err := hooks.LoadEffective(cfg.CWD)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	runtime.hooksConfig = hooksCfg
+	if err := runtime.runSessionStartHooks(ctx); err != nil {
+		return "", nil, 0, err
+	}
 	for _, p := range cfg.RequiredReads {
 		p = filepath.ToSlash(strings.TrimSpace(p))
 		if p != "" {
@@ -299,6 +314,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			}
 			if !runtime.logToolCalls {
 				history.WriteString(fmt.Sprintf("tool(%d): %d calls completed\n", step, len(results)))
+			}
+			if runtime.shouldStop() {
+				return runtime.stopMessage(), traces, totalTokens, nil
 			}
 			for _, perr := range parseErrs {
 				history.WriteString(fmt.Sprintf("tool(%d): parse error: %s — fix the JSON and retry\n", step, perr))
@@ -412,7 +430,9 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	}
 	tctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
-	return r.execute(tctx, call, allowed)
+	out, err := r.execute(tctx, call, allowed)
+	_ = r.runPostToolHooks(tctx, call.Tool, call.Args, out)
+	return out, err
 }
 
 func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[string]struct{}) (string, error) {
@@ -428,6 +448,16 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 				return "", fmt.Errorf("tool %q denied by policy for permission %q", call.Tool, fam)
 			}
 		}
+	}
+	updatedArgs, denyReason, err := r.runPreToolHooks(ctx, call.Tool, call.Args)
+	if err != nil {
+		return "", err
+	}
+	if denyReason != "" {
+		return "", fmt.Errorf("tool %q blocked by hook: %s", call.Tool, denyReason)
+	}
+	if len(updatedArgs) > 0 {
+		call.Args = updatedArgs
 	}
 	if call.Tool != "file-read" && call.Tool != "glob" && call.Tool != "grep" {
 		if next, ok := r.nextRequiredRead(); ok {
@@ -592,8 +622,12 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return r.runTaskUpdate(call.Args)
 	case "task-list":
 		return r.runTaskList(call.Args)
+	case "task-stop":
+		return r.runTaskStop(call.Args)
 	case "tool-search":
 		return r.runToolSearch(allowed, call.Args)
+	case "config":
+		return r.runConfigTool(call.Args)
 	case "mcp-list-resources":
 		return r.runMCPListResources(ctx, call.Args)
 	case "mcp-read-resource":
@@ -628,13 +662,24 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			}
 			owner, _ := m["owner"].(string)
 			source, _ := m["source"].(string)
+			priority, _ := m["priority"].(string)
+			var deps []string
+			if rawDeps, ok := m["dependencies"].([]interface{}); ok {
+				for _, d := range rawDeps {
+					if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
+						deps = append(deps, strings.TrimSpace(s))
+					}
+				}
+			}
 			out = append(out, session.Todo{
-				ID:        id,
-				Content:   content,
-				Status:    status,
-				Owner:     owner,
-				Source:    source,
-				UpdatedAt: now,
+				ID:           id,
+				Content:      content,
+				Status:       status,
+				Owner:        owner,
+				Source:       source,
+				Priority:     priority,
+				Dependencies: deps,
+				UpdatedAt:    now,
 			})
 		}
 		raw, err := json.MarshalIndent(out, "", "  ")
@@ -642,11 +687,15 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			return "", fmt.Errorf("todo-write: marshal: %w", err)
 		}
 		todosPath := filepath.Join(r.sessionDir, "todos.json")
+		tasksPath := filepath.Join(r.sessionDir, "tasks.json")
 		if err := os.MkdirAll(filepath.Dir(todosPath), 0o700); err != nil {
 			return "", fmt.Errorf("todo-write: mkdir: %w", err)
 		}
 		if err := os.WriteFile(todosPath, raw, 0o644); err != nil {
 			return "", fmt.Errorf("todo-write: write: %w", err)
+		}
+		if err := os.WriteFile(tasksPath, raw, 0o644); err != nil {
+			return "", fmt.Errorf("todo-write: write tasks: %w", err)
 		}
 		return fmt.Sprintf("wrote %d todos", len(out)), nil
 	case "file-edit":

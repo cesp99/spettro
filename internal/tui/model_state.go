@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
+	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/session"
 )
@@ -221,6 +222,39 @@ func (m *Model) syncTodosFromSession() {
 	}
 }
 
+func (m *Model) updateCompactWarningState() {
+	window := m.contextWindow()
+	if window == 0 {
+		window = contextWindowDefault(m.cfg.ActiveProvider)
+	}
+	eval := compact.Evaluate(window, compact.Config{
+		AutoEnabled:      m.cfg.AutoCompactEnabled,
+		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+		MaxFailures:      m.cfg.AutoCompactMaxFailures,
+	}, compact.State{
+		TokensUsed:          m.totalTokensUsed,
+		ConsecutiveFailures: m.autoCompactFailures,
+	})
+	level := 0
+	if eval.IsError {
+		level = 2
+	} else if eval.IsWarning {
+		level = 1
+	}
+	if level == m.compactWarningLevel {
+		return
+	}
+	m.compactWarningLevel = level
+	switch level {
+	case 2:
+		m.showBanner("context is near limit; compacting soon is recommended", "warn")
+	case 1:
+		m.showBanner("context usage is getting high", "info")
+	default:
+		m.showBanner("context pressure normalized", "success")
+	}
+}
+
 func parseNumstat(text string, totals map[string][2]int) {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -385,6 +419,10 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 	if t.Name == "comment" {
 		return
 	}
+	if t.Name == "approval" {
+		m.recordApprovalTrace(t)
+		return
+	}
 	m.recordToolActivity(t)
 	if t.Name != "agent" {
 		return
@@ -458,6 +496,66 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		Task:          task,
 		Status:        status,
 		Summary:       summarizeAgentToolOutput(t.Output),
+	})
+}
+
+func (m *Model) recordApprovalTrace(t agent.ToolTrace) {
+	type approvalPayload struct {
+		Decision string `json:"decision"`
+		Source   string `json:"source"`
+		ToolID   string `json:"tool_id"`
+		Segment  string `json:"segment"`
+		Reason   string `json:"reason"`
+	}
+	var payload approvalPayload
+	_ = json.Unmarshal([]byte(t.Args), &payload)
+	decision := strings.TrimSpace(payload.Decision)
+	if decision == "" {
+		decision = "unknown"
+	}
+	toolID := strings.TrimSpace(payload.ToolID)
+	if toolID == "" {
+		toolID = "shell-exec"
+	}
+	segment := strings.TrimSpace(payload.Segment)
+	if segment == "" {
+		segment = "(unspecified)"
+	}
+	source := strings.TrimSpace(payload.Source)
+	if source == "" {
+		source = "unknown"
+	}
+	reason := strings.TrimSpace(payload.Reason)
+	if reason == "" {
+		reason = strings.TrimSpace(t.Output)
+	}
+	if reason == "" {
+		reason = "n/a"
+	}
+	ev := session.AgentEvent{
+		At:             time.Now(),
+		Kind:           "approval",
+		AgentID:        m.mode,
+		Status:         decision,
+		Task:           segment,
+		Summary:        reason,
+		ToolID:         toolID,
+		CommandSegment: segment,
+		Decision:       decision,
+		DecisionSource: source,
+		Reason:         reason,
+	}
+	m.recentApprovals = append(m.recentApprovals, ev)
+	m.upsertActivity(activityItem{
+		Key:     fmt.Sprintf("approval:%d", time.Now().UnixNano()),
+		Kind:    "approval",
+		ID:      toolID,
+		AgentID: m.mode,
+		Title:   fmt.Sprintf("approval %s (%s)", decision, source),
+		Detail:  truncateLabel(segment, 120),
+		Body:    reason,
+		Status:  decision,
+		At:      ev.At,
 	})
 }
 
@@ -833,6 +931,7 @@ func (m Model) loadSessionSummary(sel session.Summary) (session.State, error) {
 func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 	m.activityFeed = nil
 	m.parallelAgents = nil
+	m.recentApprovals = nil
 	for i, ev := range events {
 		at := ev.At
 		if at.IsZero() {
@@ -843,6 +942,42 @@ func (m *Model) rebuildActivitiesFromEvents(events []session.AgentEvent) {
 			kind = "agent"
 		}
 		switch kind {
+		case "approval":
+			decision := strings.TrimSpace(ev.Decision)
+			if decision == "" {
+				decision = strings.TrimSpace(ev.Status)
+			}
+			source := strings.TrimSpace(ev.DecisionSource)
+			if source == "" {
+				source = "unknown"
+			}
+			toolID := strings.TrimSpace(ev.ToolID)
+			if toolID == "" {
+				toolID = "shell-exec"
+			}
+			segment := strings.TrimSpace(ev.CommandSegment)
+			if segment == "" {
+				segment = strings.TrimSpace(ev.Task)
+			}
+			if segment == "" {
+				segment = "(unspecified)"
+			}
+			reason := strings.TrimSpace(ev.Reason)
+			if reason == "" {
+				reason = strings.TrimSpace(ev.Summary)
+			}
+			m.recentApprovals = append(m.recentApprovals, ev)
+			m.upsertActivity(activityItem{
+				Key:     fmt.Sprintf("resume:approval:%d", i),
+				Kind:    "approval",
+				ID:      toolID,
+				AgentID: ev.AgentID,
+				Title:   fmt.Sprintf("approval %s (%s)", decision, source),
+				Detail:  truncateLabel(segment, 120),
+				Body:    reason,
+				Status:  decision,
+				At:      at,
+			})
 		case "tool":
 			name := strings.TrimSpace(ev.ToolName)
 			if name == "" {

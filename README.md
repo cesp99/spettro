@@ -8,15 +8,14 @@
 
 Spettro is a terminal-first multi-agent coding assistant written in Go.
 
-It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via the "agent" tool with `TOOL_CALL` syntax, and specialized agents (planning, coding, chat, explore, git, reviewer, tester, docs-writer). The entry point `cmd/spettro/main.go` boots config, storage, provider manager, model catalog, and TUI; manifest loaded via `config.LoadAgentManifestForProject`.
+It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` prompts), parallel sub-agent spawning via `TOOL_CALL` and an `agent` tool, plus specialized orchestrator/worker roles (plan, coding, ask, explore, code, git, test, review, docs).
 
 ## Highlights
 
 - Configurable multi-agent system via `spettro.agents.toml` and `agents/*.md`
 - Parallel `TOOL_CALL` spawning of sub-agents
-- Exploration-first workflow using glob/grep/file-read before edits
 - Permission policies: `ask-first`, `restricted`, `yolo`
-- Live tool traces during planning/coding runs
+- Live tool traces in planning/coding runs
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
@@ -45,31 +44,37 @@ go run ./cmd/spettro
 At first launch:
 
 1. Confirm folder trust.
-2. Run `/setup` (or `/connect` then `/models`) to configure provider/model and API key.
-3. Start with `planning` (default_agent) and switch with `Shift+Tab`.
+2. Run `/connect` to add an API key (or local endpoint).
+3. Run `/models` to select provider/model.
+4. Start with `plan` (default agent) and switch with `Shift+Tab`.
 
 ## Common commands
 
-Spettro commands are entered in the input box with a leading `/`.
+Spettro commands are entered with a leading `/`.
 
-- `/help` show built-in help
-- `/setup` interactive setup wizard
-- `/connect` connect a provider/API key
-- `/connect` also supports local endpoints (e.g. LM Studio `localhost:1234`)
-- `/models` open model selector (supports `/models provider:model`)
-- `/permission <ask-first|restricted|yolo>`
-- `/permissions [ask-first|restricted|yolo]` show/set permission alias
-- `/plan [prompt]` switch to plan mode or run plan directly
+- `/help` show help text
+- `/exit`, `/quit` quit Spettro
+- `/mode`, `/next` cycle active agent/mode
+- `/connect` connect provider or local endpoint
+- `/models [provider:model] [api_key]` open selector or set directly
+- `/permission <ask-first|restricted|yolo>` set execution policy
+- `/permissions [ask-first|restricted|yolo]` show/set permission policy
+- `/permissions debug <on|off>` toggle permission diagnostics
+- `/budget <n|0>` set request token budget (`0` = unlimited)
+- `/plan [prompt]` switch to plan mode or run plan prompt
+- `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
-- `/mcp <list|read|auth>` manage MCP resources and auth
+- `/mcp <list|read|auth>` manage MCP resources and auth tokens
 - `/skills` list local skills/prompts
-- `/approve` execute pending plan in coding mode (routes via manifest handoff)
-- `/search [query]` search repository files/content
-- `/compact [focus]` summarize conversation history (optionally focused)
+- `/hooks` show effective runtime hooks
+- `/compact [focus]` summarize conversation history
+- `/compact auto <status|on|off>` configure auto-compact
+- `/compact policy` show compact thresholds/counters
+- `/clear` auto-save and clear current conversation
 - `/resume` load a previous saved conversation
-- `/commit` generate and create a git commit message
+- `/init` analyze the repo and create/update `SPETTRO.md`
 
-For the full command and keybinding reference, see [`docs/commands.md`](docs/commands.md).
+For full commands and keybindings, see [`docs/commands.md`](docs/commands.md).
 
 ## Project docs
 

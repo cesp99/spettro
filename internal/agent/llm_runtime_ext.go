@@ -23,8 +23,11 @@ import (
 
 func (r *toolRuntime) runAskUser(rawArgs []byte) (string, error) {
 	var args struct {
-		Question string   `json:"question"`
-		Options  []string `json:"options"`
+		Question          string   `json:"question"`
+		Options           []string `json:"options"`
+		Context           string   `json:"context"`
+		DefaultOption     string   `json:"default_option"`
+		AllowFreeResponse bool     `json:"allow_free_response"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("ask-user args: %w", err)
@@ -33,9 +36,6 @@ func (r *toolRuntime) runAskUser(rawArgs []byte) (string, error) {
 	if q == "" {
 		return "", fmt.Errorf("ask-user: question is required")
 	}
-	if len(args.Options) == 0 {
-		return "USER_INPUT_REQUIRED: " + q, nil
-	}
 	opts := make([]string, 0, len(args.Options))
 	for _, o := range args.Options {
 		o = strings.TrimSpace(o)
@@ -43,16 +43,31 @@ func (r *toolRuntime) runAskUser(rawArgs []byte) (string, error) {
 			opts = append(opts, o)
 		}
 	}
-	return fmt.Sprintf("USER_INPUT_REQUIRED: %s\nOptions: %s", q, strings.Join(opts, " | ")), nil
+	if len(opts) == 0 {
+		return "USER_INPUT_REQUIRED: " + q, nil
+	}
+	meta := []string{"Options: " + strings.Join(opts, " | ")}
+	if strings.TrimSpace(args.DefaultOption) != "" {
+		meta = append(meta, "Default: "+strings.TrimSpace(args.DefaultOption))
+	}
+	if strings.TrimSpace(args.Context) != "" {
+		meta = append(meta, "Context: "+strings.TrimSpace(args.Context))
+	}
+	if args.AllowFreeResponse {
+		meta = append(meta, "Free response allowed: true")
+	}
+	return fmt.Sprintf("USER_INPUT_REQUIRED: %s\n%s", q, strings.Join(meta, "\n")), nil
 }
 
 func (r *toolRuntime) runTaskCreate(rawArgs []byte) (string, error) {
 	var args struct {
-		ID      string `json:"id"`
-		Content string `json:"content"`
-		Status  string `json:"status"`
-		Owner   string `json:"owner"`
-		Source  string `json:"source"`
+		ID           string   `json:"id"`
+		Content      string   `json:"content"`
+		Status       string   `json:"status"`
+		Owner        string   `json:"owner"`
+		Source       string   `json:"source"`
+		Priority     string   `json:"priority"`
+		Dependencies []string `json:"dependencies"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("task-create args: %w", err)
@@ -65,11 +80,13 @@ func (r *toolRuntime) runTaskCreate(rawArgs []byte) (string, error) {
 		id = fmt.Sprintf("task-%d", time.Now().UnixMilli())
 	}
 	item := session.Todo{
-		ID:      id,
-		Content: strings.TrimSpace(args.Content),
-		Status:  strings.TrimSpace(args.Status),
-		Owner:   strings.TrimSpace(args.Owner),
-		Source:  strings.TrimSpace(args.Source),
+		ID:           id,
+		Content:      strings.TrimSpace(args.Content),
+		Status:       strings.TrimSpace(args.Status),
+		Owner:        strings.TrimSpace(args.Owner),
+		Source:       strings.TrimSpace(args.Source),
+		Priority:     strings.TrimSpace(args.Priority),
+		Dependencies: append([]string(nil), args.Dependencies...),
 	}
 	if item.Status == "" {
 		item.Status = "pending"
@@ -111,11 +128,13 @@ func (r *toolRuntime) runTaskGet(rawArgs []byte) (string, error) {
 
 func (r *toolRuntime) runTaskUpdate(rawArgs []byte) (string, error) {
 	var args struct {
-		ID      string `json:"id"`
-		Content string `json:"content"`
-		Status  string `json:"status"`
-		Owner   string `json:"owner"`
-		Source  string `json:"source"`
+		ID           string   `json:"id"`
+		Content      string   `json:"content"`
+		Status       string   `json:"status"`
+		Owner        string   `json:"owner"`
+		Source       string   `json:"source"`
+		Priority     string   `json:"priority"`
+		Dependencies []string `json:"dependencies"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("task-update args: %w", err)
@@ -147,6 +166,12 @@ func (r *toolRuntime) runTaskUpdate(rawArgs []byte) (string, error) {
 	}
 	if strings.TrimSpace(args.Source) != "" {
 		prev.Source = strings.TrimSpace(args.Source)
+	}
+	if strings.TrimSpace(args.Priority) != "" {
+		prev.Priority = strings.TrimSpace(args.Priority)
+	}
+	if len(args.Dependencies) > 0 {
+		prev.Dependencies = append([]string(nil), args.Dependencies...)
 	}
 	out, err := session.UpsertTodo(globalDir, sid, prev)
 	if err != nil {
@@ -204,16 +229,22 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		label := id
 		risk := "unknown"
 		acts := ""
+		desc := ""
+		requiresApproval := false
+		timeoutSec := 0
 		if hasSpec {
 			if strings.TrimSpace(spec.Name) != "" {
 				label = spec.Name
 			}
+			desc = strings.TrimSpace(spec.Description)
 			if strings.TrimSpace(spec.RiskLevel) != "" {
 				risk = spec.RiskLevel
 			}
+			requiresApproval = spec.RequiresApproval
+			timeoutSec = spec.TimeoutSec
 			acts = strings.Join(spec.PermittedActions, ",")
 		}
-		hay := strings.ToLower(id + " " + label + " " + acts + " " + risk)
+		hay := strings.ToLower(id + " " + label + " " + acts + " " + risk + " " + desc)
 		if q != "" && !strings.Contains(hay, q) {
 			continue
 		}
@@ -224,7 +255,7 @@ func (r *toolRuntime) runToolSearch(allowed map[string]struct{}, rawArgs []byte)
 		if strings.Contains(acts, "search") {
 			score++
 		}
-		rows = append(rows, fmt.Sprintf("%03d | %s | risk=%s | actions=%s", score, id, risk, emptyIfBlank(acts)))
+		rows = append(rows, fmt.Sprintf("%03d | %s | risk=%s | approval=%t | timeout=%ds | actions=%s | %s", score, id, risk, requiresApproval, timeoutSec, emptyIfBlank(acts), emptyIfBlank(desc)))
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i] > rows[j] })
 	if len(rows) == 0 {
@@ -427,6 +458,14 @@ func (r *toolRuntime) runFileEdit(rawArgs []byte) (string, error) {
 		OldString  string `json:"old_string"`
 		NewString  string `json:"new_string"`
 		ReplaceAll bool   `json:"replace_all"`
+		StartLine  int    `json:"start_line"`
+		EndLine    int    `json:"end_line"`
+		Expected   int    `json:"expected_replacements"`
+		Edits      []struct {
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
+		} `json:"edits"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("file-edit args: %w", err)
@@ -435,30 +474,81 @@ func (r *toolRuntime) runFileEdit(rawArgs []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(args.OldString) == "" {
-		return "", fmt.Errorf("file-edit: old_string is required")
+	hasSingle := strings.TrimSpace(args.OldString) != ""
+	if !hasSingle && len(args.Edits) == 0 {
+		return "", fmt.Errorf("file-edit: old_string or edits is required")
 	}
 	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return "", err
 	}
 	content := string(raw)
-	if !strings.Contains(content, args.OldString) {
-		return "", fmt.Errorf("file-edit: old_string not found")
+	scope := content
+	prefix := ""
+	suffix := ""
+	if args.StartLine > 0 || args.EndLine > 0 {
+		lines := strings.Split(content, "\n")
+		start := args.StartLine
+		if start <= 0 {
+			start = 1
+		}
+		end := args.EndLine
+		if end <= 0 || end > len(lines) {
+			end = len(lines)
+		}
+		if start > end || start > len(lines) {
+			return "", fmt.Errorf("file-edit: invalid line range")
+		}
+		prefix = strings.Join(lines[:start-1], "\n")
+		scope = strings.Join(lines[start-1:end], "\n")
+		suffix = strings.Join(lines[end:], "\n")
+		if prefix != "" {
+			prefix += "\n"
+		}
+		if suffix != "" {
+			suffix = "\n" + suffix
+		}
 	}
-	var updated string
-	if args.ReplaceAll {
-		updated = strings.ReplaceAll(content, args.OldString, args.NewString)
-	} else {
-		updated = strings.Replace(content, args.OldString, args.NewString, 1)
+	type fileEditOp struct {
+		old        string
+		new        string
+		replaceAll bool
 	}
+	ops := make([]fileEditOp, 0, len(args.Edits)+1)
+	if hasSingle {
+		ops = append(ops, fileEditOp{old: args.OldString, new: args.NewString, replaceAll: args.ReplaceAll})
+	}
+	for _, e := range args.Edits {
+		if strings.TrimSpace(e.OldString) == "" {
+			continue
+		}
+		ops = append(ops, fileEditOp{old: e.OldString, new: e.NewString, replaceAll: e.ReplaceAll})
+	}
+	updated := scope
+	totalReplacements := 0
+	for _, op := range ops {
+		if !strings.Contains(updated, op.old) {
+			return "", fmt.Errorf("file-edit: old_string not found: %q", truncate(op.old, 80))
+		}
+		before := updated
+		if op.replaceAll {
+			updated = strings.ReplaceAll(updated, op.old, op.new)
+		} else {
+			updated = strings.Replace(updated, op.old, op.new, 1)
+		}
+		totalReplacements += strings.Count(before, op.old) - strings.Count(updated, op.old)
+	}
+	if args.Expected > 0 && totalReplacements != args.Expected {
+		return "", fmt.Errorf("file-edit: expected %d replacements, got %d", args.Expected, totalReplacements)
+	}
+	updated = prefix + updated + suffix
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
 		return "", err
 	}
 	r.mu.Lock()
 	r.readSet[rel] = struct{}{}
 	r.mu.Unlock()
-	return fmt.Sprintf("edited %s", rel), nil
+	return fmt.Sprintf("edited %s (%d replacements)", rel, totalReplacements), nil
 }
 
 func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, error) {
@@ -484,8 +574,9 @@ func (r *toolRuntime) runPlanModeToggle(rawArgs []byte, entering bool) (string, 
 
 func (r *toolRuntime) runEnterWorktree(rawArgs []byte) (string, error) {
 	var args struct {
-		Path   string `json:"path"`
-		Branch string `json:"branch"`
+		Path       string `json:"path"`
+		Branch     string `json:"branch"`
+		AllowDirty bool   `json:"allow_dirty"`
 	}
 	if err := decodeJSONStrict(rawArgs, &args); err != nil {
 		return "", fmt.Errorf("enter-worktree args: %w", err)
@@ -499,6 +590,20 @@ func (r *toolRuntime) runEnterWorktree(rawArgs []byte) (string, error) {
 		return "", err
 	}
 	branch := strings.TrimSpace(args.Branch)
+	if !args.AllowDirty {
+		if dirty, err := isGitDirty(r.cwd); err == nil && dirty {
+			return "", fmt.Errorf("enter-worktree: repository has uncommitted changes (set allow_dirty=true to bypass)")
+		}
+	}
+	if branch != "" {
+		exists, err := localBranchExists(r.cwd, branch)
+		if err != nil {
+			return "", fmt.Errorf("enter-worktree: check branch: %w", err)
+		}
+		if exists {
+			return "", fmt.Errorf("enter-worktree: branch %q already exists", branch)
+		}
+	}
 	cmdArgs := []string{"worktree", "add", abs}
 	if branch != "" {
 		cmdArgs = append(cmdArgs, "-b", branch)
@@ -527,6 +632,12 @@ func (r *toolRuntime) runExitWorktree(rawArgs []byte) (string, error) {
 	abs, _, err := r.resolvePath(path)
 	if err != nil {
 		return "", err
+	}
+	if !args.Force {
+		dirty, err := isGitDirty(abs)
+		if err == nil && dirty {
+			return "", fmt.Errorf("exit-worktree: worktree has uncommitted changes (use force=true)")
+		}
 	}
 	cmdArgs := []string{"worktree", "remove", abs}
 	if args.Force {
@@ -567,6 +678,202 @@ func (r *toolRuntime) runSendMessage(rawArgs []byte) (string, error) {
 		Summary: "to " + emptyIfBlank(args.Target) + ": " + truncate(msg, 180),
 	})
 	return "message sent", nil
+}
+
+func (r *toolRuntime) runTaskStop(rawArgs []byte) (string, error) {
+	var args struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("task-stop args: %w", err)
+	}
+	reason := strings.TrimSpace(args.Reason)
+	if reason == "" {
+		reason = "Stopped by task-stop request."
+	}
+	r.mu.Lock()
+	r.stopRequested = true
+	r.stopReason = reason
+	r.mu.Unlock()
+	return reason, nil
+}
+
+func (r *toolRuntime) shouldStop() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopRequested
+}
+
+func (r *toolRuntime) stopMessage() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if strings.TrimSpace(r.stopReason) == "" {
+		return "Stopped by task-stop request."
+	}
+	return r.stopReason
+}
+
+func (r *toolRuntime) runConfigTool(rawArgs []byte) (string, error) {
+	var args struct {
+		Action string `json:"action"`
+		Key    string `json:"key"`
+		Value  string `json:"value"`
+		Force  bool   `json:"force"`
+	}
+	if err := decodeJSONStrict(rawArgs, &args); err != nil {
+		return "", fmt.Errorf("config args: %w", err)
+	}
+	action := strings.ToLower(strings.TrimSpace(args.Action))
+	if action == "" {
+		action = "get"
+	}
+	key := strings.ToLower(strings.TrimSpace(args.Key))
+	rawCfg, err := readRawConfigMap()
+	if err != nil {
+		return "", err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "", fmt.Errorf("config: load: %w", err)
+	}
+	getOne := func(k string) (string, error) {
+		switch k {
+		case "permission":
+			return string(cfg.Permission), nil
+		case "token_budget":
+			return fmt.Sprintf("%d", cfg.TokenBudget), nil
+		case "show_side_panel":
+			if cfg.ShowSidePanel {
+				return "true", nil
+			}
+			return "false", nil
+		case "active_provider":
+			return cfg.ActiveProvider, nil
+		case "active_model":
+			return cfg.ActiveModel, nil
+		default:
+			return "", fmt.Errorf("config: unsupported key %q", k)
+		}
+	}
+	setOne := func(k, v string) error {
+		switch k {
+		case "permission":
+			p := config.PermissionLevel(strings.TrimSpace(v))
+			switch p {
+			case config.PermissionYOLO, config.PermissionRestricted, config.PermissionAskFirst:
+				cfg.Permission = p
+			default:
+				return fmt.Errorf("config: invalid permission")
+			}
+		case "token_budget":
+			var n int
+			if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d", &n); err != nil || n < 0 {
+				return fmt.Errorf("config: invalid token_budget")
+			}
+			cfg.TokenBudget = n
+		case "show_side_panel":
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "1", "true", "yes", "on":
+				cfg.ShowSidePanel = true
+			case "0", "false", "no", "off":
+				cfg.ShowSidePanel = false
+			default:
+				return fmt.Errorf("config: invalid show_side_panel")
+			}
+		default:
+			return fmt.Errorf("config: unsupported mutable key %q", k)
+		}
+		return config.Save(cfg)
+	}
+	switch action {
+	case "get":
+		if key == "" {
+			return fmt.Sprintf("permission=%s token_budget=%d show_side_panel=%t active_provider=%s active_model=%s", cfg.Permission, cfg.TokenBudget, cfg.ShowSidePanel, cfg.ActiveProvider, cfg.ActiveModel), nil
+		}
+		v, err := getOne(key)
+		if err != nil {
+			return "", err
+		}
+		return key + "=" + v, nil
+	case "set":
+		if key == "" {
+			return "", fmt.Errorf("config: key is required for set")
+		}
+		if isConfigKeyPreset(rawCfg, key) && !args.Force {
+			v, _ := getOne(key)
+			return key + "=" + v + " (preset; unchanged)", nil
+		}
+		if err := setOne(key, args.Value); err != nil {
+			return "", err
+		}
+		v, _ := getOne(key)
+		return key + "=" + v, nil
+	default:
+		return "", fmt.Errorf("config: action must be get or set")
+	}
+}
+
+func readRawConfigMap() (map[string]json.RawMessage, error) {
+	path, err := config.Path()
+	if err != nil {
+		return nil, fmt.Errorf("config: path: %w", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]json.RawMessage{}, nil
+		}
+		return nil, fmt.Errorf("config: read: %w", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("config: decode: %w", err)
+	}
+	return m, nil
+}
+
+func isConfigKeyPreset(raw map[string]json.RawMessage, key string) bool {
+	jsonKey := key
+	switch key {
+	case "token_budget":
+		jsonKey = "token_budget"
+	case "show_side_panel":
+		jsonKey = "show_side_panel"
+	case "active_provider":
+		jsonKey = "active_provider"
+	case "active_model":
+		jsonKey = "active_model"
+	case "permission":
+		jsonKey = "permission"
+	}
+	v, ok := raw[jsonKey]
+	if !ok {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(v))
+	return trimmed != "" && trimmed != "null"
+}
+
+func isGitDirty(dir string) (bool, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+func localBranchExists(dir, branch string) (bool, error) {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() != 0 {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 type allowedNetworkFile struct {

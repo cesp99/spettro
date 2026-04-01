@@ -153,7 +153,13 @@ func UpsertTodo(globalDir, sessionID string, t Todo) (Todo, error) {
 	if strings.TrimSpace(t.Status) == "" {
 		t.Status = "pending"
 	}
-	t.UpdatedAt = time.Now()
+	t.Priority = strings.TrimSpace(t.Priority)
+	if t.Priority == "" {
+		t.Priority = "normal"
+	}
+	t.Dependencies = compactDependencies(t.Dependencies)
+	now := time.Now()
+	t.UpdatedAt = now
 	todos, err := LoadTodos(globalDir, sessionID)
 	if err != nil {
 		return Todo{}, err
@@ -161,12 +167,18 @@ func UpsertTodo(globalDir, sessionID string, t Todo) (Todo, error) {
 	replaced := false
 	for i := range todos {
 		if todos[i].ID == t.ID {
+			if t.CreatedAt.IsZero() {
+				t.CreatedAt = todos[i].CreatedAt
+			}
 			todos[i] = t
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
+		if t.CreatedAt.IsZero() {
+			t.CreatedAt = now
+		}
 		todos = append(todos, t)
 	}
 	if err := SaveTodos(globalDir, sessionID, todos); err != nil {
@@ -186,6 +198,26 @@ func GetTodo(globalDir, sessionID, id string) (Todo, bool, error) {
 		}
 	}
 	return Todo{}, false, nil
+}
+
+func compactDependencies(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, dep := range in {
+		dep = strings.TrimSpace(dep)
+		if dep == "" {
+			continue
+		}
+		if _, ok := seen[dep]; ok {
+			continue
+		}
+		seen[dep] = struct{}{}
+		out = append(out, dep)
+	}
+	return out
 }
 
 func readEvents(path string) ([]AgentEvent, error) {

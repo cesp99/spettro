@@ -169,6 +169,7 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		}
 		switch evaluatePermissionRule("execute", segNorm, r.runtimeRules, r.agentRules, toolRules) {
 		case config.RuleDeny:
+			r.emitApprovalTrace("denied", "policy", toolID, segNorm, "blocked by permission rules")
 			return fmt.Errorf("shell-exec denied by policy for command segment %q", segNorm)
 		case config.RuleAllow:
 			continue
@@ -184,17 +185,36 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 	if len(missingApprovals) == 0 || !needsApproval {
 		return nil
 	}
+	if decision, reason, err := r.runPermissionRequestHooks(ctx, toolID, command); err != nil {
+		return fmt.Errorf("permission hooks failed: %w", err)
+	} else if decision == "deny" {
+		if strings.TrimSpace(reason) == "" {
+			reason = "denied by permission hook"
+		}
+		r.emitApprovalTrace("denied", "hook", toolID, strings.Join(missingApprovals, " | "), reason)
+		return fmt.Errorf("shell-exec denied by hook: %s", reason)
+	} else if decision == "allow" {
+		r.emitApprovalTrace("allowed", "hook", toolID, strings.Join(missingApprovals, " | "), reason)
+		return nil
+	}
 
 	if r.shellApproval == nil {
+		r.emitApprovalTrace("denied", "policy", toolID, strings.Join(missingApprovals, " | "), "approval required outside yolo mode")
 		return fmt.Errorf("shell-exec requires approval outside yolo mode")
 	}
 
-	decision, err := r.shellApproval(ctx, ShellApprovalRequest{Command: command})
+	decision, err := r.shellApproval(ctx, ShellApprovalRequest{
+		Command:  command,
+		ToolID:   toolID,
+		Segments: append([]string(nil), missingApprovals...),
+		Reason:   "non-whitelisted command requires approval",
+	})
 	if err != nil {
 		return fmt.Errorf("shell approval failed: %w", err)
 	}
 	switch decision {
 	case ShellApprovalAllowOnce:
+		r.emitApprovalTrace("allowed", "user", toolID, strings.Join(missingApprovals, " | "), "approved once")
 		return nil
 	case ShellApprovalAllowAlways:
 		r.mu.Lock()
@@ -205,8 +225,10 @@ func (r *toolRuntime) authorizeShellCommand(ctx context.Context, toolID, command
 		if err := saveAllowedCommandSet(r.cwd, r.allowedShell); err != nil {
 			return fmt.Errorf("persist allowed command: %w", err)
 		}
+		r.emitApprovalTrace("allowed", "user", toolID, strings.Join(missingApprovals, " | "), "approved and persisted")
 		return nil
 	default:
+		r.emitApprovalTrace("denied", "user", toolID, strings.Join(missingApprovals, " | "), "denied by user")
 		return fmt.Errorf("shell-exec denied by user")
 	}
 }

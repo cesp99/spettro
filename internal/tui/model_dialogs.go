@@ -1248,11 +1248,16 @@ func (m Model) runSearcher(query string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) runCompact(focus string) (tea.Model, tea.Cmd) {
+	return m.runCompactWithMode(focus, false)
+}
+
+func (m Model) runCompactWithMode(focus string, auto bool) (tea.Model, tea.Cmd) {
 	if len(m.messages) == 0 {
 		m.showBanner("nothing to compact", "info")
 		return m, nil
 	}
 	m.thinking = true
+	m.autoCompactInFlight = auto
 	pm := m.providers
 	providerName := m.cfg.ActiveProvider
 	modelName := m.cfg.ActiveModel

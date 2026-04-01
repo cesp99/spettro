@@ -10,6 +10,7 @@ import (
 
 	"spettro/internal/agent"
 	"spettro/internal/config"
+	"spettro/internal/provider"
 	"spettro/internal/session"
 	"spettro/internal/storage"
 )
@@ -50,10 +51,14 @@ func NewModelForTesting() Model {
 	ta := textarea.New()
 	ta.Focus()
 	tmp := filepath.Join(os.TempDir(), "spettro-tui-tests")
+	cfg := config.Default()
+	pm := provider.NewManager()
 	return Model{
-		ta:    ta,
-		cwd:   tmp,
-		store: &storage.Store{ProjectDir: filepath.Join(tmp, ".spettro"), GlobalDir: tmp},
+		ta:        ta,
+		cwd:       tmp,
+		cfg:       cfg,
+		providers: pm,
+		store:     &storage.Store{ProjectDir: filepath.Join(tmp, ".spettro"), GlobalDir: tmp},
 	}
 }
 

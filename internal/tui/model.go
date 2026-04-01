@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"spettro/internal/agent"
+	"spettro/internal/compact"
 	"spettro/internal/config"
 	"spettro/internal/provider"
 	"spettro/internal/session"
@@ -227,20 +228,24 @@ type Model struct {
 	showPlanApproval   bool
 	planApprovalCursor int
 
-	parallelAgents []parallelAgentEntry
-	tickCount      int
-	sideCursor     int
-	sideScroll     int
+	parallelAgents   []parallelAgentEntry
+	tickCount        int
+	sideCursor       int
+	sideScroll       int
 	sideDetailScroll int
-	modifiedFiles  []modifiedFileEntry
-	gitBranch      string
-	showSidePanel  bool
-	sessionEdits   map[string]struct{}
-	activityFeed   []activityItem
-	currentRunKey  string
+	modifiedFiles    []modifiedFileEntry
+	gitBranch        string
+	showSidePanel    bool
+	sessionEdits     map[string]struct{}
+	activityFeed     []activityItem
+	currentRunKey    string
+	recentApprovals  []session.AgentEvent
 
-	totalTokensUsed int
-	sessionID       string
+	totalTokensUsed     int
+	autoCompactFailures int
+	compactWarningLevel int
+	autoCompactInFlight bool
+	sessionID           string
 
 	showResume   bool
 	resumeItems  []session.Summary
@@ -390,6 +395,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
@@ -431,6 +437,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshModifiedFiles()
 		if msg.tokensUsed > 0 {
 			m.totalTokensUsed += msg.tokensUsed
+			m.updateCompactWarningState()
 		}
 		if msg.err != nil {
 			m.finishAgentActivity(m.mode, "failed", msg.err.Error(), "")
@@ -492,13 +499,20 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.thinking = false
 		m.cancelAgent = nil
+		wasAutoCompact := m.autoCompactInFlight
+		m.autoCompactInFlight = false
 		if msg.err != nil {
+			if wasAutoCompact {
+				m.autoCompactFailures++
+			}
 			m.showBanner("compact error: "+msg.err.Error(), "error")
 		} else {
+			m.autoCompactFailures = 0
 			m.autoSave()
 			m.sessionID = ""
 			m.todos = nil
 			m.totalTokensUsed = 0
+			m.compactWarningLevel = 0
 			m.messages = []ChatMessage{{
 				Role:    RoleSystem,
 				Content: "── conversation compacted ──\n\n" + msg.summary,
@@ -998,8 +1012,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case "/init":
 		return m.runInit()
 	case "/compact":
-		focus := strings.TrimSpace(strings.TrimPrefix(input, cmd))
-		return m.runCompact(focus)
+		return m.handleCompactCommand(input)
 	case "/clear":
 		m.autoSave()
 		m.messages = nil
@@ -1013,6 +1026,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleMCPCommand(input)
 	case "/skills":
 		return m.handleSkillsCommand()
+	case "/hooks":
+		return m.handleHooksCommand()
 	case "/plan":
 		return m.handlePlanCommand(input)
 	case "/permissions":
@@ -1036,6 +1051,22 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handlePrompt(input string) (tea.Model, tea.Cmd) {
+	window := m.contextWindow()
+	if window == 0 {
+		window = contextWindowDefault(m.cfg.ActiveProvider)
+	}
+	eval := compact.Evaluate(window, compact.Config{
+		AutoEnabled:      m.cfg.AutoCompactEnabled,
+		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+		MaxFailures:      m.cfg.AutoCompactMaxFailures,
+	}, compact.State{
+		TokensUsed:          m.totalTokensUsed,
+		ConsecutiveFailures: m.autoCompactFailures,
+	})
+	if eval.IsBlocking {
+		m.showBanner("context limit reached; run /compact before sending new prompts", "error")
+		return m, nil
+	}
 	mentionedFiles := m.extractMentionedFiles(input)
 	prompt := injectMentionGuidance(input, mentionedFiles)
 	if m.thinking {

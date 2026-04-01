@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"spettro/internal/compact"
 	"spettro/internal/version"
 )
 
@@ -227,6 +228,12 @@ func (m Model) viewInput(width int) string {
 	} else if m.pendingAuth != nil {
 		cmd := formatApprovalCommandLabel(m.pendingAuth.request.Command)
 		lines = append(lines, styleWarn.Render("  "+cmd))
+		if strings.TrimSpace(m.pendingAuth.request.Reason) != "" {
+			lines = append(lines, styleMuted.Render("  why: "+m.pendingAuth.request.Reason))
+		}
+		if len(m.pendingAuth.request.Segments) > 0 && m.cfg.ShowPermissionDebug {
+			lines = append(lines, styleMuted.Render("  segments: "+strings.Join(m.pendingAuth.request.Segments, " | ")))
+		}
 		if m.approvalCursor == 3 {
 			lines = append(lines, styleMuted.Render("  type what to do instead, then press enter:"))
 			lines = append(lines, m.ta.View())
@@ -374,14 +381,21 @@ func (m Model) autoCompactIfNeeded() tea.Cmd {
 	if window == 0 {
 		window = contextWindowDefault(m.cfg.ActiveProvider)
 	}
-	threshold := int(float64(window) * 0.85)
-	if m.totalTokensUsed < threshold {
+	eval := compact.Evaluate(window, compact.Config{
+		AutoEnabled:      m.cfg.AutoCompactEnabled,
+		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+		MaxFailures:      m.cfg.AutoCompactMaxFailures,
+	}, compact.State{
+		TokensUsed:          m.totalTokensUsed,
+		ConsecutiveFailures: m.autoCompactFailures,
+	})
+	if !eval.ShouldAutoCompact {
 		return nil
 	}
 	if len(m.messages) < 3 {
 		return nil
 	}
-	_, cmd := m.runCompact("preserve all key decisions, code changes, and action items")
+	_, cmd := m.runCompactWithMode("preserve all key decisions, code changes, and action items", true)
 	return cmd
 }
 
@@ -403,18 +417,28 @@ func (m Model) viewStatusBar(width int) string {
 	if window == 0 {
 		window = contextWindowDefault(m.cfg.ActiveProvider)
 	}
+	eval := compact.Evaluate(window, compact.Config{
+		AutoEnabled:      m.cfg.AutoCompactEnabled,
+		AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+		MaxFailures:      m.cfg.AutoCompactMaxFailures,
+	}, compact.State{
+		TokensUsed:          m.totalTokensUsed,
+		ConsecutiveFailures: m.autoCompactFailures,
+	})
 	used := m.totalTokensUsed
-	pct := float64(used) / float64(window)
 	var ctxColor lipgloss.Color
 	switch {
-	case pct >= 0.85:
+	case eval.IsError:
 		ctxColor = lipgloss.Color("#EF4444")
-	case pct >= 0.65:
+	case eval.IsWarning:
 		ctxColor = lipgloss.Color("#F59E0B")
 	default:
 		ctxColor = lipgloss.Color("#6B7280")
 	}
-	ctxLabel := fmt.Sprintf("%s / %s ctx", formatTokenCount(used), formatTokenCount(window))
+	ctxLabel := fmt.Sprintf("%s / %s ctx", formatTokenCount(used), formatTokenCount(eval.EffectiveWindow))
+	if !m.cfg.AutoCompactEnabled {
+		ctxLabel += " (auto off)"
+	}
 	right := lipgloss.NewStyle().Foreground(ctxColor).Render(ctxLabel)
 
 	leftWidth := width - lipgloss.Width(right) - 2

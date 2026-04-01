@@ -34,6 +34,12 @@ func TestUpsertAndGetTodo(t *testing.T) {
 	if got.Content != "implement task CRUD" {
 		t.Fatalf("unexpected todo content: %q", got.Content)
 	}
+	if got.CreatedAt.IsZero() {
+		t.Fatalf("expected created_at to be set")
+	}
+	if got.Priority != "normal" {
+		t.Fatalf("expected default priority normal, got %q", got.Priority)
+	}
 }
 
 func TestLoadTodosFallsBackToLegacyTodosFile(t *testing.T) {

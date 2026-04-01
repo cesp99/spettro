@@ -4,38 +4,38 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 
 ## Entry point and runtime
 
-- `cmd/spettro/main.go` boots config, storage, provider manager, model catalog, and TUI.
-- `internal/tui` is the active application flow and command dispatcher (via `tui.New`).
-- `internal/config` provides `LoadAgentManifestForProject`.
+- `cmd/spettro/main.go` initializes config, encrypted keys, provider manager, model catalog, manifest validation, and TUI.
+- `internal/tui` is the active runtime: command dispatch, dialogs, rendering, approval flows, and agent execution.
+- Project manifest loading is handled by `internal/config` (`LoadAgentManifestForProject`).
 
 ## Core packages
 
-- `internal/tui`: interactive terminal UI, dialogs, rendering, and command handling.
-- `internal/config`: config persistence, encrypted key management, trust list, agent manifest parsing.
-- `internal/agent`: tool loop protocol and "agent" tool support for parallel spawning.
-- `internal/provider`: provider adapters and model catalog mapping.
+- `internal/tui`: interactive terminal UI, command handling, approvals, and session interactions.
+- `internal/agent`: LLM runtime loop, `TOOL_CALL` parsing/execution, delegation, policy checks.
+- `internal/config`: config persistence, encrypted keys, trust list, manifest parsing/validation/migration.
+- `internal/provider`: provider adapters, endpoint resolution, connected model routing.
 - `internal/models`: fetch/cache of `models.dev` catalog.
-- `internal/storage`: `.spettro` directory handling.
-- `internal/conversation`: save/list/load project conversations.
-- `internal/budget`: token estimation and guardrails.
+- `internal/session`: persistent session storage (`messages`, `tasks`, `agents` events) and resume support.
+- `internal/storage`: project/global `.spettro` directory setup.
+- `internal/hooks`: global/project hook loading, merge, and execution.
+- `internal/compact`: context usage policy and compaction guardrails.
 
-## Agent Manifest
+## Agent manifest
 
-Spettro loads `spettro.agents.toml` from the project root if present; otherwise falls back to built-ins. See [AGENTS.md](../AGENTS.md) for the full schema (version, default_agent, [runtime], [[tools]], [[agents]], permitted_actions, validation rules).
+Spettro loads `spettro.agents.toml` from project root when present; otherwise it uses built-ins.
+
+See [AGENTS.md](../AGENTS.md) for schema details (`version = 2`, `[runtime]`, `[[tools]]`, `[[agents]]`, permissions, validation).
 
 ## Execution flow
 
-1. User prompt enters current mode/active agent from manifest (default: planning).
-2. Agents follow tool loop: emit `TOOL_CALL` (parallel capable via multiple lines), runtime executes allowed tools from manifest (glob/grep/file-read/file-write/shell-exec/agent/etc.), finalize via `FINAL`.
-3. Planning agent requires minimum exploration (glob + read every referenced file).
-4. Chat/coding/other agents follow their `agents/*.md` prompts.
-5. Outputs and metadata appended to timeline.
+1. User prompt enters current active agent (`plan` by default).
+2. Agent emits `TOOL_CALL` lines (parallel-capable via multiple lines).
+3. Runtime executes allowed tools per manifest and permission policy.
+4. Plans can be queued and executed via `/approve` through `coding`.
+5. Outputs, tool traces, and session events are appended to timeline/session storage.
 
 ## Provider abstraction
 
-- Anthropic uses native API adapter.
-- Other providers use OpenAI-compatible adapter and known base URL mapping.
-- Model list is catalog-driven, with fallback models if catalog is unavailable.
-
-## Risks
-If dispatch or manifest loader changes later, revisit this file.
+- `anthropic` uses native adapter.
+- Other providers use OpenAI-compatible adapter with known base URL mapping and local endpoint support.
+- Catalog-backed model lists are preferred; fallback models are used when catalog is unavailable.

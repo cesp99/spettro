@@ -11,7 +11,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"spettro/internal/compact"
 	"spettro/internal/config"
+	"spettro/internal/hooks"
 	"spettro/internal/mcp"
 	"spettro/internal/session"
 )
@@ -215,11 +217,37 @@ func (m Model) handlePlanCommand(input string) (tea.Model, tea.Cmd) {
 func (m Model) handlePermissionsCommand(input string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(input)
 	if len(fields) == 1 {
-		m.showBanner(fmt.Sprintf("current permission: %s", m.cfg.Permission), "info")
+		m.pushSystemMsg(m.permissionSummary())
+		return m, nil
+	}
+	if strings.EqualFold(fields[1], "debug") {
+		if len(fields) == 2 {
+			if m.cfg.ShowPermissionDebug {
+				m.showBanner("permission debug: on", "info")
+			} else {
+				m.showBanner("permission debug: off", "info")
+			}
+			return m, nil
+		}
+		switch strings.ToLower(fields[2]) {
+		case "on":
+			m.cfg.ShowPermissionDebug = true
+		case "off":
+			m.cfg.ShowPermissionDebug = false
+		default:
+			m.showBanner("usage: /permissions debug <on|off>", "error")
+			return m, nil
+		}
+		_ = config.Save(m.cfg)
+		if m.cfg.ShowPermissionDebug {
+			m.showBanner("permission debug enabled", "success")
+		} else {
+			m.showBanner("permission debug disabled", "success")
+		}
 		return m, nil
 	}
 	if len(fields) != 2 {
-		m.showBanner("usage: /permissions <yolo|restricted|ask-first>", "error")
+		m.showBanner("usage: /permissions <yolo|restricted|ask-first> | /permissions debug <on|off>", "error")
 		return m, nil
 	}
 	level := config.PermissionLevel(fields[1])
@@ -232,4 +260,132 @@ func (m Model) handlePermissionsCommand(input string) (tea.Model, tea.Cmd) {
 		m.showBanner("invalid permission", "error")
 	}
 	return m, nil
+}
+
+func (m Model) handleHooksCommand() (tea.Model, tea.Cmd) {
+	cfg, err := hooks.LoadEffective(m.cwd)
+	if err != nil {
+		m.showBanner("hooks load failed: "+err.Error(), "error")
+		return m, nil
+	}
+	if len(cfg.Rules) == 0 {
+		m.pushSystemMsg("no hooks configured (project: .spettro/hooks.json, global: ~/.spettro/hooks.json)")
+		return m, nil
+	}
+	var rows []string
+	for _, r := range cfg.Rules {
+		status := "enabled"
+		if !r.Enabled {
+			status = "disabled"
+		}
+		matcher := strings.TrimSpace(r.Matcher)
+		if matcher == "" {
+			matcher = "*"
+		}
+		rows = append(rows, fmt.Sprintf("- [%s] %s id=%s matcher=%s source=%s cmd=%q", status, r.Event, r.ID, matcher, r.Source, r.Command))
+	}
+	if len(cfg.Issues) > 0 {
+		rows = append(rows, "", "validation warnings:")
+		for _, issue := range cfg.Issues {
+			rows = append(rows, fmt.Sprintf("- [%s] %s: %s", issue.Source, issue.ID, issue.Message))
+		}
+	}
+	m.pushSystemMsg("hooks:\n" + strings.Join(rows, "\n"))
+	return m, nil
+}
+
+func (m Model) permissionSummary() string {
+	var rows []string
+	rows = append(rows, fmt.Sprintf("current permission: %s", m.cfg.Permission))
+	if m.cfg.ShowPermissionDebug {
+		rows = append(rows, "permission debug: on")
+	} else {
+		rows = append(rows, "permission debug: off")
+	}
+	rows = append(rows, fmt.Sprintf("runtime permission rules: %d", len(m.manifest.Runtime.PermissionRules)))
+	if spec, ok := m.manifest.AgentByID(m.mode); ok {
+		rows = append(rows, fmt.Sprintf("agent %s rules: %d", spec.ID, len(spec.PermissionRules)))
+	}
+	if len(m.recentApprovals) == 0 {
+		rows = append(rows, "recent approvals: none")
+		return strings.Join(rows, "\n")
+	}
+	rows = append(rows, "", "recent approvals:")
+	for i := len(m.recentApprovals) - 1; i >= 0 && i >= len(m.recentApprovals)-5; i-- {
+		ev := m.recentApprovals[i]
+		seg := strings.TrimSpace(ev.CommandSegment)
+		if seg == "" {
+			seg = strings.TrimSpace(ev.Task)
+		}
+		if seg == "" {
+			seg = "(unknown command)"
+		}
+		rows = append(rows, fmt.Sprintf("- %s [%s] via %s: %s", ev.Decision, ev.ToolID, ev.DecisionSource, truncateLabel(seg, 90)))
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (m Model) handleCompactCommand(input string) (tea.Model, tea.Cmd) {
+	fields := strings.Fields(input)
+	if len(fields) == 1 {
+		return m.runCompact("")
+	}
+	if len(fields) >= 2 && strings.EqualFold(fields[1], "auto") {
+		if len(fields) == 2 || strings.EqualFold(fields[2], "status") {
+			state := "off"
+			if m.cfg.AutoCompactEnabled {
+				state = "on"
+			}
+			m.showBanner(fmt.Sprintf("auto compact: %s (failures: %d/%d)", state, m.autoCompactFailures, m.cfg.AutoCompactMaxFailures), "info")
+			return m, nil
+		}
+		switch strings.ToLower(fields[2]) {
+		case "on":
+			m.cfg.AutoCompactEnabled = true
+			m.autoCompactFailures = 0
+			_ = config.Save(m.cfg)
+			m.showBanner("auto compact enabled", "success")
+		case "off":
+			m.cfg.AutoCompactEnabled = false
+			_ = config.Save(m.cfg)
+			m.showBanner("auto compact disabled", "success")
+		default:
+			m.showBanner("usage: /compact auto <status|on|off>", "error")
+		}
+		return m, nil
+	}
+	if len(fields) >= 2 && strings.EqualFold(fields[1], "policy") {
+		window := m.contextWindow()
+		if window == 0 {
+			window = contextWindowDefault(m.cfg.ActiveProvider)
+		}
+		eval := compact.Evaluate(window, compact.Config{
+			AutoEnabled:      m.cfg.AutoCompactEnabled,
+			AutoThresholdPct: m.cfg.AutoCompactThresholdPct,
+			MaxFailures:      m.cfg.AutoCompactMaxFailures,
+		}, compact.State{
+			TokensUsed:          m.totalTokensUsed,
+			ConsecutiveFailures: m.autoCompactFailures,
+		})
+		reason := strings.TrimSpace(eval.AutoDisabledReason)
+		if reason == "" {
+			reason = "none"
+		}
+		m.pushSystemMsg(fmt.Sprintf(
+			"compact policy:\n- context window: %d\n- effective window: %d\n- warning threshold: %d\n- error threshold: %d\n- auto threshold: %d\n- blocking limit: %d\n- auto enabled: %t\n- consecutive failures: %d/%d\n- auto disabled reason: %s",
+			window,
+			eval.EffectiveWindow,
+			eval.WarningThreshold,
+			eval.ErrorThreshold,
+			eval.AutoCompactThreshold,
+			eval.BlockingLimit,
+			m.cfg.AutoCompactEnabled,
+			m.autoCompactFailures,
+			m.cfg.AutoCompactMaxFailures,
+			reason,
+		))
+		return m, nil
+	}
+	focus := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
+	return m.runCompact(focus)
 }

@@ -4,59 +4,54 @@
 
 | Command | Description |
 | --- | --- |
-| `/help` | Show help text inside the app. |
+| `/help` | Show in-app help text. |
 | `/exit`, `/quit` | Quit Spettro. |
-| `/mode`, `/next` | Cycle mode/active agent (`planning → coding → chat` and others per manifest). |
-| `/setup` | Start setup wizard. |
-| `/connect` | Open provider connection dialog. |
-| `/models` | Open model selector dialog. |
-| `/models <provider:model>` | Set model directly. |
+| `/mode`, `/next` | Cycle active manifest agent/mode. |
+| `/connect` | Open provider/local-endpoint connect dialog. |
+| `/models` | Open model selector dialog (connected providers). |
+| `/models <provider:model> [api_key]` | Set model directly; optional API key saves for provider. |
 | `/permission <ask-first\|restricted\|yolo>` | Set execution policy. |
-| `/permissions [ask-first\|restricted\|yolo]` | Show or set execution policy alias. |
-| `/budget <n>` | Set request token budget (`min 1000`). |
-| `/approve` | Execute pending plan (routes via manifest handoff to coding agent). |
-| `/plan [prompt]` | Switch to planning mode or execute a plan prompt directly. |
-| `/tasks [list\|add\|done\|set\|show]` | Manage structured session tasks. |
+| `/permissions [ask-first\|restricted\|yolo]` | Show or set policy alias. |
+| `/permissions debug <on\|off>` | Toggle permission diagnostics in UI. |
+| `/budget <n\|0>` | Set request token budget (`0` = unlimited). |
+| `/plan [prompt]` | Switch to `plan` mode or run a planning request directly. |
+| `/approve` | Execute pending plan through `coding` agent. |
+| `/tasks [list\|add\|done\|set\|show]` | Manage session tasks. |
 | `/mcp <list\|read\|auth>` | Manage MCP resources and auth. |
-| `/skills` | List local skills/prompts available in `agents/`. |
-| `/image <path>` | Queue image for next chat request. |
-| `/commit` | Generate commit message and commit tracked changes (adds Co-Authored-By trailer). |
-| `/search [query]` | Search repository files and contents. |
-| `/compact [focus...]` | Summarize current conversation (optional focus instruction). |
-| `/clear` | Save and clear current conversation. |
+| `/skills` | List local skills/prompts found in `agents/`. |
+| `/hooks` | Show effective runtime hooks (project + global). |
+| `/compact [focus...]` | Summarize the current conversation. |
+| `/compact auto <status\|on\|off>` | Show/configure auto-compact. |
+| `/compact policy` | Show compact thresholds and failure counters. |
+| `/clear` | Save and clear the current conversation. |
 | `/resume` | Open saved conversation picker. |
-| `/init` | Analyze codebase and write SPETTRO.md. |
+| `/init` | Analyze codebase and create/update `SPETTRO.md`. |
 
-## Agent system
+## Agent usage
 
-- Type `@` in the input box to open repository file suggestions and insert mentions.
-- Spawn sub-agents with parallel `TOOL_CALL` (example from `agents/planning.md`): `TOOL_CALL {"tool":"agent","args":{"id":"tester","task":"run focused tests"}}`
-- Multiple `TOOL_CALL` lines in one response run in parallel.
-- `/init` and `/clear` are available in command palette.
-- `/approve` now routes through coding agent per manifest handoffs.
+- Type `@` in the input to open repository file suggestions and insert mentions.
+- Use `TOOL_CALL` with `{"tool":"agent",...}` to spawn sub-agents; multiple `TOOL_CALL` lines run in parallel.
+- `/approve` executes a previously generated pending plan.
 
 ## Keyboard shortcuts
 
 | Key | Action |
 | --- | --- |
-| `Shift+Tab` | Cycle mode/active agent. |
+| `Shift+Tab` | Cycle active mode/agent. |
 | `F2` | Next favorite model. |
 | `Shift+F2` | Previous favorite model. |
-| `Ctrl+O` | Toggle tool/thinking details visibility. |
-| `Ctrl+C` twice | Quit (with safety prompt). |
+| `Ctrl+O` | Toggle expanded context/tool details in side panel. |
+| `Ctrl+C` twice | Quit with safety confirmation. |
 | `Ctrl+Q` | Quit immediately. |
-| `Up` / `Down` | Navigate command palette and dialogs. |
-| `Tab` | Move selection in palettes/dialogs. |
+| `Up` / `Down` | Navigate command suggestions and dialogs. |
+| `Tab` | Move selection in dialogs/palettes. |
 
 ## Notes
 
-- `/approve` requires a pending plan and coding mode.
-- In `ask-first`, coding prompts without approval return guidance instead of executing.
-- When coding asks to run a non-default shell command outside `yolo`, approve with:
-  `1) yes`, `2) yes and don't ask again`, `3) no`, `4) tell the agent what to do instead`.
-- Approval choice `2` persists command approval in `.spettro/allowed_commands.json` for the current project.
-- `/connect` includes a `Local endpoint (LM Studio/Ollama)` option: enter `localhost:1234` (or another host) and Spettro probes `/v1/models` automatically.
-- `F2`/`Shift+F2` cycle only through favorited models (toggle favorite with `f` in `/models`).
-- Pressing `Enter` on a highlighted suggestion inserts it into the input first; press `Enter` again to run/send.
-- `/commit` adds this trailer automatically:
-  `Co-Authored-By: Spettro <spettro@eyed.to>`.
+- `/approve` requires a pending plan (typically produced in `plan` mode).
+- In `ask-first`, coding prompts are gated by approval flow.
+- Shell approval options: allow once, allow always, deny, or provide an alternative instruction.
+- "Allow always" persists normalized command approvals in `.spettro/allowed_commands.json`.
+- `/connect` includes `Local endpoint (LM Studio/Ollama)` and probes `/v1/models`.
+- In `/models`, press `f` to toggle favorites for highlighted model.
+- Pressing `Enter` on a highlighted command suggestion inserts it first; pressing `Enter` again executes it.

@@ -1,8 +1,8 @@
 # Spettro Agent Prompt Pack
 
-This folder contains operational prompt files referenced by `spettro.agents.toml`.
+This folder contains prompt files referenced by `spettro.agents.toml`.
 
-Included roles:
+## Included prompt files
 
 - `planning.md`
 - `coding.md`
@@ -13,24 +13,20 @@ Included roles:
 - `tester.md`
 - `docs-writer.md`
 
-Normalized agent IDs used in these prompts:
+## Default manifest agent IDs
 
 - `plan` -> `planning.md`
 - `coding` -> `coding.md`
 - `ask` -> `chat.md`
 - `explore` -> `explore.md`
+- `code` -> `coding.md`
 - `git` -> `git.md`
 - `test` -> `tester.md`
 - `review` -> `reviewer.md`
 - `docs` -> `docs-writer.md`
 
-Usage:
+## Usage
 
-- Set `prompt_file = "agents/<name>.md"` in an `[[agents]]` block.
-- Keep `system_prompt` empty when using `prompt_file` for a single source of truth.
-- Each prompt follows an operational contract:
-  - mission and scope boundaries
-  - tool contract (exact tool families and intended use)
-  - execution protocol
-  - output contract
-  - hard safety rules and escalation guidance
+- Set `prompt_file = "agents/<name>.md"` in each `[[agents]]` block.
+- Keep `system_prompt` empty when using `prompt_file` as source of truth.
+- Prompts define mission/scope, tool contracts, execution protocol, output contract, and escalation/safety rules.

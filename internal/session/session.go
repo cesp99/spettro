@@ -25,26 +25,34 @@ type Message struct {
 }
 
 type Todo struct {
-	ID        string    `json:"id"`
-	Content   string    `json:"content"`
-	Status    string    `json:"status"`
-	Owner     string    `json:"owner,omitempty"`
-	Source    string    `json:"source,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Content      string    `json:"content"`
+	Status       string    `json:"status"`
+	Owner        string    `json:"owner,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	Priority     string    `json:"priority,omitempty"`
+	Dependencies []string  `json:"dependencies,omitempty"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type AgentEvent struct {
-	At            time.Time `json:"at"`
-	Kind          string    `json:"kind,omitempty"` // agent | tool | command
-	AgentID       string    `json:"agent_id"`
-	AgentType     string    `json:"agent_type,omitempty"`
-	ParentAgentID string    `json:"parent_agent_id,omitempty"`
-	Task          string    `json:"task,omitempty"`
-	Status        string    `json:"status"`
-	Summary       string    `json:"summary,omitempty"`
-	ToolName      string    `json:"tool_name,omitempty"`
-	ToolArgs      string    `json:"tool_args,omitempty"`
-	ToolOutput    string    `json:"tool_output,omitempty"`
+	At             time.Time `json:"at"`
+	Kind           string    `json:"kind,omitempty"` // agent | tool | command
+	AgentID        string    `json:"agent_id"`
+	AgentType      string    `json:"agent_type,omitempty"`
+	ParentAgentID  string    `json:"parent_agent_id,omitempty"`
+	Task           string    `json:"task,omitempty"`
+	Status         string    `json:"status"`
+	Summary        string    `json:"summary,omitempty"`
+	ToolName       string    `json:"tool_name,omitempty"`
+	ToolArgs       string    `json:"tool_args,omitempty"`
+	ToolOutput     string    `json:"tool_output,omitempty"`
+	ToolID         string    `json:"tool_id,omitempty"`
+	CommandSegment string    `json:"command_segment,omitempty"`
+	Decision       string    `json:"decision,omitempty"`
+	DecisionSource string    `json:"decision_source,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
 }
 
 type Metadata struct {

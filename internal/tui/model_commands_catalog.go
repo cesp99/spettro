@@ -20,6 +20,7 @@ var allCommands = []commandDef{
 	{"/tasks", "manage session tasks"},
 	{"/mcp", "list/read/auth MCP resources"},
 	{"/skills", "list local skills/prompts"},
+	{"/hooks", "list effective runtime hooks"},
 	{"/plan", "switch plan mode or run plan task"},
 	{"/permissions", "show/set permission level"},
 	{"/clear", "clear conversation history"},
@@ -56,15 +57,18 @@ const helpText = `commands:
   /models p:m    set model directly
   /connect       connect a provider or local endpoint
   /permission    set permission: yolo | restricted | ask-first
-  /permissions   show or set permission level
+  /permissions   show/set permission level, debug details
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /tasks         manage tasks (list/add/done/set/show)
   /mcp           manage MCP resources (list/read/auth)
   /skills        list local skills/prompts
+  /hooks         list effective runtime hooks (project + global)
   /index         index project files → .spettro/index.json
   /coauthor      show co-author info for git commits
   /compact [x]   summarize conversation (optional focus instruction)
+  /compact auto  view/set auto-compact (status|on|off)
+  /compact policy show compact thresholds and counters
   /clear         clear conversation history (auto-saves first)
   /resume        resume a previous saved conversation
 
