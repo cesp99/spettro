@@ -30,6 +30,10 @@ func FormatRunningLabelForTesting(name, argsJSON string) string {
 	return formatRunningLabel(name, argsJSON)
 }
 
+func FormatApprovalCommandLabelForTesting(command string) string {
+	return formatApprovalCommandLabel(command)
+}
+
 func SanitizeToolOutputForTesting(output string, maxLines int) string {
 	return sanitizeToolOutput(output, maxLines)
 }
@@ -192,6 +196,30 @@ func (m *Model) SetSidePanelVisibleForTesting(v bool) {
 
 func (m *Model) SetShowToolsForTesting(v bool) {
 	m.showTools = v
+}
+
+func (m *Model) SetSideDetailScrollForTesting(v int) {
+	m.sideDetailScroll = v
+}
+
+func (m Model) SideDetailScrollForTesting() int {
+	return m.sideDetailScroll
+}
+
+func (m *Model) SetResumeItemsForTesting(items []session.Summary) {
+	m.resumeItems = append([]session.Summary(nil), items...)
+}
+
+func (m *Model) SetShowResumeForTesting(v bool) {
+	m.showResume = v
+}
+
+func (m Model) ResumeCursorForTesting() int {
+	return m.resumeCursor
+}
+
+func (m Model) ViewForTesting() string {
+	return m.View()
 }
 
 func (m *Model) AddActivityForTesting(kind, id, agentID, title, detail, body, status string) {

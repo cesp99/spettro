@@ -46,6 +46,36 @@ func TestViewSidePanel_ShowsExpandedContextWithoutToolCallSyntax(t *testing.T) {
 	}
 }
 
+func TestViewSidePanel_DetailsAreaIsScrollableAndHeightBounded(t *testing.T) {
+	m := tui.NewModelForTesting()
+	m.SetDimensionsForTesting(140, 36)
+	m.SetSidePanelVisibleForTesting(true)
+	m.SetShowToolsForTesting(true)
+	m.AddActivityForTesting(
+		"tool",
+		"web-search",
+		"ask",
+		`Searched web for "daft punk songs"`,
+		`Searches web`,
+		strings.Repeat("result line that is intentionally long\n", 80),
+		"done",
+	)
+	width := m.SidePanelWidthForTesting()
+	initial := m.ViewSidePanelForTesting(width)
+	if got := lipgloss.Height(initial); got > 36 {
+		t.Fatalf("expected side panel to stay bounded, got %d lines", got)
+	}
+	if !strings.Contains(initial, "scroll:") {
+		t.Fatalf("expected details scroll footer, got: %s", initial)
+	}
+
+	m.SetSideDetailScrollForTesting(12)
+	scrolled := m.ViewSidePanelForTesting(width)
+	if initial == scrolled {
+		t.Fatalf("expected details view to change after scrolling")
+	}
+}
+
 func TestViewSidePanel_IsHeightBounded(t *testing.T) {
 	m := tui.NewModelForTesting()
 	m.SetDimensionsForTesting(140, 32)

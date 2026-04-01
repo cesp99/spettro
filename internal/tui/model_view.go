@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"spettro/internal/version"
 )
 
 func (m Model) View() string {
@@ -64,7 +66,7 @@ func (m Model) View() string {
 
 func (m Model) viewHeader() string {
 	mc := m.currentColor()
-	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro")
+	logo := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ spettro " + version.App)
 
 	primaryIDs := primaryAgentIDs(m.manifest)
 	var tabs []string
@@ -223,8 +225,8 @@ func (m Model) viewInput(width int) string {
 			lines = append(lines, m.ta.View())
 		}
 	} else if m.pendingAuth != nil {
-		cmd := m.pendingAuth.request.Command
-		lines = append(lines, styleWarn.Render("  $ "+cmd))
+		cmd := formatApprovalCommandLabel(m.pendingAuth.request.Command)
+		lines = append(lines, styleWarn.Render("  "+cmd))
 		if m.approvalCursor == 3 {
 			lines = append(lines, styleMuted.Render("  type what to do instead, then press enter:"))
 			lines = append(lines, m.ta.View())
@@ -662,6 +664,94 @@ func clampLines(s string, maxLines int) string {
 	return strings.Join(clipped, "\n")
 }
 
+func clampOffset(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func scrollBlock(content string, height, offset int) (string, int, int) {
+	if height <= 0 {
+		return "", 0, 0
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", 0, 0
+	}
+	lines := strings.Split(content, "\n")
+	maxOffset := max(0, len(lines)-height)
+	offset = clampOffset(offset, 0, maxOffset)
+	end := min(len(lines), offset+height)
+	return strings.Join(lines[offset:end], "\n"), offset, maxOffset
+}
+
+func (m Model) sidePanelDetailMeta(selected sidePanelItem) []string {
+	details := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("Details"),
+		styleMuted.Render("type: " + selected.Kind),
+		styleMuted.Render("id: " + selected.ID),
+	}
+	if selected.Agent != "" {
+		details = append(details, styleMuted.Render("agent: "+selected.Agent))
+	}
+	return details
+}
+
+func (m Model) sidePanelDetailBody(selected sidePanelItem, width int) string {
+	detailsBody := strings.TrimSpace(selected.Detail)
+	if m.showTools && strings.TrimSpace(selected.Body) != "" {
+		detailsBody = strings.TrimSpace(selected.Body)
+	}
+	if !m.showTools && strings.TrimSpace(selected.Body) != "" {
+		detailsBody = truncateLabel(strings.ReplaceAll(strings.TrimSpace(selected.Body), "\n", " "), max(24, width*2))
+	}
+	lines := []string{}
+	if detailsBody != "" {
+		lines = append(lines, renderMarkdown(detailsBody, max(20, width-4)))
+	}
+	if !m.showTools {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, styleMuted.Render("ctrl+o expands full context"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) sidePanelBudgets(innerHeight, gitRows, detailMetaLines int) (listLines, detailBodyRows int) {
+	// Reserved lines:
+	// activity title/subtitle (2), optional git block (2), section separators (2),
+	// details metadata, metadata/body separator (1), scroll footer (1).
+	reserved := 2 + 2 + detailMetaLines + 1 + 1 + gitRows
+	available := innerHeight - reserved
+	if available < 7 {
+		available = 7
+	}
+	listLines = max(4, min(12, available/2))
+	detailBodyRows = max(3, available-listLines)
+	return listLines, detailBodyRows
+}
+
+func (m Model) sidePanelDetailMaxScroll(width int) int {
+	items := m.sidePanelItems()
+	if len(items) == 0 {
+		return 0
+	}
+	innerHeight := m.sidePanelInnerHeight()
+	_, gitRows := m.sidePanelGitSummary(width)
+	cursor, _, _ := m.sidePanelWindow(items, innerHeight, gitRows)
+	selected := items[cursor]
+	meta := m.sidePanelDetailMeta(selected)
+	_, detailBodyRows := m.sidePanelBudgets(innerHeight, gitRows, len(meta))
+	body := m.sidePanelDetailBody(selected, width)
+	_, _, maxOffset := scrollBlock(body, detailBodyRows, m.sideDetailScroll)
+	return maxOffset
+}
+
 func (m Model) viewSidePanel(width int) string {
 	innerHeight := m.sidePanelInnerHeight()
 	gitSummary, gitRows := m.sidePanelGitSummary(width)
@@ -688,37 +778,26 @@ func (m Model) viewSidePanel(width int) string {
 
 	cursor, start, rows := m.sidePanelWindow(items, innerHeight, gitRows)
 	lines, _ := m.sidePanelLines(items, width, cursor, start, rows)
-
 	selected := items[cursor]
-	detailsBody := strings.TrimSpace(selected.Detail)
-	if m.showTools && strings.TrimSpace(selected.Body) != "" {
-		detailsBody = strings.TrimSpace(selected.Body)
+	detailMeta := m.sidePanelDetailMeta(selected)
+	listLinesBudget, detailBodyRows := m.sidePanelBudgets(innerHeight, gitRows, len(detailMeta))
+
+	listBlock := clampLines(strings.Join(lines, "\n"), listLinesBudget)
+
+	detailBody := m.sidePanelDetailBody(selected, width)
+	detailWindow, detailOffset, detailMax := scrollBlock(detailBody, detailBodyRows, m.sideDetailScroll)
+	detailFooter := styleMuted.Render("scroll: none")
+	if detailMax > 0 {
+		detailFooter = styleMuted.Render(fmt.Sprintf("scroll: %d/%d  (mouse wheel)", detailOffset+1, detailMax+1))
 	}
-	if !m.showTools && strings.TrimSpace(selected.Body) != "" {
-		detailsBody = truncateLabel(strings.ReplaceAll(strings.TrimSpace(selected.Body), "\n", " "), max(24, width*2))
+	detailsBlockParts := append([]string(nil), detailMeta...)
+	if strings.TrimSpace(detailWindow) != "" {
+		detailsBlockParts = append(detailsBlockParts, "")
+		detailsBlockParts = append(detailsBlockParts, detailWindow)
 	}
-	details := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("Details"),
-		styleMuted.Render("type: " + selected.Kind),
-		styleMuted.Render("id: " + selected.ID),
-	}
-	if selected.Agent != "" {
-		details = append(details, styleMuted.Render("agent: "+selected.Agent))
-	}
-	if detailsBody != "" {
-		details = append(details, "")
-		details = append(details, renderMarkdown(detailsBody, max(20, width-4)))
-	}
-	if !m.showTools {
-		details = append(details, "")
-		details = append(details, styleMuted.Render("ctrl+o expands full context"))
-	}
-	detailsBlock := strings.Join(details, "\n")
-	maxDetailLines := innerHeight - len(lines) - 6 - gitRows
-	if maxDetailLines < 5 {
-		maxDetailLines = 5
-	}
-	detailsBlock = clampLines(detailsBlock, maxDetailLines)
+	detailsBlockParts = append(detailsBlockParts, "")
+	detailsBlockParts = append(detailsBlockParts, detailFooter)
+	detailsBlock := strings.Join(detailsBlockParts, "\n")
 
 	contentParts := []string{
 		lipgloss.NewStyle().Bold(true).Render("Activity"),
@@ -727,7 +806,7 @@ func (m Model) viewSidePanel(width int) string {
 	if gitSummary != "" {
 		contentParts = append(contentParts, "", gitSummary)
 	}
-	contentParts = append(contentParts, "", strings.Join(lines, "\n"), "", detailsBlock)
+	contentParts = append(contentParts, "", listBlock, "", detailsBlock)
 	content := lipgloss.JoinVertical(lipgloss.Left, contentParts...)
 	content = clampLines(content, innerHeight)
 

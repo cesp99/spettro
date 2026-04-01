@@ -40,6 +40,31 @@ func Default() UserConfig {
 	}
 }
 
+func normalize(cfg UserConfig) (UserConfig, bool) {
+	def := Default()
+	changed := false
+
+	if cfg.ActiveProvider == "" {
+		cfg.ActiveProvider = def.ActiveProvider
+		changed = true
+	}
+	if cfg.ActiveModel == "" {
+		cfg.ActiveModel = def.ActiveModel
+		changed = true
+	}
+	switch cfg.Permission {
+	case PermissionYOLO, PermissionRestricted, PermissionAskFirst:
+	default:
+		cfg.Permission = def.Permission
+		changed = true
+	}
+	if cfg.APIKeys == nil {
+		cfg.APIKeys = map[string]string{}
+		changed = true
+	}
+	return cfg, changed
+}
+
 func Path() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -75,8 +100,12 @@ func LoadOrCreate() (UserConfig, error) {
 		return UserConfig{}, fmt.Errorf("decode config: %w", err)
 	}
 
-	if cfg.APIKeys == nil {
-		cfg.APIKeys = map[string]string{}
+	var changed bool
+	cfg, changed = normalize(cfg)
+	if changed {
+		if err := Save(cfg); err != nil {
+			return UserConfig{}, err
+		}
 	}
 	return cfg, nil
 }

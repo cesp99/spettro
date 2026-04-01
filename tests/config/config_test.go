@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,12 @@ func TestLoadOrCreateRoundTrip(t *testing.T) {
 	if reloaded.ActiveProvider != "anthropic" {
 		t.Fatalf("expected anthropic provider, got %s", reloaded.ActiveProvider)
 	}
+	if reloaded.ActiveModel != "claude-3-7-sonnet" {
+		t.Fatalf("expected saved model, got %s", reloaded.ActiveModel)
+	}
+	if reloaded.Permission != config.PermissionAskFirst {
+		t.Fatalf("expected saved permission, got %s", reloaded.Permission)
+	}
 	if reloaded.LastAgentID != "coding" {
 		t.Fatalf("expected saved last agent, got %s", reloaded.LastAgentID)
 	}
@@ -55,5 +62,48 @@ func TestLoadOrCreateRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "secret") {
 		t.Fatal("plaintext key leaked into config file")
+	}
+}
+
+func TestLoadOrCreateNormalizesMissingCoreFields(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	p := filepath.Join(tmpHome, ".spettro", "config.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	raw := []byte(`{"token_budget": 99, "permission": "invalid"}`)
+	if err := os.WriteFile(p, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadOrCreate()
+	if err != nil {
+		t.Fatalf("load/create: %v", err)
+	}
+	if cfg.ActiveProvider != config.Default().ActiveProvider {
+		t.Fatalf("expected default provider %q, got %q", config.Default().ActiveProvider, cfg.ActiveProvider)
+	}
+	if cfg.ActiveModel != config.Default().ActiveModel {
+		t.Fatalf("expected default model %q, got %q", config.Default().ActiveModel, cfg.ActiveModel)
+	}
+	if cfg.Permission != config.Default().Permission {
+		t.Fatalf("expected default permission %q, got %q", config.Default().Permission, cfg.Permission)
+	}
+
+	updatedRaw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read normalized config: %v", err)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(updatedRaw, &persisted); err != nil {
+		t.Fatalf("decode normalized config: %v", err)
+	}
+	if persisted["active_provider"] == "" || persisted["active_model"] == "" {
+		t.Fatalf("expected normalized provider/model in persisted config: %s", string(updatedRaw))
+	}
+	if got, _ := persisted["permission"].(string); got != string(config.Default().Permission) {
+		t.Fatalf("expected normalized permission %q, got %q", config.Default().Permission, got)
 	}
 }

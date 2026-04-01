@@ -914,10 +914,28 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.resumeCursor > 0 {
 			m.resumeCursor--
 		}
+		m.ensureResumeWindow()
 	case "down", "ctrl+n", "tab":
 		if m.resumeCursor < len(m.resumeItems)-1 {
 			m.resumeCursor++
 		}
+		m.ensureResumeWindow()
+	case "pgup":
+		step := max(1, m.resumeMaxRows()-2)
+		m.resumeCursor = max(0, m.resumeCursor-step)
+		m.ensureResumeWindow()
+	case "pgdown":
+		step := max(1, m.resumeMaxRows()-2)
+		m.resumeCursor = min(len(m.resumeItems)-1, m.resumeCursor+step)
+		m.ensureResumeWindow()
+	case "home":
+		m.resumeCursor = 0
+		m.ensureResumeWindow()
+	case "end":
+		if len(m.resumeItems) > 0 {
+			m.resumeCursor = len(m.resumeItems) - 1
+		}
+		m.ensureResumeWindow()
 	case "enter":
 		if len(m.resumeItems) > 0 {
 			sel := m.resumeItems[m.resumeCursor]
@@ -950,9 +968,52 @@ func (m Model) updateResume(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) ensureResumeWindow() {
+	if len(m.resumeItems) == 0 {
+		m.resumeCursor = 0
+		m.resumeScroll = 0
+		return
+	}
+	if m.resumeCursor < 0 {
+		m.resumeCursor = 0
+	}
+	if m.resumeCursor >= len(m.resumeItems) {
+		m.resumeCursor = len(m.resumeItems) - 1
+	}
+	maxRows := m.resumeMaxRows()
+	maxStart := max(0, len(m.resumeItems)-maxRows)
+	if m.resumeScroll < 0 {
+		m.resumeScroll = 0
+	}
+	if m.resumeScroll > maxStart {
+		m.resumeScroll = maxStart
+	}
+	if m.resumeCursor < m.resumeScroll {
+		m.resumeScroll = m.resumeCursor
+	}
+	if m.resumeCursor >= m.resumeScroll+maxRows {
+		m.resumeScroll = m.resumeCursor - maxRows + 1
+	}
+}
+
+func (m Model) resumeMaxRows() int {
+	maxRows := m.height - 12
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	return maxRows
+}
+
 func (m Model) viewResume() string {
 	mc := m.currentColor()
 	title := lipgloss.NewStyle().Bold(true).Foreground(mc).Render("◈ resume conversation")
+	dialogWidth := 72
+	if m.width < dialogWidth+4 {
+		dialogWidth = m.width - 4
+	}
+	if dialogWidth < 30 {
+		dialogWidth = 30
+	}
 
 	var rows []string
 	for i, s := range m.resumeItems {
@@ -962,6 +1023,7 @@ func (m Model) viewResume() string {
 		if preview == "" {
 			preview = "(empty)"
 		}
+		preview = strings.ReplaceAll(preview, "\n", " ")
 		var prefix string
 		var timeStyle, previewStyle lipgloss.Style
 		if isSelected {
@@ -973,34 +1035,29 @@ func (m Model) viewResume() string {
 			timeStyle = lipgloss.NewStyle().Foreground(colorMuted)
 			previewStyle = lipgloss.NewStyle().Foreground(colorDim)
 		}
-		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(preview))
+		prefixWidth := lipgloss.Width(prefix)
+		timeWidth := lipgloss.Width(timeStr) + 2
+		previewBudget := max(8, dialogWidth-prefixWidth-timeWidth-6)
+		rows = append(rows, prefix+timeStyle.Render(timeStr)+"  "+previewStyle.Render(truncateLabel(preview, previewBudget)))
 	}
 	if len(rows) == 0 {
 		rows = append(rows, styleMuted.Render("  no saved conversations"))
 	}
 
-	hint := styleMuted.Render("↑↓ navigate  enter load  esc close")
-	dialogWidth := 72
-	if m.width < dialogWidth+4 {
-		dialogWidth = m.width - 4
-	}
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
-
-	maxRows := m.height - 12
-	if maxRows < 4 {
-		maxRows = 4
-	}
+	hint := styleMuted.Render("↑↓ navigate  pgup/pgdn jump  enter load  esc close")
+	maxRows := m.resumeMaxRows()
 	if len(rows) > maxRows {
-		start := m.resumeCursor - maxRows/2
+		start := m.resumeScroll
 		if start < 0 {
 			start = 0
 		}
 		if start+maxRows > len(rows) {
 			start = len(rows) - maxRows
 		}
-		rows = rows[start : start+maxRows]
+		if start < 0 {
+			start = 0
+		}
+		rows = rows[start:min(len(rows), start+maxRows)]
 	}
 
 	dialog := lipgloss.NewStyle().

@@ -231,6 +231,7 @@ type Model struct {
 	tickCount      int
 	sideCursor     int
 	sideScroll     int
+	sideDetailScroll int
 	modifiedFiles  []modifiedFileEntry
 	gitBranch      string
 	showSidePanel  bool
@@ -244,6 +245,7 @@ type Model struct {
 	showResume   bool
 	resumeItems  []session.Summary
 	resumeCursor int
+	resumeScroll int
 
 	todos []session.Todo
 
@@ -582,6 +584,22 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ctrlCAt = time.Time{}
 		}
 	case tea.MouseMsg:
+		if m.showResume {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				if m.resumeCursor > 0 {
+					m.resumeCursor--
+				}
+				m.ensureResumeWindow()
+				return m, tea.Batch(cmds...)
+			case tea.MouseButtonWheelDown:
+				if m.resumeCursor < len(m.resumeItems)-1 {
+					m.resumeCursor++
+				}
+				m.ensureResumeWindow()
+				return m, tea.Batch(cmds...)
+			}
+		}
 		sideW := m.sidePanelWidth()
 		onSidePanel := sideW > 0 && msg.X >= m.paneWidth()+1
 		if onSidePanel {
@@ -592,19 +610,30 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			maxStart := max(0, len(items)-rows)
 			switch msg.Button {
 			case tea.MouseButtonWheelUp:
+				if m.sideDetailScroll > 0 {
+					m.sideDetailScroll--
+					return m, tea.Batch(cmds...)
+				}
 				if m.sideScroll > 0 {
 					m.sideScroll--
 				}
 				if m.sideCursor > 0 {
 					m.sideCursor--
+					m.sideDetailScroll = 0
 				}
 				return m, tea.Batch(cmds...)
 			case tea.MouseButtonWheelDown:
+				detailMax := m.sidePanelDetailMaxScroll(sideW)
+				if m.sideDetailScroll < detailMax {
+					m.sideDetailScroll++
+					return m, tea.Batch(cmds...)
+				}
 				if m.sideScroll < maxStart {
 					m.sideScroll++
 				}
 				if m.sideCursor < len(items)-1 {
 					m.sideCursor++
+					m.sideDetailScroll = 0
 				}
 				return m, tea.Batch(cmds...)
 			case tea.MouseButtonLeft:
@@ -616,12 +645,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if row >= 0 && row < len(rowToItem) {
 						idx := rowToItem[row]
 						if idx >= 0 && idx < len(items) {
+							if m.sideCursor != idx {
+								m.sideDetailScroll = 0
+							}
 							m.sideCursor = idx
 						}
 					}
 					if len(rowToItem) == 0 {
 						idx := m.sideScroll + row
 						if idx >= 0 && idx < len(items) {
+							if m.sideCursor != idx {
+								m.sideDetailScroll = 0
+							}
 							m.sideCursor = idx
 						}
 					}
@@ -753,6 +788,7 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+o":
 		m.showTools = !m.showTools
+		m.sideDetailScroll = 0
 		m.refreshViewport()
 		return m, nil
 	case "ctrl+b":
@@ -989,6 +1025,7 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			m.showResume = true
 			m.resumeItems = items
 			m.resumeCursor = 0
+			m.resumeScroll = 0
 		}
 	default:
 		m.showBanner("unknown command: "+cmd, "error")

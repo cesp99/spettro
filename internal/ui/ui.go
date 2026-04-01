@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"strings"
+
+	"spettro/internal/version"
 )
 
 const (
@@ -51,7 +53,7 @@ func NewRenderer() *Renderer {
 
 func (r *Renderer) Welcome() string {
 	lines := []string{
-		fmt.Sprintf("%s%sSPETTRO%s  %sfast multi-agent coding CLI%s", bold, blue, reset, dim, reset),
+		fmt.Sprintf("%s%sSPETTRO %s%s  %sfast multi-agent coding CLI%s", bold, blue, version.App, reset, dim, reset),
 		fmt.Sprintf("%sShift+Tab%s switches agents. %s/setup%s runs initial onboarding.", gray, reset, gray, reset),
 	}
 	return strings.Join(lines, "\n")
