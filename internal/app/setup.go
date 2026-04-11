@@ -61,12 +61,6 @@ func (a *App) handleSetupInput(line string) error {
 		if err := config.SaveAPIKey(a.setup.provider, key); err != nil {
 			return err
 		}
-		if a.cfg.APIKeys == nil {
-			a.cfg.APIKeys = map[string]string{}
-		}
-		a.cfg.APIKeys[a.setup.provider] = key
-		a.cfg.ActiveProvider = a.setup.provider
-		a.cfg.ActiveModel = a.setup.model
 		a.setup.step = 3
 		a.printLine("Choose default permission:")
 		a.printLine("1) ask-first")
@@ -86,7 +80,12 @@ func (a *App) handleSetupInput(line string) error {
 			return fmt.Errorf("invalid permission, choose ask-first/restricted/yolo")
 		}
 
-		if err := config.Save(a.cfg); err != nil {
+		if err := a.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.ActiveProvider = a.setup.provider
+			cfg.ActiveModel = a.setup.model
+			cfg.Permission = a.cfg.Permission
+			return nil
+		}); err != nil {
 			return err
 		}
 		a.setup = nil
@@ -130,9 +129,11 @@ func (a *App) handleModelPickerInput(line string) error {
 			return fmt.Errorf("selection out of range")
 		}
 		selected := a.modelPicker.items[n-1]
-		a.cfg.ActiveProvider = selected.Provider
-		a.cfg.ActiveModel = selected.Name
-		if err := config.Save(a.cfg); err != nil {
+		if err := a.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.ActiveProvider = selected.Provider
+			cfg.ActiveModel = selected.Name
+			return nil
+		}); err != nil {
 			return err
 		}
 		a.modelPicker = nil

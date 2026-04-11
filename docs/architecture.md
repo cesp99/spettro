@@ -13,7 +13,7 @@ Spettro is a Go application with a Bubble Tea TUI front-end and internal service
 - `internal/tui`: interactive terminal UI, command handling, approvals, and session interactions.
 - `internal/agent`: LLM runtime loop, `TOOL_CALL` parsing/execution, delegation, policy checks.
 - `internal/config`: config persistence, encrypted keys, trust list, manifest parsing/validation/migration.
-- `internal/provider`: provider adapters, endpoint resolution, connected model routing.
+- `internal/provider`: provider adapters, endpoint resolution, connected model routing, and Fantasy-backed text model execution with legacy SDK fallback for vision or legacy completion endpoints.
 - `internal/models`: fetch/cache of `models.dev` catalog.
 - `internal/session`: persistent session storage (`messages`, `tasks`, `agents` events) and resume support.
 - `internal/storage`: project/global `.spettro` directory setup.
@@ -36,6 +36,7 @@ See [AGENTS.md](../AGENTS.md) for schema details (`version = 2`, `[runtime]`, `[
 
 ## Provider abstraction
 
-- `anthropic` uses native adapter.
-- Other providers use OpenAI-compatible adapter with known base URL mapping and local endpoint support.
+- Text requests route through Charm's `fantasy` SDK for `anthropic`, `openai`, and OpenAI-compatible providers.
+- Image requests and legacy completion-only backends fall back to Spettro's direct SDK adapters so existing compatibility is preserved.
+- Known provider base URLs and local endpoints still resolve through the same manager layer.
 - Catalog-backed model lists are preferred; fallback models are used when catalog is unavailable.

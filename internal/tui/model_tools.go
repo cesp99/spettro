@@ -54,6 +54,16 @@ func waitForShellApproval(ch chan shellApprovalRequestMsg) tea.Cmd {
 	}
 }
 
+func waitForAskUser(ch chan askUserRequestMsg) tea.Cmd {
+	return func() tea.Msg {
+		req, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return req
+	}
+}
+
 func (m Model) renderApprovalPicker(title string, options []string, cursor int, mc lipgloss.Color) string {
 	var sb strings.Builder
 	sb.WriteString(styleMuted.Render("  "+title) + "\n")

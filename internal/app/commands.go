@@ -45,15 +45,16 @@ func (a *App) handleCommand(line string) error {
 		if !a.providers.HasModel(pair[0], pair[1]) {
 			return fmt.Errorf("unknown provider/model pair: %s", fields[1])
 		}
-		a.cfg.ActiveProvider = pair[0]
-		a.cfg.ActiveModel = pair[1]
 		if len(fields) >= 3 {
 			if err := config.SaveAPIKey(pair[0], fields[2]); err != nil {
 				return err
 			}
-			a.cfg.APIKeys[pair[0]] = fields[2]
 		}
-		if err := config.Save(a.cfg); err != nil {
+		if err := a.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.ActiveProvider = pair[0]
+			cfg.ActiveModel = pair[1]
+			return nil
+		}); err != nil {
 			return err
 		}
 		a.printStatus()
@@ -67,8 +68,10 @@ func (a *App) handleCommand(line string) error {
 		default:
 			return fmt.Errorf("invalid permission level")
 		}
-		a.cfg.Permission = level
-		return config.Save(a.cfg)
+		return a.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.Permission = level
+			return nil
+		})
 	case "/approve":
 		if strings.TrimSpace(a.pendingPlan) == "" {
 			a.printLine("no pending plan to approve")

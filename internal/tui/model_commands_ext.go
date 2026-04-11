@@ -238,7 +238,10 @@ func (m Model) handlePermissionsCommand(input string) (tea.Model, tea.Cmd) {
 			m.showBanner("usage: /permissions debug <on|off>", "error")
 			return m, nil
 		}
-		_ = config.Save(m.cfg)
+		_ = m.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.ShowPermissionDebug = m.cfg.ShowPermissionDebug
+			return nil
+		})
 		if m.cfg.ShowPermissionDebug {
 			m.showBanner("permission debug enabled", "success")
 		} else {
@@ -253,8 +256,10 @@ func (m Model) handlePermissionsCommand(input string) (tea.Model, tea.Cmd) {
 	level := config.PermissionLevel(fields[1])
 	switch level {
 	case config.PermissionYOLO, config.PermissionRestricted, config.PermissionAskFirst:
-		m.cfg.Permission = level
-		_ = config.Save(m.cfg)
+		_ = m.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.Permission = level
+			return nil
+		})
 		m.showBanner(fmt.Sprintf("permission set to %s", level), "success")
 	default:
 		m.showBanner("invalid permission", "error")
@@ -343,11 +348,17 @@ func (m Model) handleCompactCommand(input string) (tea.Model, tea.Cmd) {
 		case "on":
 			m.cfg.AutoCompactEnabled = true
 			m.autoCompactFailures = 0
-			_ = config.Save(m.cfg)
+			_ = m.updateConfig(func(cfg *config.UserConfig) error {
+				cfg.AutoCompactEnabled = true
+				return nil
+			})
 			m.showBanner("auto compact enabled", "success")
 		case "off":
 			m.cfg.AutoCompactEnabled = false
-			_ = config.Save(m.cfg)
+			_ = m.updateConfig(func(cfg *config.UserConfig) error {
+				cfg.AutoCompactEnabled = false
+				return nil
+			})
 			m.showBanner("auto compact disabled", "success")
 		default:
 			m.showBanner("usage: /compact auto <status|on|off>", "error")

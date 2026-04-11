@@ -1,6 +1,6 @@
 # Spettro
 
-[![Go 1.24+](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go)](https://go.dev/)
+[![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](https://go.dev/)
 [![UI Bubble Tea](https://img.shields.io/badge/UI-Bubble%20Tea-ff69b4)](https://github.com/charmbracelet/bubbletea)
 [![Providers](https://img.shields.io/badge/LLM-OpenAI%20Compatible%20%7C%20Anthropic-6f42c1)](#provider-setup)
 [![Status](https://img.shields.io/badge/status-experimental-orange)](#)
@@ -16,6 +16,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Parallel `TOOL_CALL` spawning of sub-agents
 - Permission policies: `ask-first`, `restricted`, `yolo`
 - Live tool traces in planning/coding runs
+- Fantasy-backed provider routing for OpenAI, Anthropic, and OpenAI-compatible text calls
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
@@ -24,7 +25,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 
 Requirements:
 
-- Go `1.24.2+`
+- Go `1.26.1+`
 
 ```bash
 git clone https://github.com/cesp99/spettro

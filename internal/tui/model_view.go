@@ -205,6 +205,33 @@ func (m Model) viewMentionPalette(width int) string {
 		Render(title + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint)
 }
 
+func (m Model) renderAskUserPrompt() string {
+	if m.pendingQuestion == nil {
+		return ""
+	}
+	req := m.pendingQuestion.request
+	var lines []string
+	lines = append(lines, styleMuted.Render("  "+req.Question))
+	if strings.TrimSpace(req.Context) != "" {
+		lines = append(lines, styleMuted.Render("  "+req.Context))
+	}
+	options := askUserOptions(req)
+	if m.questionFreeform || len(options) == 0 {
+		lines = append(lines, styleMuted.Render("  type your answer and press enter:"))
+		lines = append(lines, m.ta.View())
+		lines = append(lines, styleMuted.Render("  esc declines"))
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, m.renderApprovalPicker(
+		"Choose an answer",
+		options,
+		m.questionCursor,
+		m.currentColor(),
+	))
+	lines = append(lines, styleMuted.Render("  enter selects  esc declines"))
+	return strings.Join(lines, "\n")
+}
+
 func (m Model) viewInput(width int) string {
 	mc := m.currentColor()
 	agentLabel := m.mode
@@ -225,6 +252,8 @@ func (m Model) viewInput(width int) string {
 		if m.pendingPlan != "" {
 			lines = append(lines, m.ta.View())
 		}
+	} else if m.pendingQuestion != nil {
+		lines = append(lines, m.renderAskUserPrompt())
 	} else if m.pendingAuth != nil {
 		cmd := formatApprovalCommandLabel(m.pendingAuth.request.Command)
 		lines = append(lines, styleWarn.Render("  "+cmd))

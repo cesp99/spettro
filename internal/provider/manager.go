@@ -213,33 +213,62 @@ func (m *Manager) Send(ctx context.Context, providerName, modelName string, req 
 		return Response{}, err
 	}
 
-	var adapter Adapter
-	if providerName == "anthropic" {
-		adapter = AnthropicAdapter{APIKey: apiKey}
-	} else {
-		if known, ok := knownBaseURLs[providerName]; ok {
-			baseURL = known
-		} else if baseURL == "" {
-			if strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://") {
-				baseURL = strings.TrimRight(providerName, "/") + "/v1"
-			} else if providerName != "openai" && providerName != "openai-compatible" {
-				return Response{}, fmt.Errorf("no API endpoint configured for provider %q", providerName)
-			}
+	if len(req.Images) == 0 {
+		resp, err := sendWithFantasy(ctx, providerName, modelName, apiKey, baseURL, req)
+		if err == nil {
+			return finalizeResponse(resp, providerName, modelName, allParts), nil
 		}
-		if apiKey == "" {
-			apiKey = "local"
+		if !shouldFallbackToLegacy(err) {
+			return Response{}, err
 		}
-		adapter = OpenAICompatibleAdapter{APIKey: apiKey, BaseURL: baseURL}
 	}
 
+	adapter, err := legacyAdapterFor(providerName, apiKey, baseURL)
+	if err != nil {
+		return Response{}, err
+	}
 	resp, err := adapter.Send(ctx, modelName, req)
 	if err != nil {
 		return Response{}, err
 	}
+	return finalizeResponse(resp, providerName, modelName, allParts), nil
+}
+
+func legacyAdapterFor(providerName, apiKey, baseURL string) (Adapter, error) {
+	if providerName == "anthropic" {
+		return AnthropicAdapter{APIKey: apiKey}, nil
+	}
+	resolvedBaseURL, err := resolveOpenAICompatibleBaseURL(providerName, baseURL)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey == "" {
+		apiKey = "local"
+	}
+	return OpenAICompatibleAdapter{APIKey: apiKey, BaseURL: resolvedBaseURL}, nil
+}
+
+func resolveOpenAICompatibleBaseURL(providerName, baseURL string) (string, error) {
+	if known, ok := knownBaseURLs[providerName]; ok {
+		return known, nil
+	}
+	if baseURL != "" {
+		return baseURL, nil
+	}
+	if strings.HasPrefix(providerName, "http://") || strings.HasPrefix(providerName, "https://") {
+		return strings.TrimRight(providerName, "/") + "/v1", nil
+	}
+	if providerName == "openai" || providerName == "openai-compatible" {
+		return "", nil
+	}
+	return "", fmt.Errorf("no API endpoint configured for provider %q", providerName)
+}
+
+func finalizeResponse(resp Response, providerName, modelName string, allParts []string) Response {
 	resp.Provider = providerName
 	resp.Model = modelName
 	if resp.EstimatedTokens == 0 {
 		resp.EstimatedTokens = budget.EstimateTokens(allParts...)
 	}
-	return resp, nil
+	return resp
 }

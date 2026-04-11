@@ -25,18 +25,13 @@ func main() {
 		fatal("storage error: %v", err)
 	}
 
-	cfg, err := config.LoadOrCreate()
+	cfg, err := config.LoadFull()
 	if err != nil {
 		fatal("config error: %v", err)
 	}
-	keys, err := config.LoadAPIKeys()
-	if err != nil {
-		fatal("keys error: %v", err)
-	}
-	cfg.APIKeys = keys
 
 	pm := provider.NewManager()
-	pm.SetAPIKeys(keys)
+	pm.SetAPIKeys(cfg.APIKeys)
 
 	if _, err := config.LoadAgentManifestForProject(cwd); err != nil {
 		fatal("agent manifest error: %v", err)

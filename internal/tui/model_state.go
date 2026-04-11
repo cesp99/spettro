@@ -30,13 +30,23 @@ func (m *Model) stopAgent() {
 		default:
 		}
 	}
+	if m.pendingQuestion != nil {
+		select {
+		case m.pendingQuestion.response <- askUserResponse{err: fmt.Errorf("cancelled")}:
+		default:
+		}
+	}
 	m.thinking = false
 	m.toolCh = nil
 	m.approvalCh = nil
+	m.askUserCh = nil
 	m.liveTools = nil
 	m.currentTool = nil
 	m.pendingAuth = nil
+	m.pendingQuestion = nil
 	m.approvalCursor = 0
+	m.questionCursor = 0
+	m.questionFreeform = false
 	m.progressNote = ""
 	m.activePrompt = nil
 	m.activeAgentID = ""
@@ -56,9 +66,23 @@ func (m *Model) showBanner(text, kind string) {
 }
 
 func (m *Model) persistUIState() {
-	m.cfg.LastAgentID = m.mode
-	m.cfg.ShowSidePanel = m.showSidePanel
-	_ = config.Save(m.cfg)
+	_ = m.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.LastAgentID = m.mode
+		cfg.ShowSidePanel = m.showSidePanel
+		return nil
+	})
+}
+
+func (m *Model) updateConfig(mut func(*config.UserConfig) error) error {
+	cfg, err := config.Update(mut)
+	if err != nil {
+		return err
+	}
+	m.cfg = cfg
+	if m.providers != nil {
+		m.providers.SetAPIKeys(cfg.APIKeys)
+	}
+	return nil
 }
 
 func (m *Model) setProgressNote(text string) {

@@ -90,6 +90,19 @@ func capturedCoder(cs *captureServer, dir string) agent.LLMCoder {
 	}
 }
 
+func capturedLLMAgent(cs *captureServer, dir string, manifest config.AgentManifest, spec config.AgentSpec) agent.LLMAgent {
+	pm := provider.NewManager()
+	pm.AddLocalModels([]provider.Model{{Provider: cs.srv.URL, Name: "fake-model", Local: true}})
+	return agent.LLMAgent{
+		Spec:            spec,
+		ProviderManager: pm,
+		ProviderName:    func() string { return cs.srv.URL },
+		ModelName:       func() string { return "fake-model" },
+		CWD:             dir,
+		Manifest:        &manifest,
+	}
+}
+
 // ── repo-search output ─────────────────────────────────────────────────────────
 
 func TestToolOutput_RepoSearch_ListsFiles(t *testing.T) {
@@ -278,6 +291,53 @@ func TestToolOutput_FileWrite_RefusalIncludedInPrompt(t *testing.T) {
 	prompt2 := cs.promptAt(1)
 	if !strings.Contains(strings.ToLower(prompt2), "error") && !strings.Contains(strings.ToLower(prompt2), "refusing") && !strings.Contains(strings.ToLower(prompt2), "read") {
 		t.Errorf("expected refusal error message in prompt:\n%s", prompt2)
+	}
+}
+
+func TestToolOutput_AgentDelegation_KeepsWorkerSummaryInParentPrompt(t *testing.T) {
+	dir := t.TempDir()
+	longSummary := strings.Repeat("worker checked tests, diffs, and runtime hooks. ", 12) + "TAIL-MARKER delegated verification completed"
+
+	cs := newCaptureServer(t, []string{
+		`TOOL_CALL {"name":"agent","arguments":{"agent":"worker","task":"investigate deeply"}}`,
+		"FINAL\n" + longSummary,
+		"FINAL\nParent integrated worker results.",
+	})
+
+	manifest := config.AgentManifest{
+		Version:      2,
+		DefaultAgent: "parent",
+		Runtime: config.RuntimePolicy{
+			DefaultPermission: config.PermissionAskFirst,
+			DefaultTimeoutSec: 60,
+			LogToolCalls:      false,
+			SandboxMode:       config.SandboxWorkspaceWrite,
+			Delegation:        config.DelegationPolicy{MaxParallelWorkers: 2, MaxDepth: 2},
+		},
+		Tools: []config.ToolSpec{
+			{ID: "agent", Name: "Agent", Kind: "builtin", Enabled: true, TimeoutSec: 30, PermittedActions: []string{"plan"}},
+		},
+		Agents: []config.AgentSpec{
+			{ID: "parent", Name: "Parent", Mode: "orchestrator", Role: config.AgentRoleOrchestrator, AllowedTools: []string{"agent"}, Permission: config.PermissionAskFirst, MaxSteps: 4, Enabled: true, Handoffs: []string{"worker"}},
+			{ID: "worker", Name: "Worker", Mode: "ask", Role: config.AgentRoleWorker, AllowedTools: []string{"agent"}, Permission: config.PermissionAskFirst, MaxSteps: 2, Enabled: true},
+		},
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("manifest validate: %v", err)
+	}
+
+	ag := capturedLLMAgent(cs, dir, manifest, manifest.Agents[0])
+	_, err := ag.Run(context.Background(), "delegate work")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	prompt3 := cs.promptAt(2)
+	if !strings.Contains(prompt3, "TAIL-MARKER delegated verification completed") {
+		t.Fatalf("expected parent prompt to retain worker summary tail, got:\n%s", prompt3)
+	}
+	if !strings.Contains(prompt3, `"tool_trace_count"`) {
+		t.Fatalf("expected structured worker envelope in parent prompt, got:\n%s", prompt3)
 	}
 }
 

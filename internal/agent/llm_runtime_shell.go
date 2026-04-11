@@ -102,15 +102,42 @@ func marshalSubagentResult(agentID string, result RunResult) string {
 	payload := map[string]any{
 		"agent":            agentID,
 		"status":           "ok",
-		"summary":          truncate(strings.TrimSpace(result.Content), 1200),
+		"summary":          truncate(strings.TrimSpace(result.Content), 4000),
 		"tool_trace_count": len(result.Tools),
 		"tokens_used":      result.TokensUsed,
 	}
+	if toolResults := summarizeSubagentToolResults(result.Tools, 6); len(toolResults) > 0 {
+		payload["tool_results"] = toolResults
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Sprintf("{\"agent\":%q,\"status\":\"ok\",\"summary\":%q}", agentID, truncate(strings.TrimSpace(result.Content), 1200))
+		return fmt.Sprintf("{\"agent\":%q,\"status\":\"ok\",\"summary\":%q}", agentID, truncate(strings.TrimSpace(result.Content), 4000))
 	}
 	return string(raw)
+}
+
+func summarizeSubagentToolResults(traces []ToolTrace, limit int) []map[string]string {
+	out := make([]map[string]string, 0, limit)
+	for _, tr := range traces {
+		if tr.Status == "running" || tr.Name == "comment" {
+			continue
+		}
+		item := map[string]string{
+			"tool":   tr.Name,
+			"status": tr.Status,
+		}
+		if args := strings.TrimSpace(summarizeLoopToolArgs(tr.Name, tr.Args)); args != "" {
+			item["args"] = truncate(args, 160)
+		}
+		if output := strings.TrimSpace(tr.Output); output != "" {
+			item["output"] = truncate(strings.Join(strings.Fields(output), " "), 240)
+		}
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 var alwaysAllowedCommandPrefixes = []string{

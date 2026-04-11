@@ -108,6 +108,7 @@ type LLMAgent struct {
 	Images          []string // only used on first LLM call (chat use case)
 	ToolCallback    func(ToolTrace)
 	ShellApproval   ShellApprovalCallback
+	AskUser         AskUserCallback
 	Manifest        *config.AgentManifest // for sub-agent spawning via agent tool
 	SessionDir      string
 	DelegationDepth int
@@ -157,6 +158,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ToolCallback:    a.ToolCallback,
 		Permission:      a.Spec.Permission,
 		ShellApproval:   a.ShellApproval,
+		AskUser:         a.AskUser,
 		Manifest:        a.Manifest,
 		SessionDir:      a.SessionDir,
 		DelegationDepth: a.DelegationDepth,

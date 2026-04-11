@@ -39,6 +39,7 @@ type LLMCoder struct {
 	RequiredReads   []string
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	ShellApproval   ShellApprovalCallback
+	AskUser         AskUserCallback
 }
 
 type ShellApprovalDecision string
@@ -57,6 +58,16 @@ type ShellApprovalRequest struct {
 }
 
 type ShellApprovalCallback func(context.Context, ShellApprovalRequest) (ShellApprovalDecision, error)
+
+type AskUserRequest struct {
+	Question          string
+	Options           []string
+	Context           string
+	DefaultOption     string
+	AllowFreeResponse bool
+}
+
+type AskUserCallback func(context.Context, AskUserRequest) (string, error)
 
 func (c LLMCoder) Execute(ctx context.Context, plan string, level config.PermissionLevel, approved bool) (RunResult, error) {
 	if strings.TrimSpace(plan) == "" {
@@ -83,6 +94,7 @@ func (c LLMCoder) Execute(ctx context.Context, plan string, level config.Permiss
 		ToolCallback:    c.ToolCallback,
 		Permission:      level,
 		ShellApproval:   c.ShellApproval,
+		AskUser:         c.AskUser,
 	})
 	if err != nil {
 		return RunResult{}, err
@@ -114,6 +126,7 @@ type toolLoopConfig struct {
 	ToolCallback    func(ToolTrace) // optional: called with status="running" before and final status after each tool
 	Permission      config.PermissionLevel
 	ShellApproval   ShellApprovalCallback
+	AskUser         AskUserCallback
 	Manifest        *config.AgentManifest
 	SessionDir      string
 	DelegationDepth int
@@ -137,6 +150,7 @@ type toolRuntime struct {
 	searcher      RepoSearcher
 	permission    config.PermissionLevel
 	shellApproval ShellApprovalCallback
+	askUser       AskUserCallback
 	allowedShell  map[string]struct{}
 	toolPolicies  map[string]config.ToolSpec
 	logToolCalls  bool
@@ -204,6 +218,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 		requiredReads:   map[string]struct{}{},
 		permission:      cfg.Permission,
 		shellApproval:   cfg.ShellApproval,
+		askUser:         cfg.AskUser,
 		allowedShell:    map[string]struct{}{},
 		toolPolicies:    map[string]config.ToolSpec{},
 		logToolCalls:    cfg.LogToolCalls,
@@ -308,12 +323,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (string, []ToolTrace, 
 			for _, res := range results {
 				trace := ToolTrace{AgentID: res.agentID, Name: res.name, Status: res.status, Args: res.args, Output: truncate(res.output, 600)}
 				traces = append(traces, trace)
-				if runtime.logToolCalls {
-					history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
-				}
-			}
-			if !runtime.logToolCalls {
-				history.WriteString(fmt.Sprintf("tool(%d): %d calls completed\n", step, len(results)))
+				// The LLM must always receive tool outcomes in the next step, even when
+				// human-facing tool logging is disabled in the manifest.
+				history.WriteString(fmt.Sprintf("tool(%d)[%s]: %s\n", step, res.name, summarizeLoopToolResult(res.name, res.args, res.status, res.output)))
 			}
 			if runtime.shouldStop() {
 				return runtime.stopMessage(), traces, totalTokens, nil
@@ -609,7 +621,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 	case "web-search":
 		return r.runWebSearch(ctx, call.Args)
 	case "ask-user":
-		return r.runAskUser(call.Args)
+		return r.runAskUser(ctx, call.Args)
 	case "enter-plan-mode":
 		return r.runPlanModeToggle(call.Args, true)
 	case "exit-plan-mode":
@@ -801,6 +813,7 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 			MaxTokens:       r.maxTokens,
 			ToolCallback:    r.toolCallback,
 			ShellApproval:   r.shellApproval,
+			AskUser:         r.askUser,
 			Manifest:        r.manifest,
 			SessionDir:      r.sessionDir,
 			DelegationDepth: r.delegationDepth + 1,
