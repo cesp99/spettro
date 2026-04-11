@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"spettro/internal/config"
 	"spettro/internal/tui"
 )
 
@@ -34,5 +35,34 @@ func TestHandleCommand_PermissionsAliasSetsLevel(t *testing.T) {
 	got := next.(tui.Model)
 	if !strings.Contains(strings.ToLower(got.BannerForTesting()), "permission set to restricted") {
 		t.Fatalf("expected permission set banner, got %q", got.BannerForTesting())
+	}
+}
+
+func TestHandleCommand_ModeSwitchDoesNotOverwriteNewerConfigOnDisk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := config.Default()
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("save default config: %v", err)
+	}
+
+	m := tui.NewModelForTesting()
+	if _, err := config.Update(func(cfg *config.UserConfig) error {
+		cfg.Permission = config.PermissionRestricted
+		return nil
+	}); err != nil {
+		t.Fatalf("update config externally: %v", err)
+	}
+
+	next, _ := m.HandleCommandForTesting("/mode")
+	_ = next.(tui.Model)
+
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Permission != config.PermissionRestricted {
+		t.Fatalf("expected external permission change to survive mode switch, got %s", reloaded.Permission)
 	}
 }

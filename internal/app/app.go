@@ -41,8 +41,22 @@ type modelPicker struct {
 }
 
 func (a *App) persistUIState() {
-	a.cfg.LastAgentID = string(a.mode)
-	_ = config.Save(a.cfg)
+	_ = a.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.LastAgentID = string(a.mode)
+		return nil
+	})
+}
+
+func (a *App) updateConfig(mut func(*config.UserConfig) error) error {
+	cfg, err := config.Update(mut)
+	if err != nil {
+		return err
+	}
+	a.cfg = cfg
+	if a.providers != nil {
+		a.providers.SetAPIKeys(cfg.APIKeys)
+	}
+	return nil
 }
 
 func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error) {
@@ -56,17 +70,13 @@ func New(in io.Reader, out io.Writer, cwdFn func() (string, error)) (*App, error
 		return nil, err
 	}
 
-	cfg, err := config.LoadOrCreate()
+	cfg, err := config.LoadFull()
 	if err != nil {
 		return nil, err
 	}
-	keys, err := config.LoadAPIKeys()
-	if err != nil {
-		return nil, err
-	}
-	cfg.APIKeys = keys
 
 	pm := provider.NewManager()
+	pm.SetAPIKeys(cfg.APIKeys)
 	for _, endpoint := range cfg.LocalEndpoints {
 		localModels, err := provider.ProbeLocalServer(context.Background(), endpoint)
 		if err != nil {

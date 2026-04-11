@@ -93,6 +93,8 @@ var shellApprovalOptions = []string{
 	"Tell the agent what to do instead",
 }
 
+const askUserFreeResponseOption = "Type my own answer"
+
 func (m Model) updateShellApproval(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingAuth == nil {
 		return m, nil
@@ -165,6 +167,119 @@ func (m Model) resolveShellApproval(decision agent.ShellApprovalDecision, banner
 	m.approvalCursor = 0
 	m.ta.Reset()
 	m.showBanner(banner, "info")
+	m.refreshViewport()
+	return m
+}
+
+func askUserOptions(req agent.AskUserRequest) []string {
+	options := append([]string(nil), req.Options...)
+	if req.AllowFreeResponse {
+		options = append(options, askUserFreeResponseOption)
+	}
+	return options
+}
+
+func askUserDefaultCursor(req agent.AskUserRequest) int {
+	def := strings.TrimSpace(req.DefaultOption)
+	if def == "" {
+		return 0
+	}
+	for i, option := range askUserOptions(req) {
+		if strings.EqualFold(option, def) {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m Model) updateAskUserQuestion(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.pendingQuestion == nil {
+		return m, nil
+	}
+	req := m.pendingQuestion.request
+	options := askUserOptions(req)
+	if m.questionFreeform {
+		switch msg.String() {
+		case "enter":
+			answer := strings.TrimSpace(m.ta.Value())
+			if answer == "" {
+				m.showBanner("type your answer, then press enter", "warn")
+				return m, nil
+			}
+			return m.resolveAskUser(answer, "answer sent"), nil
+		case "esc":
+			if len(options) > 0 {
+				m.questionFreeform = false
+				m.ta.Reset()
+				m.showBanner("choose an option or press esc again to decline", "info")
+				return m, nil
+			}
+			return m.rejectAskUser("question declined"), nil
+		default:
+			var taCmd tea.Cmd
+			m.ta, taCmd = m.ta.Update(msg)
+			return m, taCmd
+		}
+	}
+	if len(options) == 0 {
+		m.questionFreeform = true
+		m.ta.Reset()
+		return m, nil
+	}
+	switch msg.String() {
+	case "up", "ctrl+p":
+		if m.questionCursor > 0 {
+			m.questionCursor--
+		}
+		return m, nil
+	case "down", "ctrl+n":
+		if m.questionCursor < len(options)-1 {
+			m.questionCursor++
+		}
+		return m, nil
+	case "enter":
+		choice := options[m.questionCursor]
+		if choice == askUserFreeResponseOption {
+			m.questionFreeform = true
+			m.ta.Reset()
+			m.showBanner("type your answer and press enter", "info")
+			return m, nil
+		}
+		return m.resolveAskUser(choice, "answer sent"), nil
+	case "esc":
+		return m.rejectAskUser("question declined"), nil
+	}
+	return m, nil
+}
+
+func (m Model) resolveAskUser(answer, banner string) Model {
+	if m.pendingQuestion != nil {
+		select {
+		case m.pendingQuestion.response <- askUserResponse{answer: answer}:
+		default:
+		}
+	}
+	m.pendingQuestion = nil
+	m.questionCursor = 0
+	m.questionFreeform = false
+	m.ta.Reset()
+	m.showBanner(banner, "info")
+	m.refreshViewport()
+	return m
+}
+
+func (m Model) rejectAskUser(banner string) Model {
+	if m.pendingQuestion != nil {
+		select {
+		case m.pendingQuestion.response <- askUserResponse{err: fmt.Errorf("user declined to answer")}:
+		default:
+		}
+	}
+	m.pendingQuestion = nil
+	m.questionCursor = 0
+	m.questionFreeform = false
+	m.ta.Reset()
+	m.showBanner(banner, "warn")
 	m.refreshViewport()
 	return m
 }
@@ -249,10 +364,6 @@ func (m Model) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		_ = config.SaveAPIKey(m.setup.provider, input)
-		if m.cfg.APIKeys == nil {
-			m.cfg.APIKeys = map[string]string{}
-		}
-		m.cfg.APIKeys[m.setup.provider] = input
 		m.cfg.ActiveProvider = m.setup.provider
 		m.cfg.ActiveModel = m.setup.model
 		m.setup.step = 3
@@ -270,7 +381,12 @@ func (m Model) updateSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 			return m, nil
 		}
-		_ = config.Save(m.cfg)
+		_ = m.updateConfig(func(cfg *config.UserConfig) error {
+			cfg.ActiveProvider = m.setup.provider
+			cfg.ActiveModel = m.setup.model
+			cfg.Permission = m.cfg.Permission
+			return nil
+		})
 		m.showSetup = false
 		m.pushSystemMsg(fmt.Sprintf("setup complete ✓  %s:%s  perm:%s",
 			m.cfg.ActiveProvider, m.cfg.ActiveModel, m.cfg.Permission))
@@ -410,10 +526,15 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.providers.AddLocalModels(localModels)
 				normalized := localModels[0].Provider
-				if !m.hasLocalEndpoint(normalized) {
-					m.cfg.LocalEndpoints = append(m.cfg.LocalEndpoints, normalized)
-				}
-				_ = config.Save(m.cfg)
+				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+					for _, endpoint := range cfg.LocalEndpoints {
+						if endpoint == normalized {
+							return nil
+						}
+					}
+					cfg.LocalEndpoints = append(cfg.LocalEndpoints, normalized)
+					return nil
+				})
 				m.showConnect = false
 				m.ta.Reset()
 				m.ta.Focus()
@@ -426,11 +547,7 @@ func (m Model) updateConnect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			_ = config.SaveAPIKey(m.connectProvider, key)
-			if m.cfg.APIKeys == nil {
-				m.cfg.APIKeys = map[string]string{}
-			}
-			m.cfg.APIKeys[m.connectProvider] = key
-			m.providers.SetAPIKeys(m.cfg.APIKeys)
+			_ = m.updateConfig(nil)
 			m.showConnect = false
 			m.ta.Reset()
 			m.ta.Focus()
@@ -503,7 +620,10 @@ func (m *Model) saveFavorites() {
 		}
 	}
 	m.cfg.Favorites = favList
-	_ = config.Save(m.cfg)
+	_ = m.updateConfig(func(cfg *config.UserConfig) error {
+		cfg.Favorites = append([]string(nil), favList...)
+		return nil
+	})
 }
 
 func (m *Model) syncInputSuggestions() {
@@ -787,9 +907,11 @@ func (m Model) updateSelector(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if len(m.selItems) > 0 {
 			sel := m.selItems[m.selCursor]
-			m.cfg.ActiveProvider = sel.Provider
-			m.cfg.ActiveModel = sel.Name
-			_ = config.Save(m.cfg)
+			_ = m.updateConfig(func(cfg *config.UserConfig) error {
+				cfg.ActiveProvider = sel.Provider
+				cfg.ActiveModel = sel.Name
+				return nil
+			})
 			m.showSelector = false
 			m.showBanner(fmt.Sprintf("model → %s:%s", sel.Provider, sel.Name), "success")
 		}
@@ -1139,6 +1261,8 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 	m.toolCh = toolCh
 	approvalCh := make(chan shellApprovalRequestMsg, 8)
 	m.approvalCh = approvalCh
+	askUserCh := make(chan askUserRequestMsg, 4)
+	m.askUserCh = askUserCh
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancelAgent = cancel
 	m.ensureSession()
@@ -1181,12 +1305,27 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 				return agent.ShellApprovalDeny, ctx.Err()
 			}
 		},
+		AskUser: func(ctx context.Context, req agent.AskUserRequest) (string, error) {
+			respCh := make(chan askUserResponse, 1)
+			select {
+			case askUserCh <- askUserRequestMsg{request: req, response: respCh}:
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			select {
+			case resp := <-respCh:
+				return resp.answer, resp.err
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		},
 	}
 
 	return m, tea.Batch(
 		m.spin.Tick,
 		waitForTool(toolCh),
 		waitForShellApproval(approvalCh),
+		waitForAskUser(askUserCh),
 		func() tea.Msg {
 			runSpec := spec
 			if approved || perm != config.PermissionAskFirst {
@@ -1198,6 +1337,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			result, err := a.Run(ctx, input)
 			close(toolCh)
 			close(approvalCh)
+			close(askUserCh)
 			if err != nil {
 				return agentDoneMsg{err: err}
 			}

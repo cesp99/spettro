@@ -20,7 +20,11 @@ func summarizeLoopToolResult(name, args, status, output string) string {
 	output = strings.TrimSpace(output)
 	if output != "" {
 		output = strings.Join(strings.Fields(output), " ")
-		parts = append(parts, "output="+truncate(output, 240))
+		limit := 240
+		if name == "agent" {
+			limit = 4000
+		}
+		parts = append(parts, "output="+truncate(output, limit))
 	}
 	return strings.Join(parts, " | ")
 }

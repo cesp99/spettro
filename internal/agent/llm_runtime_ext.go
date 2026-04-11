@@ -21,7 +21,7 @@ import (
 	"spettro/internal/session"
 )
 
-func (r *toolRuntime) runAskUser(rawArgs []byte) (string, error) {
+func (r *toolRuntime) runAskUser(ctx context.Context, rawArgs []byte) (string, error) {
 	var args struct {
 		Question          string   `json:"question"`
 		Options           []string `json:"options"`
@@ -44,19 +44,42 @@ func (r *toolRuntime) runAskUser(rawArgs []byte) (string, error) {
 		}
 	}
 	if len(opts) == 0 {
-		return "USER_INPUT_REQUIRED: " + q, nil
+		if !args.AllowFreeResponse {
+			args.AllowFreeResponse = true
+		}
 	}
-	meta := []string{"Options: " + strings.Join(opts, " | ")}
-	if strings.TrimSpace(args.DefaultOption) != "" {
-		meta = append(meta, "Default: "+strings.TrimSpace(args.DefaultOption))
+	if r.askUser == nil {
+		return "", fmt.Errorf("ask-user: interactive callback not configured")
+	}
+	answer, err := r.askUser(ctx, AskUserRequest{
+		Question:          q,
+		Options:           opts,
+		Context:           strings.TrimSpace(args.Context),
+		DefaultOption:     strings.TrimSpace(args.DefaultOption),
+		AllowFreeResponse: args.AllowFreeResponse,
+	})
+	if err != nil {
+		return "", fmt.Errorf("ask-user: %w", err)
+	}
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return "", fmt.Errorf("ask-user: empty response")
+	}
+	payload := map[string]any{
+		"question": q,
+		"answer":   answer,
+	}
+	if len(opts) > 0 {
+		payload["options"] = opts
 	}
 	if strings.TrimSpace(args.Context) != "" {
-		meta = append(meta, "Context: "+strings.TrimSpace(args.Context))
+		payload["context"] = strings.TrimSpace(args.Context)
 	}
-	if args.AllowFreeResponse {
-		meta = append(meta, "Free response allowed: true")
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf("User answered %q to %q", answer, q), nil
 	}
-	return fmt.Sprintf("USER_INPUT_REQUIRED: %s\n%s", q, strings.Join(meta, "\n")), nil
+	return string(raw), nil
 }
 
 func (r *toolRuntime) runTaskCreate(rawArgs []byte) (string, error) {

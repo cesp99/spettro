@@ -83,6 +83,15 @@ func (m *Model) SetPendingShellApprovalForTesting(cursor int) {
 	m.approvalCursor = cursor
 }
 
+func (m *Model) SetPendingAskUserForTesting(req agent.AskUserRequest, freeform bool) {
+	m.pendingQuestion = &askUserRequestMsg{
+		request:  req,
+		response: make(chan askUserResponse, 1),
+	}
+	m.questionCursor = askUserDefaultCursor(req)
+	m.questionFreeform = freeform
+}
+
 func (m Model) TextareaValueForTesting() string {
 	return m.ta.Value()
 }
@@ -101,6 +110,18 @@ func (m Model) ApprovalCursorForTesting() int {
 
 func (m Model) HasPendingShellApprovalForTesting() bool {
 	return m.pendingAuth != nil
+}
+
+func (m Model) HasPendingAskUserForTesting() bool {
+	return m.pendingQuestion != nil
+}
+
+func (m Model) QuestionCursorForTesting() int {
+	return m.questionCursor
+}
+
+func (m Model) QuestionFreeformForTesting() bool {
+	return m.questionFreeform
 }
 
 func (m *Model) SetThinkingForTesting(v bool) {
@@ -188,6 +209,14 @@ func ToolProgressMsgForTesting(name, status, args, output string) tea.Msg {
 
 func (m Model) UpdateShellApprovalForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.updateShellApproval(msg)
+}
+
+func AskUserOptionsForTesting(req agent.AskUserRequest) []string {
+	return askUserOptions(req)
+}
+
+func (m Model) UpdateAskUserQuestionForTesting(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return m.updateAskUserQuestion(msg)
 }
 
 func (m *Model) SetDimensionsForTesting(width, height int) {

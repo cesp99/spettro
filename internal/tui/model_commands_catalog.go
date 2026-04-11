@@ -52,7 +52,6 @@ const helpText = `commands:
   /help          this message
   /exit /quit    quit spettro  (or ctrl+c twice)
   /mode          cycle to next mode  (or shift+tab)
-  /setup         run setup wizard
   /models        open model selector (connected providers only)
   /models p:m    set model directly
   /connect       connect a provider or local endpoint
@@ -64,8 +63,7 @@ const helpText = `commands:
   /mcp           manage MCP resources (list/read/auth)
   /skills        list local skills/prompts
   /hooks         list effective runtime hooks (project + global)
-  /index         index project files → .spettro/index.json
-  /coauthor      show co-author info for git commits
+  /init          analyze codebase and write SPETTRO.md
   /compact [x]   summarize conversation (optional focus instruction)
   /compact auto  view/set auto-compact (status|on|off)
   /compact policy show compact thresholds and counters
@@ -76,6 +74,7 @@ keys:
   shift+tab      cycle mode (plan → coding → ask)
   f2             cycle to next favorite model
   shift+f2       cycle to previous favorite model
+  ctrl+b         toggle side activity panel
 
 in model selector:
   f              toggle favorite (★) for highlighted model

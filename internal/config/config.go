@@ -152,6 +152,38 @@ func Load() (UserConfig, error) {
 	return cfg, nil
 }
 
+// LoadFull reads persisted config plus encrypted API keys into a single struct.
+func LoadFull() (UserConfig, error) {
+	cfg, err := LoadOrCreate()
+	if err != nil {
+		return UserConfig{}, err
+	}
+	keys, err := LoadAPIKeys()
+	if err != nil {
+		return UserConfig{}, err
+	}
+	cfg.APIKeys = keys
+	return cfg, nil
+}
+
+// Update loads the latest persisted config, applies mut, saves it, and returns
+// the updated in-memory view including API keys.
+func Update(mut func(*UserConfig) error) (UserConfig, error) {
+	cfg, err := LoadFull()
+	if err != nil {
+		return UserConfig{}, err
+	}
+	if mut != nil {
+		if err := mut(&cfg); err != nil {
+			return UserConfig{}, err
+		}
+	}
+	if err := Save(cfg); err != nil {
+		return UserConfig{}, err
+	}
+	return cfg, nil
+}
+
 func Save(cfg UserConfig) error {
 	p, err := Path()
 	if err != nil {

@@ -6,6 +6,10 @@ func ParseToolCallForTesting(s string) (toolCall, bool, error) {
 	return parseToolCall(s)
 }
 
+func ParseAllToolCallsForTesting(s string) ([]toolCall, []error) {
+	return parseAllToolCalls(s)
+}
+
 func ParseFinalForTesting(s string) (string, bool) {
 	return parseFinal(s)
 }

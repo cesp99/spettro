@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -87,20 +86,46 @@ func extractStringField(raw json.RawMessage, field string) (string, error) {
 
 // parseAllToolCalls scans all lines of s and collects every TOOL_CALL entry.
 func parseAllToolCalls(s string) (calls []toolCall, parseErrs []error) {
-	scanner := bufio.NewScanner(strings.NewReader(s))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(strings.TrimSpace(line), toolCallPrefix) {
+	lines := strings.Split(s, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, toolCallPrefix) {
 			continue
 		}
-		call, hasCall, err := parseToolCall(strings.TrimSpace(line))
-		if err != nil {
-			parseErrs = append(parseErrs, err)
+
+		candidate := line
+		var (
+			parsed  bool
+			lastErr error
+			lastJ   = i
+		)
+		for j := i; j < len(lines); j++ {
+			if j > i {
+				nextLine := strings.TrimSpace(lines[j])
+				if strings.HasPrefix(nextLine, toolCallPrefix) || strings.HasPrefix(nextLine, finalPrefix) {
+					break
+				}
+				candidate += "\n" + lines[j]
+			}
+			call, hasCall, err := parseToolCall(strings.TrimSpace(candidate))
+			if err == nil && hasCall {
+				calls = append(calls, call)
+				i = j
+				parsed = true
+				break
+			}
+			if hasCall {
+				lastErr = err
+			}
+			lastJ = j
+		}
+		if parsed {
 			continue
 		}
-		if hasCall {
-			calls = append(calls, call)
+		if lastErr != nil {
+			parseErrs = append(parseErrs, lastErr)
 		}
+		i = lastJ
 	}
 	return calls, parseErrs
 }

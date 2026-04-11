@@ -141,6 +141,16 @@ type shellApprovalResponse struct {
 	err      error
 }
 
+type askUserRequestMsg struct {
+	request  agent.AskUserRequest
+	response chan askUserResponse
+}
+
+type askUserResponse struct {
+	answer string
+	err    error
+}
+
 type queuedPrompt struct {
 	Input          string
 	Prompt         string
@@ -212,18 +222,22 @@ type Model struct {
 
 	showTools bool
 
-	liveTools       []ToolItem
-	currentTool     *ToolItem
-	toolCh          chan agent.ToolTrace
-	approvalCh      chan shellApprovalRequestMsg
-	cancelAgent     context.CancelFunc
-	pendingAuth     *shellApprovalRequestMsg
-	approvalCursor  int
-	progressNote    string
-	pendingPrompts  []queuedPrompt
-	awaitingInstead bool
-	activePrompt    *queuedPrompt
-	activeAgentID   string
+	liveTools        []ToolItem
+	currentTool      *ToolItem
+	toolCh           chan agent.ToolTrace
+	approvalCh       chan shellApprovalRequestMsg
+	askUserCh        chan askUserRequestMsg
+	cancelAgent      context.CancelFunc
+	pendingAuth      *shellApprovalRequestMsg
+	pendingQuestion  *askUserRequestMsg
+	approvalCursor   int
+	questionCursor   int
+	questionFreeform bool
+	progressNote     string
+	pendingPrompts   []queuedPrompt
+	awaitingInstead  bool
+	activePrompt     *queuedPrompt
+	activeAgentID    string
 
 	showPlanApproval   bool
 	planApprovalCursor int
@@ -385,9 +399,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelAgent = nil
 		m.toolCh = nil
 		m.approvalCh = nil
+		m.askUserCh = nil
 		m.liveTools = nil
 		m.currentTool = nil
 		m.pendingAuth = nil
+		m.pendingQuestion = nil
+		m.questionCursor = 0
+		m.questionFreeform = false
 		m.parallelAgents = nil
 		m.progressNote = ""
 		m.activePrompt = nil
@@ -427,9 +445,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelAgent = nil
 		m.toolCh = nil
 		m.approvalCh = nil
+		m.askUserCh = nil
 		m.liveTools = nil
 		m.currentTool = nil
 		m.pendingAuth = nil
+		m.pendingQuestion = nil
+		m.questionCursor = 0
+		m.questionFreeform = false
 		m.parallelAgents = nil
 		m.progressNote = ""
 		m.activePrompt = nil
@@ -585,6 +607,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showBanner("command approval required", "warn")
 			if m.approvalCh != nil {
 				cmds = append(cmds, waitForShellApproval(m.approvalCh))
+			}
+			m.refreshViewport()
+		}
+	case askUserRequestMsg:
+		if m.thinking {
+			m.pendingQuestion = &msg
+			m.questionCursor = askUserDefaultCursor(msg.request)
+			m.questionFreeform = len(msg.request.Options) == 0
+			m.ta.Reset()
+			m.showBanner("agent is waiting for your answer", "info")
+			if m.askUserCh != nil {
+				cmds = append(cmds, waitForAskUser(m.askUserCh))
 			}
 			m.refreshViewport()
 		}
@@ -747,6 +781,9 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingAuth != nil {
 		return m.updateShellApproval(msg)
 	}
+	if m.pendingQuestion != nil {
+		return m.updateAskUserQuestion(msg)
+	}
 
 	switch msg.String() {
 	case "ctrl+c":
@@ -827,9 +864,11 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			next := models[(current+1)%len(models)]
-			m.cfg.ActiveProvider = next.Provider
-			m.cfg.ActiveModel = next.Name
-			_ = config.Save(m.cfg)
+			_ = m.updateConfig(func(cfg *config.UserConfig) error {
+				cfg.ActiveProvider = next.Provider
+				cfg.ActiveModel = next.Name
+				return nil
+			})
 			m.showBanner(fmt.Sprintf("model → %s:%s", next.Provider, next.Name), "success")
 		} else {
 			m.showBanner("no favorite models — mark one with f in /models", "info")
@@ -846,9 +885,11 @@ func (m Model) updateMain(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			prev := (current - 1 + len(models)) % len(models)
-			m.cfg.ActiveProvider = models[prev].Provider
-			m.cfg.ActiveModel = models[prev].Name
-			_ = config.Save(m.cfg)
+			_ = m.updateConfig(func(cfg *config.UserConfig) error {
+				cfg.ActiveProvider = models[prev].Provider
+				cfg.ActiveModel = models[prev].Name
+				return nil
+			})
 			m.showBanner(fmt.Sprintf("model → %s:%s", models[prev].Provider, models[prev].Name), "success")
 		} else {
 			m.showBanner("no favorite models — mark one with f in /models", "info")
@@ -947,12 +988,14 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 				if !m.providers.HasModel(parts[0], parts[1]) {
 					m.showBanner("unknown model: "+fields[1], "error")
 				} else {
-					m.cfg.ActiveProvider = parts[0]
-					m.cfg.ActiveModel = parts[1]
-					_ = config.Save(m.cfg)
 					if len(fields) >= 3 {
 						_ = config.SaveAPIKey(parts[0], fields[2])
 					}
+					_ = m.updateConfig(func(cfg *config.UserConfig) error {
+						cfg.ActiveProvider = parts[0]
+						cfg.ActiveModel = parts[1]
+						return nil
+					})
 					m.showBanner(fmt.Sprintf("model set to %s:%s", parts[0], parts[1]), "success")
 				}
 			} else {
@@ -968,8 +1011,10 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			level := config.PermissionLevel(fields[1])
 			switch level {
 			case config.PermissionYOLO, config.PermissionRestricted, config.PermissionAskFirst:
-				m.cfg.Permission = level
-				_ = config.Save(m.cfg)
+				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+					cfg.Permission = level
+					return nil
+				})
 				m.showBanner(fmt.Sprintf("permission set to %s", level), "success")
 			default:
 				m.showBanner("invalid permission: use yolo, restricted, or ask-first", "error")
@@ -987,8 +1032,10 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			if _, err := fmt.Sscanf(fields[1], "%d", &n); err != nil || n < 0 {
 				m.showBanner("usage: /budget <n|0>", "error")
 			} else {
-				m.cfg.TokenBudget = n
-				_ = config.Save(m.cfg)
+				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+					cfg.TokenBudget = n
+					return nil
+				})
 				if n == 0 {
 					m.showBanner("token budget set to unlimited", "success")
 				} else {

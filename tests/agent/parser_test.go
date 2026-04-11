@@ -46,6 +46,36 @@ func TestParseToolCall_FunctionWrapperWithStringArgs(t *testing.T) {
 	}
 }
 
+func TestParseAllToolCalls_MultilineJSON(t *testing.T) {
+	calls, errs := agent.ParseAllToolCallsForTesting(`TOOL_CALL
+{"tool":"file-read","args":{"path":"go.mod"}}
+
+FINAL
+done`)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected parse errors: %v", errs)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Tool != "file-read" {
+		t.Fatalf("expected file-read, got %q", calls[0].Tool)
+	}
+}
+
+func TestParseAllToolCalls_CodeFencedJSON(t *testing.T) {
+	calls, errs := agent.ParseAllToolCallsForTesting("TOOL_CALL ```json\n{\n  \"name\": \"grep\",\n  \"arguments\": {\n    \"pattern\": \"ParseToolCall\"\n  }\n}\n```\n")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected parse errors: %v", errs)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Tool != "grep" {
+		t.Fatalf("expected grep, got %q", calls[0].Tool)
+	}
+}
+
 func TestParseToolCall_NotACall(t *testing.T) {
 	_, ok, err := agent.ParseToolCallForTesting("FINAL\nhello")
 	if err != nil || ok {
