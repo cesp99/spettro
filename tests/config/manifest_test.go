@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,6 +15,20 @@ func TestDefaultAgentManifestIsValid(t *testing.T) {
 	}
 	if m.DefaultAgent != "plan" {
 		t.Fatalf("expected plan as default agent, got %q", m.DefaultAgent)
+	}
+	coding, ok := m.AgentByID("coding")
+	if !ok {
+		t.Fatal("expected default manifest to include coding agent")
+	}
+	for _, toolID := range []string{"file-write", "file-edit", "shell-exec", "bash", "ls"} {
+		if !slices.Contains(coding.AllowedTools, toolID) {
+			t.Fatalf("coding agent should allow %q", toolID)
+		}
+	}
+	for _, action := range []string{"write", "execute", "git"} {
+		if !slices.Contains(coding.PermittedActions, action) {
+			t.Fatalf("coding agent should permit %q actions", action)
+		}
 	}
 }
 
