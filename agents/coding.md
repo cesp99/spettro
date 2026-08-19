@@ -32,6 +32,7 @@ Spawn a worker only when the subtask is **genuinely independent** of your curren
 | You need a commit, branch, or PR operation | `git` |
 | You need a structured review before committing | `review` |
 | The user explicitly asked for docs | `docs` |
+| The subtask is open-ended and spans discovery + change (no single specialist fits) | `general-purpose` |
 
 **Do not delegate to avoid doing the work yourself.** If you can read the file and make the edit in 2-3 tool calls, do it inline.
 

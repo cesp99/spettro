@@ -245,6 +245,45 @@ var visionToolViewImage = ToolSpec{ID: "view-image", Name: "View Image", Descrip
 // would interrupt the user mid-orchestration with no context about who asked.
 var askUserToolSpec = ToolSpec{ID: "ask-user", Name: "Ask User", Description: "Prompt the user for a decision.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"ask"}, RiskLevel: "low"}
 
+// generalPurposeAgentSpec is shared between the default manifest and the v11
+// migration that retrofits it into existing manifests. It is the fallback
+// delegation target: the specialists each cover one slice (explore reads,
+// test runs verification, docs summarizes), so an open-ended subtask that
+// spans several of them had nowhere to go and had to be split by hand. Its
+// tool list is spelled out in full rather than relying on the v5-v10
+// retrofits, which run before this one and would skip an agent that does not
+// exist yet.
+//
+// Role is subagent so both orchestrators and workers can hand off to it, and
+// the agent tool (primary_only) stays out of reach: it does the work itself
+// instead of fanning out further.
+var generalPurposeAgentSpec = AgentSpec{
+	ID:          "general-purpose",
+	Name:        "General Purpose",
+	Description: "General-purpose worker for open-ended research, multi-step search, and tasks that no specialist covers",
+	Skill:       "general",
+	Mode:        "worker",
+	Role:        AgentRoleSubagent,
+	Color:       "magenta",
+	AllowedTools: []string{
+		"glob", "grep", "repo-search", "file-read", "file-write", "file-edit", "ls",
+		"diagnostics", "references", "hover", "rename-symbol", "lsp-restart",
+		"shell-exec", "bash", "job-output", "job-kill",
+		"pty-start", "pty-write", "pty-kill",
+		"web-search", "web-fetch", "download",
+		"todo-write", "comment", "skill-read", "skill-list", "view-image", "tool-output",
+	},
+	PermittedActions: []string{"read", "search", "write", "execute", "git", "network"},
+	Permission:       PermissionRestricted,
+	Temperature:      0.1,
+	MaxTokens:        8192,
+	Enabled:          true,
+	// No handoffs: the agent tool is primary_only, so a subagent cannot
+	// delegate anyway — it finishes the task itself and reports back.
+	Handoffs:   nil,
+	PromptFile: "agents/general-purpose.md",
+}
+
 func DefaultAgentManifest() AgentManifest {
 	m := AgentManifest{
 		// Version starts below the latest migration on purpose: the
@@ -315,15 +354,16 @@ func DefaultAgentManifest() AgentManifest {
 			{ID: "skill-list", Name: "Skill List", Description: "List installed Agent Skills with name + description.", Kind: "builtin", Enabled: true, TimeoutSec: 10, RequiresApproval: false, PermittedActions: []string{"read"}, RiskLevel: "low"},
 		},
 		Agents: []AgentSpec{
-			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/planning.md"},
-			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "send-message", "todo-write", "comment", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore"}, PromptFile: "agents/coding.md"},
-			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "ask-user", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/chat.md"},
+			{ID: "plan", Name: "Plan", Description: "Planning orchestrator (delegates all discovery to explore worker)", Skill: "planning", Mode: "orchestrator", Role: AgentRoleOrchestrator, Color: "blue", AllowedTools: []string{"agent", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "enter-plan-mode", "exit-plan-mode", "send-message", "todo-write", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "plan", "write", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs", "general-purpose"}, PromptFile: "agents/planning.md"},
+			{ID: "coding", Name: "Coding", Description: "Coding orchestrator", Skill: "implementation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "tool-search", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "ask-user", "send-message", "todo-write", "comment", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "plan", "write", "execute", "git", "network", "ask"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"code", "git", "test", "review", "docs", "explore", "general-purpose"}, PromptFile: "agents/coding.md"},
+			{ID: "ask", Name: "Ask", Description: "Read-only orchestrator for Q&A", Skill: "conversation", Mode: "orchestrator", Role: AgentRolePrimary, Color: "cyan", AllowedTools: []string{"agent", "glob", "grep", "file-read", "tool-search", "web-search", "web-fetch", "mcp-list-resources", "mcp-read-resource", "ask-user", "comment", "skill-read", "skill-list", "save-memory"}, PermittedActions: []string{"ask", "read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs", "general-purpose"}, PromptFile: "agents/chat.md"},
 			{ID: "explore", Name: "Explore", Description: "Read-only code exploration worker", Skill: "analysis", Mode: "worker", Role: AgentRoleWorker, Color: "blue", AllowedTools: []string{"glob", "grep", "file-read", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "review", "docs"}, PromptFile: "agents/explore.md"},
 			{ID: "code", Name: "Code", Description: "Implementation worker", Skill: "implementation", Mode: "worker", Role: AgentRoleWorker, Color: "green", AllowedTools: []string{"agent", "glob", "grep", "file-read", "file-write", "file-edit", "multi-edit", "diagnostics", "references", "lsp-restart", "shell-exec", "bash", "job-output", "job-kill", "ls", "task-create", "task-get", "task-update", "task-list", "task-stop", "config", "enter-worktree", "exit-worktree", "comment", "todo-write", "skill-read", "skill-list", "save-memory", "grok-image", "grok-video", "web-fetch", "download"}, PermittedActions: []string{"read", "search", "write", "execute", "git", "network"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"explore", "review", "test", "docs"}, PromptFile: "agents/code.md"},
 			{ID: "git", Name: "Git", Description: "Git operations worker", Skill: "git", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "git"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "docs"}, PromptFile: "agents/git.md"},
 			{ID: "test", Name: "Test", Description: "Test execution worker", Skill: "testing", Mode: "worker", Role: AgentRoleWorker, Color: "yellow", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute"}, Permission: PermissionRestricted, Enabled: true, Handoffs: []string{"review", "explore"}, PromptFile: "agents/tester.md"},
 			{ID: "review", Name: "Review", Description: "Code review worker", Skill: "review", Mode: "worker", Role: AgentRoleSubagent, Color: "red", AllowedTools: []string{"glob", "grep", "file-read", "shell-exec", "bash", "job-output", "job-kill", "ls", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "execute", "plan"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore", "docs"}, PromptFile: "agents/reviewer.md"},
 			{ID: "docs", Name: "Docs", Description: "Read-only documentation worker", Skill: "documentation", Mode: "worker", Role: AgentRoleSubagent, Color: "cyan", AllowedTools: []string{"glob", "grep", "file-read", "comment", "skill-read", "skill-list"}, PermittedActions: []string{"read", "search", "ask"}, Permission: PermissionAskFirst, Enabled: true, Handoffs: []string{"explore"}, PromptFile: "agents/docs-writer.md"},
+			generalPurposeAgentSpec,
 		},
 	}
 	_ = m.normalizeFromVersion()
@@ -548,7 +588,54 @@ func (m *AgentManifest) normalizeFromVersion() bool {
 		m.Version = 10
 		changed = true
 	}
+	if m.Version < 11 {
+		// v11 adds the general-purpose subagent. Every shipped worker is a
+		// specialist, so an open-ended subtask ("figure out how X works, then
+		// fix it") had no single delegation target and had to be split by
+		// hand across explore/code/test.
+		m.ensureGeneralPurposeAgent()
+		m.Version = 11
+		changed = true
+	}
 	return changed
+}
+
+// ensureGeneralPurposeAgent retrofits the general-purpose subagent into a
+// manifest that predates v11. The agent is added when absent, and the handoff
+// goes to primary/orchestrator agents that already delegate at all (a
+// non-empty handoffs list): an operator who stripped an agent's handoffs
+// disabled its delegation deliberately, and a manifest whose agent was
+// removed by hand does not get it back.
+//
+// Tools the manifest is missing entirely are dropped from the allow-list,
+// since Validate rejects an agent referencing an unknown tool.
+func (m *AgentManifest) ensureGeneralPurposeAgent() {
+	for _, a := range m.Agents {
+		if a.ID == generalPurposeAgentSpec.ID {
+			return
+		}
+	}
+	known := map[string]bool{}
+	for _, t := range m.Tools {
+		known[t.ID] = true
+	}
+	spec := generalPurposeAgentSpec
+	tools := make([]string, 0, len(spec.AllowedTools))
+	for _, id := range spec.AllowedTools {
+		if known[id] {
+			tools = append(tools, id)
+		}
+	}
+	spec.AllowedTools = tools
+	m.Agents = append(m.Agents, spec)
+	for i := range m.Agents {
+		if !m.Agents[i].IsPrimaryRole() || len(m.Agents[i].Handoffs) == 0 {
+			continue
+		}
+		if !slices.Contains(m.Agents[i].Handoffs, spec.ID) {
+			m.Agents[i].Handoffs = append(m.Agents[i].Handoffs, spec.ID)
+		}
+	}
 }
 
 // ensureAskUserTool retrofits the ask-user grant into a manifest that predates

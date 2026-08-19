@@ -48,8 +48,10 @@ permission = "ask-first"
 		t.Fatalf("manifest with deprecated max_steps should parse: %v", err)
 	}
 
-	if len(manifest.Agents) != 1 {
-		t.Fatalf("expected 1 agent, got %d", len(manifest.Agents))
+	// One declared agent plus general-purpose, which the v11 migration
+	// retrofits into every manifest.
+	if len(manifest.Agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(manifest.Agents))
 	}
 
 	spec := manifest.Agents[0]

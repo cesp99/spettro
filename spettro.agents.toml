@@ -1,4 +1,4 @@
-version = 10
+version = 11
 default_agent = 'plan'
 
 [metadata]
@@ -790,7 +790,7 @@ permission_rules = []
 temperature = 0.2
 max_tokens = 4096
 max_steps = 0
-handoffs = ['explore', 'review', 'docs']
+handoffs = ['explore', 'review', 'docs', 'general-purpose']
 enabled = true
 
 [[agents]]
@@ -812,7 +812,7 @@ permission_rules = []
 temperature = 0.1
 max_tokens = 8192
 max_steps = 0
-handoffs = ['code', 'git', 'test', 'review', 'docs', 'explore']
+handoffs = ['code', 'git', 'test', 'review', 'docs', 'explore', 'general-purpose']
 enabled = true
 
 [[agents]]
@@ -834,7 +834,7 @@ permission_rules = []
 temperature = 0.4
 max_tokens = 8192
 max_steps = 0
-handoffs = ['explore', 'docs']
+handoffs = ['explore', 'docs', 'general-purpose']
 enabled = true
 
 [[agents]]
@@ -967,4 +967,26 @@ temperature = 0.2
 max_tokens = 4096
 max_steps = 0
 handoffs = ['explore']
+enabled = true
+
+[[agents]]
+id = 'general-purpose'
+name = 'General Purpose'
+description = 'General-purpose worker for open-ended research, multi-step search, and tasks that no specialist covers'
+skill = 'general'
+mode = 'worker'
+role = 'subagent'
+color = 'magenta'
+model_provider = ''
+model = ''
+system_prompt = ''
+prompt_file = 'agents/general-purpose.md'
+allowed_tools = ['glob', 'grep', 'repo-search', 'file-read', 'file-write', 'file-edit', 'ls', 'diagnostics', 'references', 'hover', 'rename-symbol', 'lsp-restart', 'shell-exec', 'bash', 'job-output', 'job-kill', 'pty-start', 'pty-write', 'pty-kill', 'web-search', 'web-fetch', 'download', 'todo-write', 'comment', 'skill-read', 'skill-list', 'view-image', 'tool-output']
+permitted_actions = ['read', 'search', 'write', 'execute', 'git', 'network']
+permission = 'restricted'
+permission_rules = []
+temperature = 0.1
+max_tokens = 8192
+max_steps = 0
+handoffs = []
 enabled = true
