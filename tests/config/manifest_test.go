@@ -267,8 +267,10 @@ enabled = true
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(m.Agents) != 2 {
-		t.Fatalf("expected 2 agents, got %d", len(m.Agents))
+	// Two declared agents plus general-purpose, which the v11 migration
+	// retrofits into every manifest.
+	if len(m.Agents) != 3 {
+		t.Fatalf("expected 3 agents, got %d", len(m.Agents))
 	}
 	// Two declared tools plus ask-user, which the v10 migration retrofits into
 	// the manifest and grants to orchestrator/primary agents.
@@ -362,7 +364,7 @@ enabled = true
 	if !changed {
 		t.Fatal("expected migration change flag for v1 manifest")
 	}
-	if m.Version != 10 {
-		t.Fatalf("expected normalized version 10, got %d", m.Version)
+	if m.Version != 11 {
+		t.Fatalf("expected normalized version 11, got %d", m.Version)
 	}
 }

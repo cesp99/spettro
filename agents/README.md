@@ -5,7 +5,7 @@ This folder contains prompt files referenced by `spettro.agents.toml`.
 The pack is split along the orchestrator vs worker contract:
 
 - **Orchestrators** (`planning.md`, `coding.md`, `chat.md`) prefer delegation — they decompose work, spawn workers via the `agent` tool (preferring parallel batches), and synthesize the results.
-- **Workers** (`code.md`, `explore.md`, `git.md`, `tester.md`, `reviewer.md`, `docs-writer.md`) execute a single focused slice end-to-end and return a tight summary.
+- **Workers** (`code.md`, `explore.md`, `git.md`, `tester.md`, `reviewer.md`, `docs-writer.md`, `general-purpose.md`) execute a single focused slice end-to-end and return a tight summary.
 
 ## Included prompt files
 
@@ -18,6 +18,7 @@ The pack is split along the orchestrator vs worker contract:
 - `reviewer.md` (worker — sanity checks)
 - `tester.md` (worker — verification commands)
 - `docs-writer.md` (worker — documentation)
+- `general-purpose.md` (worker — open-ended fallback)
 
 ## Default manifest agent IDs
 
@@ -30,6 +31,7 @@ The pack is split along the orchestrator vs worker contract:
 - `test` -> `tester.md`
 - `review` -> `reviewer.md`
 - `docs` -> `docs-writer.md`
+- `general-purpose` -> `general-purpose.md`
 
 ## Usage
 

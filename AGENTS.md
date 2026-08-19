@@ -166,3 +166,4 @@ The default pack includes specialized roles for day-to-day CLI/TUI work:
 - reviewer
 - tester
 - docs-writer
+- general-purpose
