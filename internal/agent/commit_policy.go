@@ -164,10 +164,16 @@ func splitShellSegmentsWithRanges(command string) (segments []shellSegmentRange,
 			if !inSingle {
 				inDouble = !inDouble
 			}
-		case '(':
-			if !inSingle && i > 0 && command[i-1] == '$' {
+		case '$':
+			// Forward-looking `$(` detection: an escaped `\$` is consumed by
+			// the esc branch above and never reaches this case, so a literal
+			// `\$(cat ...` inside a quoted commit message cannot open a
+			// phantom subshell (which would then misread message text like
+			// `<<'EOF'` as a live heredoc and poison the whole parse).
+			if !inSingle && i+1 < len(command) && command[i+1] == '(' {
 				doubleStack = append(doubleStack, inDouble)
 				inDouble = false
+				i++
 			}
 		case ')':
 			if !inSingle && !inDouble && len(doubleStack) > 0 {

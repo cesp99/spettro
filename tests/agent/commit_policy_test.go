@@ -206,6 +206,26 @@ func TestEnforceCommitCoAuthor_SubshellInsideDoubleQuotes(t *testing.T) {
 	}
 }
 
+// Regression: a double-quoted -m message whose TEXT talks about the
+// `\$(cat <<'EOF' ... EOF)` idiom (e.g. a commit message describing this very
+// feature). The escaped `\$` must not open a phantom subshell — doing so
+// resets the quote state, makes the literal `<<'EOF'` register as a live
+// heredoc that never terminates, and aborts the parse, silently skipping
+// trailer injection (observed in the wild on commit 0b9dcf6).
+func TestEnforceCommitCoAuthor_EscapedDollarAndHeredocTextInMessage(t *testing.T) {
+	cmd := `git commit -m "fix: make trailer injection heredoc-aware` + "\n\n" +
+		`Previously a multi-line -m \"\$(cat <<'EOF' ... EOF)\" message whose` + "\n" +
+		`body contained a double quote (git commit -F - <<'EOF' ...) corrupted` + "\n" +
+		`the closing )\" tracking." && git status`
+	got := agent.EnforceCommitCoAuthorForTesting(cmd)
+	if !strings.Contains(got, `tracking." --trailer '`+agent.SpettroCoAuthorTrailerForTesting()+`' && git status`) {
+		t.Fatalf("expected trailer before && separator, got: %q", got)
+	}
+	if strings.Count(got, "Co-Authored-By: Spettro") != 1 {
+		t.Fatalf("expected exactly one trailer, got: %q", got)
+	}
+}
+
 func TestEnforceCommitCoAuthor_HereStringNotAHeredoc(t *testing.T) {
 	cmd := `git commit -F - <<<"fix: x"`
 	got := agent.EnforceCommitCoAuthorForTesting(cmd)
