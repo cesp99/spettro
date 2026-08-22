@@ -33,7 +33,12 @@ tool-loop turns — until one of these happens:
 2. Spettro dispatches the objective as a task to the **coding** orchestrator
    with the `GoalModePreamble` prepended: instructions to work autonomously,
    not ask for continuation, verify work, and call `goal-complete` when done.
-3. That run completes. If the agent called `goal-complete`, the goal ends.
+3. That run completes — either because the agent finished, or because it hit
+   the per-iteration step cap (`goal_iteration_steps`, default 25 LLM steps).
+   The cap is what guarantees each iteration is bounded: the preamble tells
+   the agent that only `goal-complete` finishes the run, so without it a
+   single iteration could run forever and the checks below would never fire.
+   If the agent called `goal-complete`, the goal ends.
 4. If not, Spettro checks for progress (see below) and either:
    - dispatches another iteration (the agent resumes where it left off), or
    - stalls the goal and reports why.
@@ -82,6 +87,7 @@ These settings live in `~/.spettro/config.json`:
 | Shell timeout | `goal_shell_timeout_sec` | 600 (10 min) | Max wall-clock time per shell/bash tool call during goal runs. Longer than the default timeout to accommodate installs and builds. |
 | Max iterations | `goal_max_iterations` | 0 (unlimited) | Safety cap on the total number of outer-loop iterations. Set to a positive integer to prevent runaway loops. |
 | Stall limit | `goal_no_progress_limit` | 3 | Consecutive iterations with no workspace change before the goal is declared stalled. |
+| Iteration steps | `goal_iteration_steps` | 25 | LLM steps per iteration before the run yields back to the goal loop for the progress check. |
 
 Set them with:
 

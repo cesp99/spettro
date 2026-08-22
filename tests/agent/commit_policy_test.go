@@ -125,6 +125,115 @@ func TestEnforceCommitCoAuthor_EmptyString(t *testing.T) {
 	}
 }
 
+// Regression test for the corrupted-commit bug: a multi-line message passed
+// via the `-m "$(cat <<'EOF' ... EOF)"` idiom, where the message text itself
+// contains a double quote. The old splitter had no heredoc awareness, so the
+// body's `"` flipped its quote state, the next newline was taken as a command
+// separator, and the trailer flag was spliced into the middle of the commit
+// message (see commit d842429's original message for the wild specimen).
+func TestEnforceCommitCoAuthor_HeredocSubshellMessage(t *testing.T) {
+	cmd := `git commit -m "$(cat <<'EOF'
+goal: cap LLM steps per iteration
+
+The goal preamble ("only
+goal-complete finishes the run") previously kept the loop alive.
+EOF
+)"`
+	got := agent.EnforceCommitCoAuthorForTesting(cmd)
+	want := cmd + ` --trailer '` + agent.SpettroCoAuthorTrailerForTesting() + `'`
+	if got != want {
+		t.Fatalf("expected trailer appended after the closing quote, untouched body.\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestEnforceCommitCoAuthor_HeredocTopLevelStdin(t *testing.T) {
+	// `git commit -F - <<'MSG'`: the trailer flag must land on the command
+	// line, never after (inside) the heredoc body.
+	cmd := "git commit -F - <<'MSG'\nsubject line\n\nbody with a \" quote\nMSG"
+	got := agent.EnforceCommitCoAuthorForTesting(cmd)
+	want := "git commit -F - <<'MSG' --trailer '" + agent.SpettroCoAuthorTrailerForTesting() + "'\nsubject line\n\nbody with a \" quote\nMSG"
+	if got != want {
+		t.Fatalf("expected trailer injected before the heredoc body.\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+func TestEnforceCommitCoAuthor_HeredocFollowedByCommand(t *testing.T) {
+	cmd := "git commit -F - <<EOF\nmsg (\"quoted\")\nEOF\ngit push"
+	got := agent.EnforceCommitCoAuthorForTesting(cmd)
+	if !strings.Contains(got, "git commit -F - <<EOF --trailer '"+agent.SpettroCoAuthorTrailerForTesting()+"'\nmsg") {
+		t.Fatalf("expected trailer on the commit line: %q", got)
+	}
+	if !strings.HasSuffix(got, "\ngit push") {
+		t.Fatalf("expected trailing git push untouched: %q", got)
+	}
+	if strings.Count(got, "Co-Authored-By: Spettro") != 1 {
+		t.Fatalf("expected exactly one trailer, got: %q", got)
+	}
+}
+
+func TestEnforceCommitCoAuthor_HeredocIdempotentWhenTrailerInBody(t *testing.T) {
+	cmd := `git commit -m "$(cat <<'EOF'
+fix: x
+
+Co-Authored-By: Spettro <spettro@eyed.to>
+EOF
+)"`
+	if got := agent.EnforceCommitCoAuthorForTesting(cmd); got != cmd {
+		t.Fatalf("heredoc body already carrying the trailer must be untouched: %q", got)
+	}
+}
+
+func TestEnforceCommitCoAuthor_UnterminatedHeredocLeftAlone(t *testing.T) {
+	for _, cmd := range []string{
+		"git commit -F - <<'EOF'\nnever closed",
+		"git commit -F - <<'EOF'",
+		"git commit -F - <<''\nEOF",
+	} {
+		if got := agent.EnforceCommitCoAuthorForTesting(cmd); got != cmd {
+			t.Fatalf("ambiguous heredoc must be left as-is: %q -> %q", cmd, got)
+		}
+	}
+}
+
+func TestEnforceCommitCoAuthor_SubshellInsideDoubleQuotes(t *testing.T) {
+	// `$(...)` inside "..." opens a fresh quoting context in bash; the inner
+	// double quotes must not corrupt the outer state.
+	cmd := `git commit -m "$(printf "%s" "fix: x")"; git push`
+	got := agent.EnforceCommitCoAuthorForTesting(cmd)
+	want := `git commit -m "$(printf "%s" "fix: x")" --trailer '` + agent.SpettroCoAuthorTrailerForTesting() + `'; git push`
+	if got != want {
+		t.Fatalf("expected trailer before the separator.\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// Regression: a double-quoted -m message whose TEXT talks about the
+// `\$(cat <<'EOF' ... EOF)` idiom (e.g. a commit message describing this very
+// feature). The escaped `\$` must not open a phantom subshell — doing so
+// resets the quote state, makes the literal `<<'EOF'` register as a live
+// heredoc that never terminates, and aborts the parse, silently skipping
+// trailer injection (observed in the wild on commit 0b9dcf6).
+func TestEnforceCommitCoAuthor_EscapedDollarAndHeredocTextInMessage(t *testing.T) {
+	cmd := `git commit -m "fix: make trailer injection heredoc-aware` + "\n\n" +
+		`Previously a multi-line -m \"\$(cat <<'EOF' ... EOF)\" message whose` + "\n" +
+		`body contained a double quote (git commit -F - <<'EOF' ...) corrupted` + "\n" +
+		`the closing )\" tracking." && git status`
+	got := agent.EnforceCommitCoAuthorForTesting(cmd)
+	if !strings.Contains(got, `tracking." --trailer '`+agent.SpettroCoAuthorTrailerForTesting()+`' && git status`) {
+		t.Fatalf("expected trailer before && separator, got: %q", got)
+	}
+	if strings.Count(got, "Co-Authored-By: Spettro") != 1 {
+		t.Fatalf("expected exactly one trailer, got: %q", got)
+	}
+}
+
+func TestEnforceCommitCoAuthor_HereStringNotAHeredoc(t *testing.T) {
+	cmd := `git commit -F - <<<"fix: x"`
+	got := agent.EnforceCommitCoAuthorForTesting(cmd)
+	if !strings.Contains(got, agent.SpettroCoAuthorTrailerForTesting()) {
+		t.Fatalf("here-string commit should still get the trailer: %q", got)
+	}
+}
+
 func TestIsGitCommitInvocation(t *testing.T) {
 	yes := []string{
 		`git commit`,

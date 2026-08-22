@@ -130,7 +130,7 @@ func (c Chatter) Reply(ctx context.Context, prompt string, images []string) (pro
 
 // GoalModePreamble is prepended to the task for /goal runs. It tells the agent
 // the run is autonomous and how to terminate cleanly.
-const GoalModePreamble = `You are operating in GOAL MODE. Work autonomously and persistently toward the objective below until it is fully achieved. There is no step limit and no time pressure — do not stop early, do not ask whether to continue, and do not summarize-and-quit while work remains.
+const GoalModePreamble = `You are operating in GOAL MODE. Work autonomously and persistently toward the objective below until it is fully achieved. There is no time pressure — do not stop early, do not ask whether to continue, and do not summarize-and-quit while work remains. The harness runs you in bounded iterations: if a run pauses mid-work you are resumed automatically with your context intact, so just keep working from where you left off.
 
 Rules:
 - Break the objective into concrete steps and execute them with tools.
@@ -206,6 +206,11 @@ type LLMAgent struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
+	// MaxSteps bounds the number of LLM steps in this run; 0 = unlimited.
+	// Goal hosts set it per iteration so the run yields back to the outer goal
+	// loop (progress check, stall guard, iteration cap) instead of running one
+	// endless first iteration.
+	MaxSteps int
 	// Compact carries the user's auto-compaction settings into the run loop
 	// (typically cfg.CompactConfig()). Zero value → defaults (enabled, 85%).
 	Compact compactpkg.Config
@@ -289,6 +294,7 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 		ContextWindow:   a.ContextWindow,
 		Compact:         a.Compact,
 		ShellTimeoutSec: a.ShellTimeoutSec,
+		MaxSteps:        a.MaxSteps,
 		MaxWorkers:      maxWorkers,
 		MaxDepth:        maxDelegationDepth,
 		MaxToolCalls:    maxToolCallsPerStep,

@@ -62,6 +62,67 @@ func TestUnboundedLoop_NoStepCap(t *testing.T) {
 	}
 }
 
+// TestGoalMode_MaxStepsYieldsIteration verifies that a goal-mode run with
+// MaxSteps set stops after that many LLM steps and returns control to the
+// caller (the outer goal loop) with GoalComplete=false. This is the fix for
+// the goal loop never reaching a second iteration: the goal preamble forbids
+// plain final answers, so without a per-iteration step cap the inner loop ran
+// forever and the outer loop's progress/stall/cap checks were dead code.
+func TestGoalMode_MaxStepsYieldsIteration(t *testing.T) {
+	// Script exactly 5 tool-call responses with distinct args (so the loop
+	// detector doesn't trip). scriptedManager fails the test on any extra
+	// request, so if the cap doesn't stop the loop this test cannot pass.
+	responses := make([]string, 0, 5)
+	for i := range 5 {
+		responses = append(responses, fmt.Sprintf(`TOOL_CALL {"tool":"comment","args":{"message":"working on part %d"}}`, i))
+	}
+
+	pm, providerName, modelName := scriptedManager(t, responses)
+
+	spec := config.AgentSpec{
+		ID:           "goal-runner",
+		Mode:         "worker",
+		AllowedTools: []string{"comment", "goal-complete"},
+		Permission:   config.PermissionYOLO,
+		Enabled:      true,
+	}
+
+	a := agent.LLMAgent{
+		Spec:            spec,
+		ProviderManager: pm,
+		ProviderName:    func() string { return providerName },
+		ModelName:       func() string { return modelName },
+		CWD:             t.TempDir(),
+		GoalMode:        true,
+		MaxSteps:        5,
+	}
+
+	result, err := a.Run(context.Background(), agent.GoalModePreamble+"Do a long task.")
+	if err != nil {
+		t.Fatalf("agent.Run failed: %v", err)
+	}
+	if result.GoalComplete {
+		t.Error("GoalComplete should be false when the iteration ends on the step cap")
+	}
+	comments := 0
+	for _, trace := range result.Tools {
+		if trace.Name == "comment" {
+			comments++
+		}
+	}
+	if comments != 5 {
+		t.Errorf("expected exactly 5 tool steps before yielding, got %d", comments)
+	}
+	if !strings.Contains(result.Content, "step limit") {
+		t.Errorf("expected the step-cap notice as run content, got: %q", result.Content)
+	}
+	// The returned conversation must be a valid prefix for the next iteration:
+	// it must not end on an assistant tool-call turn without results.
+	if len(result.Messages) == 0 {
+		t.Fatal("expected carried conversation messages")
+	}
+}
+
 // TestGoalComplete_TerminatesLoop verifies that when the agent calls the
 // goal-complete tool, the run returns immediately with GoalComplete=true and
 // the summary populated, even though more steps were allowed.

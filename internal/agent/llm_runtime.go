@@ -139,6 +139,13 @@ type toolLoopConfig struct {
 	GoalMode        bool
 	ContextWindow   int // model context window in tokens; drives in-loop compaction. 0 → default
 	ShellTimeoutSec int // goal-mode per shell/bash timeout; 0 → default
+	// MaxSteps caps the number of successful LLM steps in this run; 0 means
+	// unlimited (the default for normal runs). Goal-mode hosts set it so each
+	// iteration is bounded and control returns to the outer goal loop, which
+	// owns progress detection, the stall guard, and the iteration cap. Without
+	// the bound the goal preamble ("only goal-complete finishes the run") keeps
+	// the inner loop alive forever and the outer loop never runs.
+	MaxSteps int
 	// Compact is the auto-compaction policy for the in-loop trigger (user
 	// settings: off switch, threshold percent, failure pause). The zero value
 	// means defaults (enabled at 85%), so hosts that don't wire user config
@@ -387,6 +394,11 @@ type toolLoopResult struct {
 	messages      []provider.Message
 }
 
+// stepCapMessage closes an iteration that hit cfg.MaxSteps. It is returned as
+// the run's content (and recorded as the final assistant turn), so the goal
+// host's transcript shows why the iteration ended before the next one starts.
+const stepCapMessage = "(iteration paused: step limit reached — the goal loop will review progress and continue in the next iteration)"
+
 func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error) {
 	if cfg.ProviderManager == nil {
 		return toolLoopResult{}, fmt.Errorf("missing provider manager")
@@ -582,6 +594,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	const maxSendRetries = 2
 	sendRetries := 0
 	budgetCompacted := false
+	// steps counts successful LLM calls; when cfg.MaxSteps is set (goal-mode
+	// iterations) the loop yields back to the host once the cap is reached.
+	steps := 0
 
 	for {
 		// Mid-run steering: deliver any guidance the user typed while the run
@@ -705,6 +720,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 			return fail(fmt.Errorf("agent call failed: %w", err))
 		}
 		sendRetries = 0
+		steps++
 		totalTokens += resp.EstimatedTokens
 		// Occupancy ~= the largest single request (prompt+completion). The
 		// last step usually has the most accumulated history, but using the
@@ -725,6 +741,9 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		main, _ := stripThinkTags(content)
 		main = strings.TrimSpace(main)
 		if main == "" && len(resp.ToolCalls) == 0 {
+			if cfg.MaxSteps > 0 && steps >= cfg.MaxSteps {
+				return finish("", false, "")
+			}
 			continue
 		}
 
@@ -781,6 +800,12 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 					summary = strings.TrimSpace(main)
 				}
 				return finish(summary, true, summary)
+			}
+			// Per-run step cap: yield the iteration back to the host. The tool
+			// results for this step are already in convMsgs, so the returned
+			// conversation is a valid prefix for the next iteration to extend.
+			if cfg.MaxSteps > 0 && steps >= cfg.MaxSteps {
+				return finish(stepCapMessage, false, "")
 			}
 			continue
 		}

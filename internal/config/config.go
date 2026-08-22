@@ -78,6 +78,7 @@ type UserConfig struct {
 	GoalShellTimeoutSec int `json:"goal_shell_timeout_sec,omitempty"` // per shell/bash tool call in goal runs; 0 → default (600s)
 	GoalMaxIterations   int `json:"goal_max_iterations,omitempty"`    // outer-loop safety cap; 0 → unlimited
 	GoalNoProgressLimit int `json:"goal_no_progress_limit,omitempty"` // consecutive no-progress iterations before stalling; 0 → default (3)
+	GoalIterationSteps  int `json:"goal_iteration_steps,omitempty"`   // LLM steps per goal iteration before yielding to the outer loop; 0 → default (25)
 }
 
 // UltraActive reports whether Ultra mode should actually engage: the toggle is
@@ -160,6 +161,12 @@ func normalize(cfg UserConfig) (UserConfig, bool) {
 	}
 	if cfg.GoalNoProgressLimit <= 0 {
 		cfg.GoalNoProgressLimit = 3
+		changed = true
+	}
+	if cfg.GoalIterationSteps <= 0 {
+		// Bounds each iteration's inner tool loop so the outer goal loop
+		// (progress detection, stall guard, iteration cap) actually runs.
+		cfg.GoalIterationSteps = 25
 		changed = true
 	}
 	// GoalMaxIterations: 0 means unlimited, no default needed

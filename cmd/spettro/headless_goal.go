@@ -169,6 +169,7 @@ func runHeadlessGoal(cwd string, objective string, sandboxOverrides sandbox.Over
 			SandboxState:    sb,
 			SessionDir:      sessionDir,
 			GoalMode:        true,
+			MaxSteps:        resolveGoalIterationSteps(cfg),
 			ContextWindow:   contextWindow,
 			Compact:         cfg.CompactConfig(),
 			ShellTimeoutSec: shellTimeoutSec,
@@ -262,6 +263,15 @@ func resolveGoalNoProgressLimit(cfg config.UserConfig) int {
 		return cfg.GoalNoProgressLimit
 	}
 	return 3
+}
+
+// resolveGoalIterationSteps returns the per-iteration step cap, defaulting to
+// 25 so each agent run yields back to the outer goal loop.
+func resolveGoalIterationSteps(cfg config.UserConfig) int {
+	if cfg.GoalIterationSteps > 0 {
+		return cfg.GoalIterationSteps
+	}
+	return 25
 }
 
 // appendUnique appends a string to a slice only if it's not already present.

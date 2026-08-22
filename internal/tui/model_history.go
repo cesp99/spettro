@@ -188,6 +188,12 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 			return specPerm
 		}
 	}
+	// Goal iterations are step-bounded so the run yields back to advanceGoal
+	// for the progress check; ordinary runs stay unlimited (0).
+	maxSteps := 0
+	if m.activeGoal != nil {
+		maxSteps = resolveGoalIterationSteps(m.cfg)
+	}
 	a := agent.LLMAgent{
 		Spec:            spec,
 		ProviderManager: pm,
@@ -209,6 +215,7 @@ func (m Model) runAgentApproved(spec config.AgentSpec, input string, mentionedFi
 		// Goal-mode fields: set when a goal is active so the runtime uses
 		// generous tool timeouts and recognizes goal-complete.
 		GoalMode:        m.activeGoal != nil,
+		MaxSteps:        maxSteps,
 		ContextWindow:   resolveGoalContextWindow(m),
 		Compact:         m.cfg.CompactConfig(),
 		ShellTimeoutSec: m.cfg.GoalShellTimeoutSec,
