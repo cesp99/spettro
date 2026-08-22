@@ -123,18 +123,21 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 			if !provider.IsValidThinkingLevel(level) {
 				m.showBanner("usage: /think <off|low|medium|high|x-high|max>", "error")
 			} else {
-				if level == "off" {
-					level = ""
-				}
-				_ = m.updateConfig(func(cfg *config.UserConfig) error {
+				// Store "off" as-is: unlike the empty string (never set,
+				// provider default), an explicit off actively disables
+				// reasoning on models that think by default.
+				if err := m.updateConfig(func(cfg *config.UserConfig) error {
 					cfg.ThinkingLevel = level
 					return nil
-				})
-				display := level
-				if display == "" {
-					display = "off"
+				}); err != nil {
+					m.showBanner("could not save thinking level: "+err.Error(), "error")
+				} else if m.thinking {
+					// The level is captured once at run start, so a change
+					// made while an agent is running cannot affect that run.
+					m.showBanner("thinking level set to "+level+" (applies from the next message)", "success")
+				} else {
+					m.showBanner("thinking level set to "+level, "success")
 				}
-				m.showBanner("thinking level set to "+display, "success")
 			}
 		}
 	case "/ultra":

@@ -63,14 +63,17 @@ func ThinkingBudgetTokens(level ThinkingLevel) int {
 }
 
 // ReasoningEffort maps a ThinkingLevel to the OpenAI-style `reasoning_effort`
-// value used by OpenAI and OpenAI-compatible backends. Returns "" for
-// off/empty so callers can skip the parameter entirely: most reasoning models
-// cannot fully disable reasoning, so omitting the field keeps the provider's
-// default instead of sending a value the model may reject. x-high and max
-// both map to "xhigh" — effort is an enum, not a token budget, and "xhigh" is
-// the highest value the wire format defines.
+// value used by OpenAI and OpenAI-compatible backends. An explicit "off"
+// sends "none" so models that reason by default actually stop reasoning;
+// servers that reject the value trigger the downgrade ladder, which retries
+// with the field omitted. Empty (never set) returns "" so callers skip the
+// parameter and keep the provider's default. x-high and max both map to
+// "xhigh" — effort is an enum, not a token budget, and "xhigh" is the
+// highest value the wire format defines.
 func ReasoningEffort(level ThinkingLevel) string {
 	switch level {
+	case ThinkingOff:
+		return "none"
 	case ThinkingLow:
 		return "low"
 	case ThinkingMedium:

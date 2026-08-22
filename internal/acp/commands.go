@@ -181,9 +181,9 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 		if !provider.IsValidThinkingLevel(level) {
 			return "usage: /think <off|low|medium|high|x-high|max>", false, true
 		}
-		if level == "off" {
-			level = ""
-		}
+		// Store "off" as-is: unlike the empty string (never set, provider
+		// default), an explicit off actively disables reasoning on models
+		// that think by default.
 		if _, err := config.Update(func(c *config.UserConfig) error {
 			c.ThinkingLevel = level
 			return nil
@@ -191,11 +191,7 @@ func handleSlashCommand(s *acpSession, cfg *config.UserConfig, pm *provider.Mana
 			return "error: " + err.Error(), false, true
 		}
 		cfg.ThinkingLevel = level
-		display := level
-		if display == "" {
-			display = "off"
-		}
-		return "thinking level set to " + display, false, true
+		return "thinking level set to " + level, false, true
 
 	case "/memory":
 		return handleMemoryCommand(s.cwd, fields[1:]), false, true
