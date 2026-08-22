@@ -134,14 +134,34 @@ func TestServerKeyFor(t *testing.T) {
 	}
 }
 
+// Servers answer with their own spelling of a path; output stays
+// workspace-relative as long as the two spellings resolve to the same file.
+func TestRelPathAcceptsOtherSpellings(t *testing.T) {
+	root := realPath(t.TempDir())
+	m := &Manager{root: root}
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.relPath(filepath.Join(root, "pkg", "a.go")); got != "pkg/a.go" {
+		t.Fatalf("relPath under root = %q, want pkg/a.go", got)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skip("symlinks unavailable:", err) // Windows without developer mode
+	}
+	if got := m.relPath(filepath.Join(link, "a.go")); got != "a.go" {
+		t.Fatalf("relPath through a symlinked root = %q, want a.go", got)
+	}
+}
+
 func TestFormatDiagnostics(t *testing.T) {
-	m := &Manager{root: "/w"}
+	m := &Manager{root: filepath.FromSlash("/w")}
 	var d Diagnostic
 	d.Range.Start = Position{Line: 4, Character: 2}
 	d.Severity = 1
 	d.Source = "compiler"
 	d.Message = "undefined:\nfoo"
-	out := m.formatDiagnostics("file:///w/pkg/a.go", []Diagnostic{d})
+	out := m.formatDiagnostics(filepath.FromSlash("/w/pkg/a.go"), []Diagnostic{d})
 	want := "pkg/a.go:5:3 [error] undefined: foo (compiler)\n"
 	if out != want {
 		t.Fatalf("got %q want %q", out, want)

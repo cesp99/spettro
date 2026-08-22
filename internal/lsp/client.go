@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,11 +90,13 @@ type Client struct {
 	nextID  int64
 	pending map[int64]chan rpcMessage
 
-	// diagnostics store: uri → latest published set, with a generation counter
-	// so callers can wait for a publish that happened after their change.
+	// diagnostics store: doc key → latest published set, with a generation
+	// counter so callers can wait for a publish that happened after their
+	// change. The key is docKey(path) rather than the URI as it travelled:
+	// see dispatch.
 	diagMu   sync.Mutex
 	diagCond *sync.Cond
-	diags    map[string][]Diagnostic
+	diags    map[string]publishedDiags
 	diagGen  map[string]int
 
 	openMu   sync.Mutex
@@ -101,6 +104,14 @@ type Client struct {
 
 	closed   chan struct{}
 	closeErr error
+}
+
+// publishedDiags is one document's latest diagnostics together with the path
+// to display them under (the spelling the server used, so output keeps the
+// filesystem's own casing).
+type publishedDiags struct {
+	path string
+	list []Diagnostic
 }
 
 // fileURI converts an absolute path into a file:// URI. Windows drive paths
@@ -136,6 +147,41 @@ func isDriveLetter(c byte) bool {
 	return ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z')
 }
 
+// realPath resolves a path to its canonical on-disk spelling: symlinks
+// expanded (macOS hands out /var/folders/... for a temp dir that really lives
+// under /private/var) and, on Windows, 8.3 short components replaced by the
+// long name the filesystem records — C:\Users\RUNNER~1\AppData\Local\Temp,
+// which is what %TEMP% expands to on a CI runner, is really
+// C:\Users\runneradmin\AppData\Local\Temp. Language servers resolve the paths
+// they are handed and then answer in the resolved form, so speaking that form
+// to them is what keeps their replies matchable. A path that cannot be
+// resolved (it no longer exists) falls back to a plain Clean.
+func realPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
+// docKey is the diagnostics-store key for a file: its real path, case-folded
+// on Windows, whose filesystem is case-insensitive and whose servers are free
+// to echo a casing other than the one we sent.
+func docKey(path string) string { return foldPath(realPath(path)) }
+
+// foldPath is docKey's second half, for callers that already resolved.
+func foldPath(path string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
+// stderrSink, when non-nil, receives the language servers' stderr. Servers are
+// silent by default — their logs are noise the agent has no use for — but a
+// test that can only fail on someone else's machine needs to be able to say
+// what the server was doing.
+var stderrSink io.Writer
+
 // startClient spawns the server process, wires the reader loop, and completes
 // the initialize handshake. The passed context bounds only the handshake.
 func startClient(ctx context.Context, root, command string, args []string) (*Client, error) {
@@ -149,7 +195,7 @@ func startClient(ctx context.Context, root, command string, args []string) (*Cli
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = nil
+	cmd.Stderr = stderrSink
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -157,7 +203,7 @@ func startClient(ctx context.Context, root, command string, args []string) (*Cli
 		cmd:      cmd,
 		stdin:    stdin,
 		pending:  map[int64]chan rpcMessage{},
-		diags:    map[string][]Diagnostic{},
+		diags:    map[string]publishedDiags{},
 		diagGen:  map[string]int{},
 		openDocs: map[string]int{},
 		closed:   make(chan struct{}),
@@ -304,13 +350,16 @@ func (c *Client) dispatch(msg rpcMessage) {
 		if json.Unmarshal(msg.Params, &params) != nil {
 			return
 		}
-		// Canonicalize: servers echo their own URI form (percent-encoded or
-		// lowercase drive on Windows), which must land under the same key the
-		// syncFile URI uses or waitDiagnostics never sees the publish.
-		uri := fileURI(uriToPath(params.URI))
+		// Key by resolved path, never by the URI as it arrived: servers echo
+		// their own spelling of a file (percent-encoded, lowercase drive
+		// letter, or the long form of the short path we sent them), and every
+		// spelling has to land on the key waitDiagnostics is watching or the
+		// publish is never seen and the caller waits out its whole deadline.
+		path := realPath(uriToPath(params.URI))
+		key := foldPath(path)
 		c.diagMu.Lock()
-		c.diags[uri] = params.Diagnostics
-		c.diagGen[uri]++
+		c.diags[key] = publishedDiags{path: path, list: params.Diagnostics}
+		c.diagGen[key]++
 		c.diagMu.Unlock()
 		c.diagCond.Broadcast()
 	case msg.Method != "":
@@ -396,39 +445,48 @@ func (c *Client) call(ctx context.Context, method string, params, result any) er
 	}
 }
 
-// syncFile opens (or re-syncs with full text) a document and returns the
-// diagnostics generation for its URI at the moment of the sync, so callers can
-// wait for a publish that happened afterwards.
-func (c *Client) syncFile(path, languageID, content string) (uri string, sinceGen int, err error) {
-	uri = fileURI(path)
+// doc is a synced document: the URI to address it with in requests, plus the
+// diagnostics key and the generation seen at sync time, so the caller can wait
+// for a publish that happened afterwards.
+type doc struct {
+	uri      string
+	key      string
+	sinceGen int
+}
+
+// syncFile opens (or re-syncs with full text) a document.
+func (c *Client) syncFile(path, languageID, content string) (doc, error) {
+	d := doc{uri: fileURI(path), key: docKey(path)}
 	c.diagMu.Lock()
-	sinceGen = c.diagGen[uri]
+	d.sinceGen = c.diagGen[d.key]
 	c.diagMu.Unlock()
 
 	c.openMu.Lock()
-	version, open := c.openDocs[uri]
+	version, open := c.openDocs[d.uri]
 	version++
-	c.openDocs[uri] = version
+	c.openDocs[d.uri] = version
 	c.openMu.Unlock()
 
+	var err error
 	if !open {
 		err = c.notify("textDocument/didOpen", map[string]any{
 			"textDocument": map[string]any{
-				"uri": uri, "languageId": languageID, "version": version, "text": content,
+				"uri": d.uri, "languageId": languageID, "version": version, "text": content,
 			},
 		})
 	} else {
 		err = c.notify("textDocument/didChange", map[string]any{
-			"textDocument":   map[string]any{"uri": uri, "version": version},
+			"textDocument":   map[string]any{"uri": d.uri, "version": version},
 			"contentChanges": []map[string]any{{"text": content}},
 		})
 	}
-	return uri, sinceGen, err
+	return d, err
 }
 
 // waitDiagnostics blocks until a publishDiagnostics newer than sinceGen lands
-// for uri, or the context expires; either way it returns the current set.
-func (c *Client) waitDiagnostics(ctx context.Context, uri string, sinceGen int) []Diagnostic {
+// for the document, or the context expires; either way it returns the current
+// set.
+func (c *Client) waitDiagnostics(ctx context.Context, key string, sinceGen int) []Diagnostic {
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -440,23 +498,25 @@ func (c *Client) waitDiagnostics(ctx context.Context, uri string, sinceGen int) 
 	}()
 	c.diagMu.Lock()
 	defer c.diagMu.Unlock()
-	for c.diagGen[uri] <= sinceGen && ctx.Err() == nil && c.closeErr == nil {
+	for c.diagGen[key] <= sinceGen && ctx.Err() == nil && c.closeErr == nil {
 		c.diagCond.Wait()
 	}
-	out := make([]Diagnostic, len(c.diags[uri]))
-	copy(out, c.diags[uri])
+	list := c.diags[key].list
+	out := make([]Diagnostic, len(list))
+	copy(out, list)
 	return out
 }
 
-// allDiagnostics returns a snapshot of every URI's latest published set.
+// allDiagnostics returns a snapshot of every document's latest published set,
+// keyed by the path to display it under.
 func (c *Client) allDiagnostics() map[string][]Diagnostic {
 	c.diagMu.Lock()
 	defer c.diagMu.Unlock()
 	out := make(map[string][]Diagnostic, len(c.diags))
-	for uri, ds := range c.diags {
-		cp := make([]Diagnostic, len(ds))
-		copy(cp, ds)
-		out[uri] = cp
+	for _, pd := range c.diags {
+		cp := make([]Diagnostic, len(pd.list))
+		copy(cp, pd.list)
+		out[pd.path] = cp
 	}
 	return out
 }

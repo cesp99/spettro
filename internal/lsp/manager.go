@@ -173,7 +173,10 @@ var (
 // on. The nil result is also cached, so unconfigured workspaces pay one stat
 // per lookup at most.
 func ForWorkspace(root string) *Manager {
-	root = filepath.Clean(root)
+	// The root is resolved (not just cleaned) so the rootUri servers get, the
+	// paths we send them and the paths they answer with are all the same
+	// spelling of the same directory.
+	root = realPath(root)
 	regMu.Lock()
 	defer regMu.Unlock()
 	if m, ok := registry[root]; ok {
@@ -242,17 +245,32 @@ func (m *Manager) clientFor(ctx context.Context, path string) (*Client, string, 
 	return c, key, nil
 }
 
-func (m *Manager) relPath(uri string) string {
-	p := uriToPath(uri)
-	if rel, err := filepath.Rel(m.root, p); err == nil && !strings.HasPrefix(rel, "..") {
-		return filepath.ToSlash(rel)
+func (m *Manager) relPath(path string) string {
+	if rel, ok := relTo(m.root, path); ok {
+		return rel
 	}
-	return p
+	// A path spelled differently than the resolved root — a symlinked or short
+	// Windows form a server answered with — only lines up once resolved, so
+	// pay for that lookup, but only when the plain comparison came up short.
+	if resolved := realPath(path); resolved != path {
+		if rel, ok := relTo(m.root, resolved); ok {
+			return rel
+		}
+	}
+	return path
 }
 
-func (m *Manager) formatDiagnostics(uri string, ds []Diagnostic) string {
+func relTo(root, path string) (string, bool) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func (m *Manager) formatDiagnostics(path string, ds []Diagnostic) string {
 	var sb strings.Builder
-	rel := m.relPath(uri)
+	rel := m.relPath(path)
 	for _, d := range ds {
 		src := ""
 		if d.Source != "" {
@@ -267,6 +285,7 @@ func (m *Manager) formatDiagnostics(uri string, ds []Diagnostic) string {
 // DiagnosticsForFile syncs the file's current on-disk content to the server
 // and waits (bounded by ctx) for fresh diagnostics. Empty string means clean.
 func (m *Manager) DiagnosticsForFile(ctx context.Context, absPath string) (string, error) {
+	absPath = realPath(absPath)
 	c, key, err := m.clientFor(ctx, absPath)
 	if err != nil {
 		return "", err
@@ -275,12 +294,12 @@ func (m *Manager) DiagnosticsForFile(ctx context.Context, absPath string) (strin
 	if err != nil {
 		return "", err
 	}
-	uri, sinceGen, err := c.syncFile(absPath, languageIDForPath(absPath, key), string(raw))
+	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), string(raw))
 	if err != nil {
 		return "", err
 	}
-	ds := c.waitDiagnostics(ctx, uri, sinceGen)
-	return strings.TrimRight(m.formatDiagnostics(uri, ds), "\n"), nil
+	ds := c.waitDiagnostics(ctx, d.key, d.sinceGen)
+	return strings.TrimRight(m.formatDiagnostics(absPath, ds), "\n"), nil
 }
 
 // WorkspaceDiagnostics reports the latest published diagnostics across all
@@ -295,15 +314,15 @@ func (m *Manager) WorkspaceDiagnostics() string {
 	var parts []string
 	for _, c := range clients {
 		all := c.allDiagnostics()
-		uris := make([]string, 0, len(all))
-		for uri, ds := range all {
+		paths := make([]string, 0, len(all))
+		for path, ds := range all {
 			if len(ds) > 0 {
-				uris = append(uris, uri)
+				paths = append(paths, path)
 			}
 		}
-		sort.Strings(uris)
-		for _, uri := range uris {
-			parts = append(parts, strings.TrimRight(m.formatDiagnostics(uri, all[uri]), "\n"))
+		sort.Strings(paths)
+		for _, path := range paths {
+			parts = append(parts, strings.TrimRight(m.formatDiagnostics(path, all[path]), "\n"))
 		}
 	}
 	return strings.Join(parts, "\n")
@@ -348,6 +367,7 @@ func positionOfSymbol(content, symbol string) (Position, bool) {
 // from line/character when given (1-based), otherwise from the first
 // occurrence of symbol in the file.
 func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line, character int) (string, error) {
+	absPath = realPath(absPath)
 	c, key, err := m.clientFor(ctx, absPath)
 	if err != nil {
 		return "", err
@@ -357,7 +377,7 @@ func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line
 		return "", err
 	}
 	content := string(raw)
-	uri, _, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
 	if err != nil {
 		return "", err
 	}
@@ -367,9 +387,9 @@ func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line
 	}
 	var locs []Location
 	if kind == "definition" {
-		locs, err = c.definition(ctx, uri, pos)
+		locs, err = c.definition(ctx, d.uri, pos)
 	} else {
-		locs, err = c.references(ctx, uri, pos)
+		locs, err = c.references(ctx, d.uri, pos)
 	}
 	if err != nil {
 		return "", err
@@ -379,7 +399,7 @@ func (m *Manager) Lookup(ctx context.Context, absPath, symbol, kind string, line
 	}
 	var sb strings.Builder
 	for _, l := range locs {
-		fmt.Fprintf(&sb, "%s:%d:%d\n", m.relPath(l.URI), l.Range.Start.Line+1, l.Range.Start.Character+1)
+		fmt.Fprintf(&sb, "%s:%d:%d\n", m.relPath(uriToPath(l.URI)), l.Range.Start.Line+1, l.Range.Start.Character+1)
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
 }
@@ -405,6 +425,7 @@ func resolvePosition(content, absPath, symbol string, line, character int) (Posi
 // a symbol in absPath, positioned like Lookup. Empty string means the server
 // had nothing to say.
 func (m *Manager) Hover(ctx context.Context, absPath, symbol string, line, character int) (string, error) {
+	absPath = realPath(absPath)
 	c, key, err := m.clientFor(ctx, absPath)
 	if err != nil {
 		return "", err
@@ -414,7 +435,7 @@ func (m *Manager) Hover(ctx context.Context, absPath, symbol string, line, chara
 		return "", err
 	}
 	content := string(raw)
-	uri, _, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
 	if err != nil {
 		return "", err
 	}
@@ -422,7 +443,7 @@ func (m *Manager) Hover(ctx context.Context, absPath, symbol string, line, chara
 	if err != nil {
 		return "", err
 	}
-	out, err := c.hover(ctx, uri, pos)
+	out, err := c.hover(ctx, d.uri, pos)
 	if err != nil {
 		return "", err
 	}
@@ -442,6 +463,7 @@ type FileChange struct {
 // RenameEdits asks the server to rename the symbol at the given position and
 // returns the resulting per-file content changes without touching the disk.
 func (m *Manager) RenameEdits(ctx context.Context, absPath, symbol string, line, character int, newName string) ([]FileChange, error) {
+	absPath = realPath(absPath)
 	c, key, err := m.clientFor(ctx, absPath)
 	if err != nil {
 		return nil, err
@@ -451,7 +473,7 @@ func (m *Manager) RenameEdits(ctx context.Context, absPath, symbol string, line,
 		return nil, err
 	}
 	content := string(raw)
-	uri, _, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
+	d, err := c.syncFile(absPath, languageIDForPath(absPath, key), content)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +481,7 @@ func (m *Manager) RenameEdits(ctx context.Context, absPath, symbol string, line,
 	if err != nil {
 		return nil, err
 	}
-	edits, err := c.rename(ctx, uri, pos, newName)
+	edits, err := c.rename(ctx, d.uri, pos, newName)
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +499,7 @@ func (m *Manager) RenameEdits(ctx context.Context, absPath, symbol string, line,
 		if updated == string(old) {
 			continue
 		}
-		changes = append(changes, FileChange{Path: p, Rel: m.relPath(u), Old: string(old), New: updated})
+		changes = append(changes, FileChange{Path: p, Rel: m.relPath(p), Old: string(old), New: updated})
 	}
 	if len(changes) == 0 {
 		return nil, fmt.Errorf("rename produced no edits")
