@@ -41,24 +41,32 @@ var commitTrailerFlag = " --trailer '" + spettroCoAuthorTrailer + "'"
 //     `git status && git commit -m 'x' && git push`
 //     get the trailer appended to the `git commit` segment only.
 //
-//   - quote- and subshell-safe — `;`, `|`, `&&`, `||`, and newlines inside
-//     `'...'`, `"..."`, or `$(...)` are NOT treated as separators.
+//   - quote-, subshell-, and heredoc-safe — `;`, `|`, `&&`, `||`, and
+//     newlines inside `'...'`, `"..."`, `$(...)`, or a heredoc body are NOT
+//     treated as separators, and heredoc bodies are fully opaque: quote
+//     characters in the commit-message text never leak into the parser state.
+//
+//   - heredoc-placement-aware — for `git commit -F - <<'EOF' ...` the flag is
+//     inserted on the command line (before the body starts), while for the
+//     `git commit -m "$(cat <<'EOF' ... EOF\n)"` idiom it lands after the
+//     closing `)"` — both spots git actually parses as arguments.
 //
 //   - tolerant of common git option prefixes (`-C dir`, `--git-dir=...`,
 //     `-c key=val`, leading `env VAR=value`) and excludes plumbing variants
 //     like `git commit-tree` and `git commit-graph`.
 //
 // The function is intentionally conservative: when the command shape is
-// ambiguous (e.g. dynamic `$(...)` invocations, sub-shells, or piping git
-// output through another tool), it falls back to leaving the segment as-is.
-// The accompanying prompt rules in agents/git.md still require the trailer
-// explicitly, so the LLM is the second line of defence.
+// ambiguous (e.g. dynamic `$(...)` invocations, sub-shells, piping git
+// output through another tool, or an unterminated heredoc), it falls back to
+// leaving the command as-is. The accompanying prompt rules in agents/git.md
+// still require the trailer explicitly, so the LLM is the second line of
+// defence.
 func EnforceCommitCoAuthor(command string) string {
 	if command == "" {
 		return command
 	}
-	segments := splitShellSegmentsWithRanges(command)
-	if len(segments) == 0 {
+	segments, ok := splitShellSegmentsWithRanges(command)
+	if !ok || len(segments) == 0 {
 		return command
 	}
 	var out strings.Builder
@@ -68,11 +76,14 @@ func EnforceCommitCoAuthor(command string) string {
 		out.WriteString(command[cursor:seg.start])
 		body := command[seg.start:seg.end]
 		if commitSegmentNeedsTrailer(body) {
-			trailing := body[len(strings.TrimRight(body, " \t")):]
-			leading := body[:len(body)-len(trailing)]
+			pos := len(body)
+			if seg.injectAt >= seg.start && seg.injectAt < seg.end {
+				pos = seg.injectAt - seg.start
+			}
+			leading := strings.TrimRight(body[:pos], " \t")
 			out.WriteString(leading)
 			out.WriteString(commitTrailerFlag)
-			out.WriteString(trailing)
+			out.WriteString(body[len(leading):])
 		} else {
 			out.WriteString(body)
 		}
@@ -84,27 +95,57 @@ func EnforceCommitCoAuthor(command string) string {
 
 // shellSegmentRange records the [start, end) bounds of one top-level shell
 // segment inside the original command string. End points to the first index
-// of the separator (or len(command) for the trailing segment).
+// of the separator (or len(command) for the trailing segment). injectAt,
+// when >= 0, is the absolute index where injected flags must go instead of
+// the segment end: the newline that opens a top-level heredoc body. Anything
+// appended after that newline would become literal heredoc text.
 type shellSegmentRange struct {
-	start int
-	end   int
+	start    int
+	end      int
+	injectAt int
+}
+
+// pendingHeredoc is a heredoc operator whose body has not started yet:
+// `<<DELIM` (or `<<-DELIM`) was seen, and the body begins at the next
+// unquoted newline.
+type pendingHeredoc struct {
+	delim     string
+	stripTabs bool
 }
 
 // splitShellSegmentsWithRanges is a position-preserving variant of
 // splitShellCommandSegments. It walks the command character by character,
-// tracks quoting and `$(...)` depth, and emits the indices of each top-level
-// segment. Unlike the existing splitter (which returns trimmed segment text)
-// this keeps original whitespace and lets callers patch segments back into
-// the source string without losing operators.
-func splitShellSegmentsWithRanges(command string) []shellSegmentRange {
+// tracks quoting, `$(...)` nesting, and heredocs, and emits the indices of
+// each top-level segment. Unlike the existing splitter (which returns trimmed
+// segment text) this keeps original whitespace and lets callers patch
+// segments back into the source string without losing operators.
+//
+// Two constructs get real modeling rather than best-effort skipping, because
+// commit messages routinely contain quote characters that would otherwise
+// corrupt the parser state:
+//
+//   - `$(...)` opens a fresh quoting context even inside `"..."` (bash
+//     semantics), restored when the subshell closes.
+//   - `<<DELIM` / `<<-DELIM` heredocs: the body — every line up to the
+//     delimiter line — is consumed opaquely. `<<<` here-strings are not
+//     heredocs and are left to normal lexing.
+//
+// ok is false when the command could not be confidently parsed (unterminated
+// heredoc or malformed heredoc delimiter); callers must then leave the
+// command untouched.
+func splitShellSegmentsWithRanges(command string) (segments []shellSegmentRange, ok bool) {
 	var (
-		ranges                  []shellSegmentRange
 		inSingle, inDouble, esc bool
-		subDepth                int
-		start                   = 0
+		// doubleStack saves inDouble at each `$(` so the enclosing quote
+		// state survives nested substitutions; its length is the depth.
+		doubleStack []bool
+		pending     []pendingHeredoc
+		start       = 0
+		injectAt    = -1
 	)
 	flush := func(endExclusive int) {
-		ranges = append(ranges, shellSegmentRange{start: start, end: endExclusive})
+		segments = append(segments, shellSegmentRange{start: start, end: endExclusive, injectAt: injectAt})
+		injectAt = -1
 	}
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
@@ -124,20 +165,85 @@ func splitShellSegmentsWithRanges(command string) []shellSegmentRange {
 				inDouble = !inDouble
 			}
 		case '(':
-			if !inSingle && !inDouble && i > 0 && command[i-1] == '$' {
-				subDepth++
+			if !inSingle && i > 0 && command[i-1] == '$' {
+				doubleStack = append(doubleStack, inDouble)
+				inDouble = false
 			}
 		case ')':
-			if !inSingle && !inDouble && subDepth > 0 {
-				subDepth--
+			if !inSingle && !inDouble && len(doubleStack) > 0 {
+				inDouble = doubleStack[len(doubleStack)-1]
+				doubleStack = doubleStack[:len(doubleStack)-1]
 			}
-		case ';', '\n':
-			if !inSingle && !inDouble && subDepth == 0 {
+		case '<':
+			if inSingle || inDouble || i+1 >= len(command) || command[i+1] != '<' {
+				break
+			}
+			if i+2 < len(command) && command[i+2] == '<' {
+				// `<<<` here-string: no body to skip.
+				i += 2
+				break
+			}
+			j := i + 2
+			stripTabs := false
+			if j < len(command) && command[j] == '-' {
+				stripTabs = true
+				j++
+			}
+			for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+				j++
+			}
+			delim, n, wordOK := lexHeredocDelimiter(command[j:])
+			if !wordOK {
+				return nil, false
+			}
+			pending = append(pending, pendingHeredoc{delim: delim, stripTabs: stripTabs})
+			i = j + n - 1
+		case ';':
+			if !inSingle && !inDouble && len(doubleStack) == 0 {
+				flush(i)
+				start = i + 1
+			}
+		case '\n':
+			if inSingle || inDouble {
+				break
+			}
+			if len(pending) > 0 {
+				// This newline opens the queued heredoc bodies. For a
+				// top-level heredoc it is also the last place a flag can
+				// legally be inserted into the command line.
+				if len(doubleStack) == 0 && injectAt < 0 {
+					injectAt = i
+				}
+				pos := i
+				for len(pending) > 0 && pos < len(command) {
+					lineStart := pos + 1
+					lineEnd := lineStart + strings.IndexByte(command[lineStart:], '\n')
+					if lineEnd < lineStart {
+						lineEnd = len(command)
+					}
+					line := command[lineStart:lineEnd]
+					if pending[0].stripTabs {
+						line = strings.TrimLeft(line, "\t")
+					}
+					if line == pending[0].delim {
+						pending = pending[1:]
+					}
+					pos = lineEnd
+				}
+				if len(pending) > 0 {
+					return nil, false
+				}
+				// Reprocess the newline that terminates the delimiter line
+				// (if any): it separates segments like a normal newline.
+				i = pos - 1
+				break
+			}
+			if len(doubleStack) == 0 {
 				flush(i)
 				start = i + 1
 			}
 		case '|':
-			if !inSingle && !inDouble && subDepth == 0 {
+			if !inSingle && !inDouble && len(doubleStack) == 0 {
 				flush(i)
 				if i+1 < len(command) && command[i+1] == '|' {
 					i++
@@ -145,17 +251,58 @@ func splitShellSegmentsWithRanges(command string) []shellSegmentRange {
 				start = i + 1
 			}
 		case '&':
-			if !inSingle && !inDouble && subDepth == 0 && i+1 < len(command) && command[i+1] == '&' {
+			if !inSingle && !inDouble && len(doubleStack) == 0 && i+1 < len(command) && command[i+1] == '&' {
 				flush(i)
 				i++
 				start = i + 1
 			}
 		}
 	}
-	if start <= len(command) {
-		ranges = append(ranges, shellSegmentRange{start: start, end: len(command)})
+	if len(pending) > 0 {
+		// `<<EOF` seen but its body never started (no newline follows).
+		return nil, false
 	}
-	return ranges
+	if start <= len(command) {
+		segments = append(segments, shellSegmentRange{start: start, end: len(command), injectAt: injectAt})
+	}
+	return segments, true
+}
+
+// lexHeredocDelimiter reads the heredoc delimiter word at the start of s,
+// stripping the shell quoting bash allows there (`'EOF'`, `"EOF"`, `\EOF`,
+// or bare, in any mix). It returns the unquoted delimiter, the number of
+// bytes consumed, and ok=false when the word is empty or a quote is left
+// unterminated.
+func lexHeredocDelimiter(s string) (delim string, n int, ok bool) {
+	var b strings.Builder
+	i := 0
+scan:
+	for i < len(s) {
+		switch ch := s[i]; ch {
+		case '\'', '"':
+			close := strings.IndexByte(s[i+1:], ch)
+			if close < 0 {
+				return "", 0, false
+			}
+			b.WriteString(s[i+1 : i+1+close])
+			i += close + 2
+		case '\\':
+			if i+1 >= len(s) {
+				return "", 0, false
+			}
+			b.WriteByte(s[i+1])
+			i += 2
+		case ' ', '\t', '\n', ';', '&', '|', '<', '>', '(', ')':
+			break scan
+		default:
+			b.WriteByte(ch)
+			i++
+		}
+	}
+	if b.Len() == 0 {
+		return "", 0, false
+	}
+	return b.String(), i, true
 }
 
 // commitSegmentNeedsTrailer returns true when `seg` invokes `git commit`
