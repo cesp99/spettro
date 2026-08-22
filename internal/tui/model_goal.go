@@ -35,6 +35,17 @@ func resolveGoalNoProgressLimit(cfg config.UserConfig) int {
 	return cfg.GoalNoProgressLimit
 }
 
+// resolveGoalIterationSteps applies the config default (25) when unset. This
+// bounds each iteration's inner tool loop so control returns to advanceGoal —
+// without it the goal preamble keeps the first iteration running forever and
+// the stall guard / iteration cap never fire.
+func resolveGoalIterationSteps(cfg config.UserConfig) int {
+	if cfg.GoalIterationSteps <= 0 {
+		return 25
+	}
+	return cfg.GoalIterationSteps
+}
+
 // resolveGoalContextWindow returns the model's context window for goal-mode
 // in-loop compaction, falling back to a provider-specific default so the
 // runtime always has a sane window.
@@ -202,7 +213,19 @@ func (m *Model) advanceGoal(msg agentDoneMsg) tea.Cmd {
 		m.goalResumeAfterCompact = true
 		return cmd
 	}
-	_, cmd := m.dispatchGoalIteration()
+	return m.dispatchNextGoalIteration()
+}
+
+// dispatchNextGoalIteration runs dispatchGoalIteration and adopts the model it
+// returns. dispatchGoalIteration (value receiver) carries its state changes —
+// m.thinking, cancel handles, the iteration banner — in the returned model;
+// discarding it left thinking=false, so the next agentDoneMsg was dropped by
+// the `!m.thinking` guard and the goal froze as "paused" after one iteration.
+func (m *Model) dispatchNextGoalIteration() tea.Cmd {
+	model, cmd := m.dispatchGoalIteration()
+	if tm, ok := model.(Model); ok {
+		*m = tm
+	}
 	return cmd
 }
 
@@ -232,15 +255,13 @@ func (m *Model) advanceGoalOnError(msg agentDoneMsg) tea.Cmd {
 		}
 		m.pushSystemMsg(fmt.Sprintf("⚠ goal iteration %d kept failing (%s) — logged and moving to the next iteration (%d/%d strikes)",
 			g.Iteration, msg.err.Error(), g.NoProgress, g.NoProgressLimit))
-		_, cmd := m.dispatchGoalIteration()
-		return cmd
+		return m.dispatchNextGoalIteration()
 	}
 	m.pushSystemMsg(fmt.Sprintf("⚠ goal iteration %d failed (retry %d/%d): %s",
 		g.Iteration, g.Retries, maxGoalRetries, msg.err.Error()))
 	// Re-dispatch the same iteration (don't increment Iteration again).
 	g.Iteration-- // dispatchGoalIteration will increment it back
-	_, cmd := m.dispatchGoalIteration()
-	return cmd
+	return m.dispatchNextGoalIteration()
 }
 
 // stopGoal abandons the active goal and cancels any in-flight run.

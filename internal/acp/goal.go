@@ -148,6 +148,7 @@ func (b *bridge) runGoalCommand(ctx context.Context, s *acpSession, cfg *config.
 			SandboxState:    b.opts.SandboxState,
 			SessionDir:      session.SessionDir(b.opts.GlobalDir, s.id),
 			GoalMode:        true,
+			MaxSteps:        goalIterationSteps(*cfg),
 			ContextWindow:   b.opts.Providers.ModelContext(cfg.ActiveProvider, cfg.ActiveModel),
 			Compact:         cfg.CompactConfig(),
 			ShellTimeoutSec: cfg.GoalShellTimeoutSec,
@@ -221,6 +222,16 @@ func goalNoProgressLimit(cfg config.UserConfig) int {
 		return 3
 	}
 	return cfg.GoalNoProgressLimit
+}
+
+// goalIterationSteps applies the config default (25) when unset. Each
+// iteration's inner tool loop is bounded so control returns to this outer
+// loop for the progress / stall / cap checks.
+func goalIterationSteps(cfg config.UserConfig) int {
+	if cfg.GoalIterationSteps <= 0 {
+		return 25
+	}
+	return cfg.GoalIterationSteps
 }
 
 // appendUnique appends s to slice only if it is not already present.

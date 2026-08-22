@@ -334,8 +334,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// loop's inter-iteration compaction, resume the loop now.
 		if m.goalResumeAfterCompact && m.activeGoal != nil && msg.err == nil {
 			m.goalResumeAfterCompact = false
-			_, cmd := m.dispatchGoalIteration()
-			if cmd != nil {
+			if cmd := m.dispatchNextGoalIteration(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
