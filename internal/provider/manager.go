@@ -296,13 +296,21 @@ func (m *Manager) ModelContext(providerName, modelName string) int {
 	return 0
 }
 
+// SupportsReasoning reports whether the thinking switcher should be offered
+// for a model. Catalog entries are authoritative. Models the catalog cannot
+// vouch for — local servers (whose /v1/models probe carries no reasoning
+// flag) and custom endpoints not in the catalog at all — get best-effort
+// true: OpenAI-compatible servers that don't know reasoning_effort ignore
+// it, and ones that reject it trigger the downgrade ladder, so offering the
+// switcher is safe and refusing it would lock out genuinely reasoning-capable
+// local models.
 func (m *Manager) SupportsReasoning(providerName, modelName string) bool {
 	for _, item := range m.Models() {
 		if item.Provider == providerName && item.Name == modelName {
-			return item.Reasoning
+			return item.Reasoning || item.Local
 		}
 	}
-	return false
+	return true
 }
 
 func (m *Manager) HasModel(providerName, modelName string) bool {
@@ -505,7 +513,10 @@ func (m *Manager) sendOnce(ctx context.Context, providerName, modelName string, 
 // stepped down until the wire value actually changes (max and x-high both
 // serialize to "xhigh", so retrying between them would waste a request).
 func (m *Manager) downgradedThinking(providerName string, level ThinkingLevel, err error) (ThinkingLevel, bool) {
-	if level == "" || level == ThinkingOff || !isThinkingLevelError(err) {
+	// An explicit "off" is on the ladder too: it sends reasoning_effort
+	// "none", and a server that rejects that value gets a retry with the
+	// parameter omitted entirely (NextLowerThinking(off) == "").
+	if level == "" || !isThinkingLevelError(err) {
 		return "", false
 	}
 	m.mu.RLock()

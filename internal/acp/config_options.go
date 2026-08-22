@@ -263,9 +263,8 @@ func (b *bridge) applyConfigOption(s *acpSession, cfg *config.UserConfig, config
 		if !provider.IsValidThinkingLevel(level) {
 			return acpsdk.NewInvalidParams(map[string]any{"error": "invalid thinking level: " + value})
 		}
-		if level == string(provider.ThinkingOff) {
-			level = ""
-		}
+		// Store "off" as-is: an explicit off actively disables reasoning on
+		// models that think by default, unlike the empty never-set default.
 		if _, err := config.Update(func(c *config.UserConfig) error {
 			c.ThinkingLevel = level
 			return nil

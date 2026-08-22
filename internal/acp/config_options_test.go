@@ -138,8 +138,8 @@ func TestApplyConfigOption_Thinking(t *testing.T) {
 	if err := b.applyConfigOption(s, &cfg, configIDThinking, "off"); err != nil {
 		t.Fatalf("apply thinking=off: %v", err)
 	}
-	if cfg.ThinkingLevel != "" {
-		t.Fatalf("expected thinking off to clear level, got %q", cfg.ThinkingLevel)
+	if cfg.ThinkingLevel != "off" {
+		t.Fatalf("expected thinking off to be stored explicitly, got %q", cfg.ThinkingLevel)
 	}
 	if err := b.applyConfigOption(s, &cfg, configIDThinking, "bogus"); err == nil {
 		t.Fatal("expected error for invalid thinking level")

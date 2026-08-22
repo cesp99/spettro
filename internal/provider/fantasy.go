@@ -259,10 +259,13 @@ func buildFantasyCall(providerName, apiKind, modelName string, req Request) fant
 	}
 	// Fantasy threads thinking config via per-provider ProviderOptions.
 	// Anthropic takes a token budget (thinking.budget_tokens); OpenAI and
-	// every OpenAI-compatible backend take a reasoning_effort enum. "off" and
-	// empty send nothing: Anthropic then defaults to no extended thinking,
-	// while OpenAI-style reasoning models keep their provider default (most
-	// of them cannot fully disable reasoning).
+	// every OpenAI-compatible backend take a reasoning_effort enum. On the
+	// Anthropic path both "off" and empty send nothing (no thinking config
+	// means extended thinking disabled). On OpenAI-style paths an explicit
+	// "off" sends reasoning_effort "none" so models that reason by default
+	// actually stop, while empty (never set) sends nothing and keeps the
+	// provider default; a server that rejects "none" is retried without the
+	// field by the manager's downgrade ladder.
 	if isAnthropicAPI(providerName, apiKind) {
 		if budget := ThinkingBudgetTokens(ThinkingLevel(req.Thinking)); budget > 0 {
 			budgetInt := int64(budget)

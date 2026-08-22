@@ -41,10 +41,13 @@ func TestThinkingCommand_SetsLevel(t *testing.T) {
 		t.Fatalf("after /thinking high, level = %q, want \"high\"", level)
 	}
 
+	// An explicit off is stored as "off", not cleared: unlike the empty
+	// never-set default it actively disables reasoning on models that
+	// think by default.
 	got, _ = m.HandleCommandForTesting("/thinking off")
 	m = got.(tui.Model)
-	if level := m.ThinkingLevelForTesting(); level != "" {
-		t.Fatalf("after /thinking off, level = %q, want \"\"", level)
+	if level := m.ThinkingLevelForTesting(); level != "off" {
+		t.Fatalf("after /thinking off, level = %q, want \"off\"", level)
 	}
 
 	// Invalid value should not change the persisted setting.

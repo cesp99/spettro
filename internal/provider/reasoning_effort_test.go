@@ -15,7 +15,7 @@ func TestReasoningEffortMapping(t *testing.T) {
 		level ThinkingLevel
 		want  string
 	}{
-		{ThinkingOff, ""},
+		{ThinkingOff, "none"},
 		{ThinkingLevel(""), ""},
 		{ThinkingLow, "low"},
 		{ThinkingMedium, "medium"},
@@ -87,6 +87,12 @@ func TestDowngradedThinkingOnEffortError(t *testing.T) {
 	if !ok || next != "" {
 		t.Errorf("groq low -> (%q, %v), want (\"\", true)", next, ok)
 	}
+	// An explicit off sends reasoning_effort "none"; a server that rejects
+	// it gets one retry with the parameter omitted entirely.
+	next, ok = m.downgradedThinking("groq", ThinkingOff, errors.New(`400: invalid value for reasoning_effort: "none"`))
+	if !ok || next != "" {
+		t.Errorf("groq off -> (%q, %v), want (\"\", true)", next, ok)
+	}
 	// Once at "" there is nothing left to try: the error surfaces.
 	if _, ok := m.downgradedThinking("groq", "", effortErr); ok {
 		t.Error("expected no retry once thinking is already empty")
@@ -97,11 +103,20 @@ func TestDowngradedThinkingOnEffortError(t *testing.T) {
 	}
 }
 
-func TestThinkingOffSendsNoEffort(t *testing.T) {
-	for _, level := range []ThinkingLevel{"", ThinkingOff} {
-		call := buildFantasyCall("openai", models.APIOpenAI, "o3", Request{Prompt: "hi", Thinking: level})
-		if len(call.ProviderOptions) != 0 {
-			t.Errorf("Thinking=%q: expected no provider options, got %v", level, call.ProviderOptions)
-		}
+func TestThinkingUnsetSendsNoEffort(t *testing.T) {
+	call := buildFantasyCall("openai", models.APIOpenAI, "o3", Request{Prompt: "hi", Thinking: ""})
+	if len(call.ProviderOptions) != 0 {
+		t.Errorf("expected no provider options for unset thinking, got %v", call.ProviderOptions)
+	}
+}
+
+func TestThinkingOffSendsEffortNone(t *testing.T) {
+	call := buildFantasyCall("openai", models.APIOpenAI, "o3", Request{Prompt: "hi", Thinking: ThinkingOff})
+	opts, ok := call.ProviderOptions[fantasyopenai.Name].(*fantasyopenai.ResponsesProviderOptions)
+	if !ok {
+		t.Fatalf("expected *openai.ResponsesProviderOptions, got %T", call.ProviderOptions[fantasyopenai.Name])
+	}
+	if opts.ReasoningEffort == nil || *opts.ReasoningEffort != fantasyopenai.ReasoningEffort("none") {
+		t.Errorf("reasoning effort = %v, want none", opts.ReasoningEffort)
 	}
 }

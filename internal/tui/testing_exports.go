@@ -161,7 +161,8 @@ func (m Model) BannerForTesting() string {
 
 // ThinkingLevelForTesting returns the persisted extended-thinking level so
 // tests can assert that /thinking <level> took effect. The value mirrors
-// UserConfig.ThinkingLevel and is empty when thinking is off (default).
+// UserConfig.ThinkingLevel: empty when never set, "off" when explicitly
+// disabled.
 func (m Model) ThinkingLevelForTesting() string {
 	return m.cfg.ThinkingLevel
 }

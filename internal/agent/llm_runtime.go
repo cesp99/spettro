@@ -444,6 +444,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 		providerName:    cfg.ProviderName,
 		modelName:       cfg.ModelName,
 		maxTokens:       cfg.MaxTokens,
+		thinkingLevel:   cfg.Thinking,
 		toolCallback:    cfg.ToolCallback,
 		checkpoint:      cfg.Checkpoint,
 		sessionDir:      cfg.SessionDir,

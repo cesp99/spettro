@@ -12,7 +12,8 @@ OpenAI-compatible backend. Models that don't reason simply ignore it.
 
 | Level | Anthropic budget tokens | OpenAI-style `reasoning_effort` |
 | --- | --- | --- |
-| `off` (default) | 0 — sent as `thinking.type=disabled` so behaviour is explicit | parameter omitted (provider default; most reasoning models cannot fully disable reasoning) |
+| `off` | 0 — sent as `thinking.type=disabled` so behaviour is explicit | `none` — sent as `reasoning_effort: "none"` so models that reason by default actually stop; a server that rejects the value gets a retry with the parameter omitted |
+| unset (never configured) | same as `off` | parameter omitted (provider default) |
 | `low` | ~2 048 | `low` |
 | `medium` | ~5 120 | `medium` |
 | `high` | ~16 384 | `high` |
@@ -29,7 +30,7 @@ across adapters and are easy to test.
 | --- | --- | --- |
 | **Anthropic** (`claude-opus-4*`, `claude-sonnet-4-5`, etc.) | `thinking.type=enabled` + `thinking.budget_tokens` | Spettro automatically bumps `max_tokens` so it stays > the budget (Anthropic rejects requests where they meet or overlap). |
 | **OpenAI** (`o3`, `o4-mini`, `gpt-5*`, …) | `reasoning.effort` (Responses API) / `reasoning_effort` (chat) | Only forwarded to models OpenAI marks as reasoning-capable, so setting a level does not break non-reasoning models like `gpt-4o`. |
-| **OpenAI-compatible** (Groq, xAI, DeepSeek, Google's compat endpoint, Spettro Subscription, local Ollama/LM Studio, …) | `reasoning_effort` on chat completions | Sent whenever a non-off level is set; servers that don't know the parameter ignore it. |
+| **OpenAI-compatible** (Groq, xAI, DeepSeek, Google's compat endpoint, Spettro Subscription, local Ollama/LM Studio, …) | `reasoning_effort` on chat completions | Sent for every explicit level — `off` sends `none`, so reasoning-capable models can be disabled. Servers that don't know the parameter ignore it; only the unset default (never configured) omits it. |
 
 Whether a model reasons at all comes from the catalog's `reasoning` flag
 (`"reasoning": true` on the model entry), and the Spettro Subscription's
@@ -44,11 +45,12 @@ ACP Thinking selector is the exception: it is always present (showing
 If a model rejects the requested level (an effort value it doesn't define,
 or a thinking budget above its cap), Spettro does not surface the error —
 it silently retries one level lower (`max` → `x-high` → `high` → `medium`
-→ `low` → off) until the request goes through, so the run keeps its
+→ `low` → `off`) until the request goes through, so the run keeps its
 continuity. On the `reasoning_effort` wire format, levels that serialize to
 the same value are skipped (e.g. `max` and `x-high` are both `xhigh`, so
-`max` falls straight to `high`). The persisted setting is untouched: only
-the failing request is downgraded.
+`max` falls straight to `high`). An `off` that a server rejects (it doesn't
+know the `none` effort) is retried with the parameter omitted entirely.
+The persisted setting is untouched: only the failing request is downgraded.
 
 ## Slash commands
 
