@@ -47,6 +47,8 @@ var allCommands = []commandDef{
 	{"/tg", "alias of /telegram"},
 	{"/think", "set extended-thinking level (alias of /thinking)"},
 	{"/ultra", "toggle Ultra: fan hard tasks out across a swarm of parallel sub-agents"},
+	{"/workflows", "list, show, and run saved multi-agent workflow scripts"},
+	{"/workflows run", "run a saved workflow by name (optionally with JSON args)"},
 	{"/jobs", "list background shell jobs"},
 	{"/jobs kill", "kill a background job by ID (or all)"},
 	{"/stats", "show session token usage and prompt-cache metrics"},
@@ -218,6 +220,17 @@ func isInstantCommand(input string) bool {
 		"/update",
 		"/exit", "/quit":
 		return true
+	case "/workflow", "/workflows":
+		// Listing, showing and locating saved workflows is local display
+		// state; "run" dispatches an LLM turn and so is not instant.
+		if len(fields) == 1 {
+			return true
+		}
+		switch strings.ToLower(fields[1]) {
+		case "run", "start":
+			return false
+		}
+		return true
 	case "/plan":
 		// /plan with no args just switches mode; /plan <task> launches the plan agent.
 		return len(fields) == 1
@@ -263,6 +276,8 @@ const helpText = `commands:
   /think <l>     set extended-thinking level (off|low|medium|high|x-high|max)
   /thinking <l>  alias of /think
   /ultra [on|off] toggle Ultra: swarm of parallel sub-agents for hard tasks (any model)
+  /workflows     list, show, or run saved workflow scripts ("ultracode" in a
+                 message gives the agent the workflow tool for that turn)
   /approve       approve and execute pending plan (coding mode)
   /plan [prompt] switch to plan mode or run a plan request
   /goal <obj>   run autonomously until the objective is met

@@ -62,12 +62,19 @@ func TestSidePanelSwarmLines_RendersMembers(t *testing.T) {
 	m.applyToolTraceToObservability(agent.ToolTrace{AgentID: "code#1", Name: "file-read", Status: "running", Args: `{"path":"a.go"}`})
 
 	lines := m.sidePanelSwarmLines(48)
-	if len(lines) != 3 {
-		t.Fatalf("want header + 2 members, got %d: %v", len(lines), lines)
+	if len(lines) != 4 {
+		t.Fatalf("want header + meter + 2 members, got %d: %v", len(lines), lines)
 	}
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "1 running · 0 done · 1 failed") {
 		t.Fatalf("bad header: %s", lines[0])
+	}
+	if !strings.Contains(joined, "ultra swarm · code") {
+		t.Fatalf("header should name the swarm and its agent type: %s", lines[0])
+	}
+	// The meter counts a failure as finished work, not as still running.
+	if !strings.Contains(lines[1], "1/2") {
+		t.Fatalf("bad progress meter: %s", lines[1])
 	}
 	if !strings.Contains(joined, "code#1") || !strings.Contains(joined, "code#2") {
 		t.Fatalf("missing member names: %s", joined)

@@ -534,15 +534,31 @@ func renderGlare(text string, frame int, agentColor color.Color) string {
 	return sb.String()
 }
 
+// renderParallelAgents draws everything that sits between the transcript and
+// the input: the workflow tree, the Ultra swarm, ordinary delegations, and the
+// todo list. Swarms and workflows get their own bordered blocks — a fan-out of
+// twenty agents mixed into the plain delegation list was unreadable, and the
+// two are different enough that sharing one flat list helped nobody.
 func (m Model) renderParallelAgents() string {
+	paneW := m.paneWidth()
+	var blocks []string
+	if block := m.renderWorkflowBlock(paneW); block != "" {
+		blocks = append(blocks, block)
+	}
+	if block := m.renderSwarmBlock(paneW); block != "" {
+		blocks = append(blocks, block)
+	}
+
 	active := make([]parallelAgentEntry, 0, len(m.parallelAgents))
 	for _, a := range m.parallelAgents {
-		if a.Status == "running" {
+		// Swarm members have their own block above; listing them here too
+		// would double every row of a fan-out.
+		if a.Status == "running" && a.Kind != "swarm" {
 			active = append(active, a)
 		}
 	}
 	if len(active) == 0 && len(m.todos) == 0 {
-		return ""
+		return strings.Join(blocks, "\n")
 	}
 	var lines []string
 	if len(active) > 0 {
@@ -624,7 +640,10 @@ func (m Model) renderParallelAgents() string {
 			lines = append(lines, line)
 		}
 	}
-	return strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+	return strings.Join(blocks, "\n")
 }
 
 func (m Model) contextWindow() int {

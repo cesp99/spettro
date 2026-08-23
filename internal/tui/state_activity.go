@@ -27,8 +27,18 @@ func (m *Model) applyToolTraceToObservability(t agent.ToolTrace) {
 		m.recordApprovalTrace(t)
 		return
 	}
+	// Workflow lifecycle and progress traces drive the workflow panel only;
+	// they carry no tool output worth an activity row of their own.
+	if m.applyWorkflowTrace(t.Name, t.Args, t.Output, t.Status) {
+		return
+	}
 	m.recordToolActivity(t)
 	if t.Name != "agent" {
+		return
+	}
+	// A workflow member is tracked by phase in the workflow panel instead of
+	// as a loose parallel agent.
+	if m.applyWorkflowAgentTrace(t.Args, t.Output, t.Status) {
 		return
 	}
 	var args struct {
@@ -186,6 +196,10 @@ func summarizeAgentToolOutput(output string) string {
 }
 
 func (m *Model) startAgentActivity(agentID, task string) {
+	// A finished workflow's tree survives the turn that produced it — the run
+	// summary is worth reading after the agent has replied — and is cleared
+	// here, when the next turn begins.
+	m.workflow = nil
 	m.ensureSession()
 	m.currentRunKey = fmt.Sprintf("run:%s:%d", agentID, time.Now().UnixNano())
 	m.upsertActivity(activityItem{
