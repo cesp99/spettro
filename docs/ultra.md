@@ -121,16 +121,20 @@ Every swarm member gets a **distinct instance name** — `code#1`,
 `code#2`, … in item order — and every tool trace it emits carries that
 name, so its activity is attributable end to end:
 
-- **TUI transcript** — running members appear under the `agents` block
-  with their instance name and assigned item.
-- **`ctrl+b` activity panel** — a dedicated **swarm** section lists every
-  member with a live status (`▶` running, `✓` done, `✗` failed), a
-  `N running · N done · N failed` header, and what each agent is doing
-  right now (its latest tool call, falling back to its assigned item).
-  Completed and failed members stay listed until the next turn, so you
-  always see the whole fan-out. The activity list below groups tool
-  calls per instance name. A banner reminds you of `ctrl+b` when a
-  swarm starts with the panel hidden.
+- **TUI transcript** — the swarm renders as its own bordered block,
+  separate from ordinary delegations, headed by the agent type and a
+  `N running · N done · N failed` count with a progress meter. Failures
+  count as finished work, drawn red, so a struggling swarm reads as one
+  at a glance. Every member stays listed with its outcome (`▶` running,
+  `✓` done, `✗` failed) and shows what it is doing *right now* — its
+  latest tool call, falling back to the item it was assigned. A fan-out
+  wider than ten members is capped in the transcript block, keeping
+  running members in preference to finished ones, so a swarm can never
+  push the conversation off screen; the full list is one `ctrl+b` away.
+- **`ctrl+b` activity panel** — the same swarm section, uncapped, above
+  the activity list (which groups tool calls per instance name). A
+  banner reminds you of `ctrl+b` when a swarm starts with the panel
+  hidden.
 - **ACP editors** — each member's lifecycle arrives as an
   `agent code#3: <item>` tool call, and its individual tool calls are
   prefixed `[code#3] …`, so editors show which agent is doing what.
@@ -148,3 +152,8 @@ the right choice.
 
 Note that a swarm multiplies token usage — every sub-agent is a full
 agent run on the active model.
+
+For work whose *structure* matters — verify each finding as it lands,
+score three competing designs against each other, sweep until two rounds
+turn up nothing new — see [Workflows](workflows.md), which replaces the
+single fan-out with a script the model writes.

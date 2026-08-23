@@ -86,6 +86,15 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   to the client as an ACP `plan` update in dependency order, so editors with
   plan support render the agent's live todo list; tasks gated by incomplete
   dependencies are suffixed with "(blocked)".
+- **Workflows** — a [workflow](workflows.md) run (any message containing
+  `ultracode`) opens a single `workflow <name>` tool call whose content is
+  rewritten as the run progresses: declared phases appear immediately as
+  pending, fill in as agents land under them, and carry per-phase
+  done/failed counts plus the script's `log()` lines. Each sub-agent
+  additionally gets its own tool call, so "follow the agent" navigation
+  still works. Phases are deliberately *not* published as ACP plan
+  entries — that channel belongs to the session task graph, and a
+  workflow would silently clobber it.
 - **Permissions** — shell command approvals are routed through
   `session/request_permission`, so the editor shows its native approval
   prompt. With `/permission yolo` set in Spettro's config, shell commands run
@@ -94,7 +103,7 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   the client as a structured payload; see [Agent questions](#agent-questions)
   below for the transports, the payload, and the answer shape.
 - **Commands** — `/help`, `/mode`, `/models`, `/permission`, `/budget`,
-  `/thinking`, `/goal`, `/loop`, `/memory`, `/compact`, and `/clear` are advertised to
+  `/thinking`, `/goal`, `/loop`, `/memory`, `/compact`, `/workflows`, and `/clear` are advertised to
   the client (`available_commands_update`). Config commands resolve in one
   turn without invoking the model; `/models` with no argument lists the
   connected models, and `/models provider:model [api_key]` switches the
@@ -105,7 +114,10 @@ Then open the Agent Panel and pick *Spettro* as the agent.
   `/goal <objective>` runs the autonomous goal loop inside the prompt turn
   — cancel the turn to stop it. `/loop <time> <prompt>` re-runs the prompt on
   the given interval inside the prompt turn the same way; `/loop stop` or the
-  editor's cancel ends it. Anything else needing a TUI dialog
+  editor's cancel ends it. `/workflows` lists, shows, and locates saved
+  [workflow](workflows.md) scripts inline; `/workflows run <name> [json]`
+  is rewritten into an ordinary turn that invokes that script. Anything
+  else needing a TUI dialog
   (`/skill`, `/mcp`, ...) is not available over ACP yet. `/resume` is
   intentionally not advertised: the editor's own session picker drives
   `session/load` instead (see below).

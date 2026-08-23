@@ -27,6 +27,7 @@
 - [Telegram relay](telegram.md)
 - [Extended thinking levels](thinking.md)
 - [Ultra mode (agent swarm)](ultra.md) — `/ultra`, parallel sub-agent fan-out for hard tasks
+- [Workflows](workflows.md) — `ultracode`, deterministic multi-agent orchestration scripts
 - [Troubleshooting](troubleshooting.md)
 - [Agent Manifest](../AGENTS.md)
 - [Agent Prompts](../agents/README.md)

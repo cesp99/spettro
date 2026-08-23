@@ -107,6 +107,28 @@ type Result struct {
 	Phases []string
 }
 
+// Validate parses a script's header and compiles its body without running
+// anything. Hosts use it to reject a broken saved workflow at listing time
+// rather than after the first agent has already been paid for.
+func Validate(script string) (Meta, error) {
+	meta, err := ParseMeta(script)
+	if err != nil {
+		return Meta{}, err
+	}
+	if _, err := compileScript(meta.Name, script); err != nil {
+		return meta, err
+	}
+	return meta, nil
+}
+
+// compileScript wraps the body in an async IIFE so scripts get top-level
+// await and a top-level return. The opening brace shares line 1 with the
+// script's first line, so reported error line numbers match what the author
+// wrote.
+func compileScript(name, script string) (*goja.Program, error) {
+	return goja.Compile(name+".workflow.js", "(async function(){"+stripMetaExport(script)+"\n})()", true)
+}
+
 // Run executes a workflow script to completion.
 func Run(ctx context.Context, script string, opts Options) (Result, error) {
 	opts = opts.withDefaults()
@@ -252,11 +274,7 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	}
 	s.emit(Event{Kind: EventStart, Message: meta.Name, Nested: r.nested})
 
-	// The body runs as an async function so scripts get top-level await and a
-	// top-level return, exactly as authored. The opening brace shares line 1
-	// with the script's first line so reported error line numbers still match
-	// what the model wrote.
-	program, err := goja.Compile(meta.Name+".workflow.js", "(async function(){"+stripMetaExport(script)+"\n})()", true)
+	program, err := compileScript(meta.Name, script)
 	if err != nil {
 		return nil, meta, fmt.Errorf("workflow %q: script does not parse: %w", meta.Name, err)
 	}

@@ -62,10 +62,13 @@ func Discover(cwd string) []Saved {
 			seen[name] = true
 			path := filepath.Join(dir, e.Name())
 			s := Saved{Name: name, Path: path, Scope: scope}
+			// Validate, not just ParseMeta: a listing that shows a script as
+			// runnable when its body does not compile sends the user into a
+			// failure they could have been told about here.
 			if data, err := os.ReadFile(path); err != nil {
 				s.Err = err
-			} else if meta, err := ParseMeta(string(data)); err != nil {
-				s.Err = err
+			} else if meta, err := Validate(string(data)); err != nil {
+				s.Meta, s.Err = meta, err
 			} else {
 				s.Meta = meta
 			}
