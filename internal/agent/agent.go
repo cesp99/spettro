@@ -157,7 +157,11 @@ type LLMAgent struct {
 	// swarm guidance so the agent decomposes hard tasks across many parallel
 	// sub-agents. Read once at run construction (the system prompt must stay
 	// byte-stable per run); ignored on sub-agents.
-	Ultra         bool
+	Ultra bool
+	// Workflows forces the workflow tool on for this run. Hosts normally leave
+	// it false and let the "ultracode" keyword in the task turn it on;
+	// ignored on sub-agents, which never orchestrate.
+	Workflows     bool
 	RequiredReads []string
 	Images        []string // attached to this turn's user message (re-sent every step)
 	// History is an optional bounded transcript of prior conversation turns,
@@ -221,6 +225,32 @@ type LLMAgent struct {
 	Steering *SteeringQueue
 }
 
+// fanOutTools grants the orchestration tools a run is entitled to and returns
+// the guidance to append to its system prompt.
+//
+// Both tools bypass the manifest's PrimaryOnly/handoff gating by design — any
+// top-level agent on any model may fan out — and neither is ever granted to a
+// sub-agent, which is what stops a swarm from spawning swarms.
+func fanOutTools(allowed []string, ultra, workflows bool, depth int) ([]string, string) {
+	if depth != 0 {
+		return allowed, ""
+	}
+	prompt := ""
+	if ultra {
+		if !slices.Contains(allowed, ultraToolID) {
+			allowed = append(allowed, ultraToolID)
+		}
+		prompt += ultraPromptSection
+	}
+	if workflows {
+		if !slices.Contains(allowed, workflowToolID) {
+			allowed = append(allowed, workflowToolID)
+		}
+		prompt += workflowPromptSection
+	}
+	return allowed, prompt
+}
+
 func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	task = strings.TrimSpace(task)
 	if task == "" {
@@ -232,15 +262,13 @@ func (a LLMAgent) Run(ctx context.Context, task string) (RunResult, error) {
 	// system prompt byte-stable across every turn of the session.
 	systemPrompt += memory.SessionContext(a.CWD)
 	allowedTools, policies := resolveToolPolicies(a.Spec, a.Manifest)
-	if a.Ultra && a.DelegationDepth == 0 {
-		// Ultra bypasses role/handoff gating by design: any top-level agent on
-		// any model can fan out. Sub-agents never inherit the tool.
-		hasUltra := slices.Contains(allowedTools, ultraToolID)
-		if !hasUltra {
-			allowedTools = append(allowedTools, ultraToolID)
-		}
-		systemPrompt += ultraPromptSection
-	}
+	var fanOutPrompt string
+	// Workflows are a per-turn opt-in: the user writes the keyword in their
+	// message, or a host sets the flag. Detection lives in the runner so every
+	// surface (TUI, ACP, goal, Telegram, headless) honours the keyword without
+	// each one re-implementing it.
+	allowedTools, fanOutPrompt = fanOutTools(allowedTools, a.Ultra, a.Workflows || WorkflowRequested(task), a.DelegationDepth)
+	systemPrompt += fanOutPrompt
 	logToolCalls := true
 	maxWorkers := 4
 	maxDelegationDepth := 2
