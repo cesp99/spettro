@@ -40,6 +40,7 @@ func TestJournalResumeReplaysUnchangedCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open journal: %v", err)
 	}
+	defer j2.Close()
 	if err := j2.LoadCache(first); err != nil {
 		t.Fatalf("load cache: %v", err)
 	}
@@ -80,6 +81,7 @@ func TestJournalDoesNotCacheFailures(t *testing.T) {
 	_ = j1.Close()
 
 	j2, _ := OpenJournal(filepath.Join(dir, "run-2"))
+	defer j2.Close()
 	if err := j2.LoadCache(first); err != nil {
 		t.Fatalf("load cache: %v", err)
 	}
@@ -105,6 +107,7 @@ func TestJournalReplaysIdenticalPromptsIndependently(t *testing.T) {
 	_ = j1.Close()
 
 	j2, _ := OpenJournal(filepath.Join(dir, "run-2"))
+	defer j2.Close()
 	_ = j2.LoadCache(first)
 	r2 := echoRunner(0)
 	res, err := Run(context.Background(), script, Options{Runner: r2, Journal: j2})
@@ -121,6 +124,7 @@ func TestJournalReplaysIdenticalPromptsIndependently(t *testing.T) {
 
 func TestJournalMissingPriorRunIsNotAnError(t *testing.T) {
 	j, _ := OpenJournal(filepath.Join(t.TempDir(), "run"))
+	defer j.Close()
 	if err := j.LoadCache(filepath.Join(t.TempDir(), "nope")); err != nil {
 		t.Fatalf("a missing prior run must be tolerated: %v", err)
 	}

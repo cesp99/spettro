@@ -75,8 +75,14 @@ func workspaceGit(ctx context.Context, dir string, args ...string) (string, erro
 //
 // It is a fallback, not an override: when the user has an identity, their
 // merge commits stay theirs.
+//
+// The probe asks for a *configured* identity (user.useConfigOnly), not any
+// identity git is willing to invent. Left to itself git guesses one from the
+// account's gecos name and hostname, which is how a CI merge commit ends up
+// authored by "Anka <runner@Mac-1.local>" — a name that belongs to the machine,
+// not to anyone. Guessable is not the same as configured.
 func gitIdentityArgs(ctx context.Context, dir string) []string {
-	if _, err := workspaceGit(ctx, dir, "var", "GIT_COMMITTER_IDENT"); err == nil {
+	if _, err := workspaceGit(ctx, dir, "-c", "user.useConfigOnly=true", "var", "GIT_COMMITTER_IDENT"); err == nil {
 		return nil
 	}
 	return []string{"-c", "user.name=" + spettroCommitName, "-c", "user.email=" + spettroCommitEmail}
