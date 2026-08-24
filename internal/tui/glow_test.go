@@ -196,3 +196,21 @@ func TestRGBHex(t *testing.T) {
 		}
 	}
 }
+
+// The input lights up a plain-English request the same way it lights the
+// keyword, because both activate the tool.
+func TestHighlightUltracodeLightsPlainEnglishRequests(t *testing.T) {
+	lit := highlightUltracode("please use a workflow for this", 0)
+	if lit == "please use a workflow for this" {
+		t.Fatal("a plain-English request was not highlighted")
+	}
+	if stripANSIForTest(lit) != "please use a workflow for this" {
+		t.Fatalf("visible text changed: %q", stripANSIForTest(lit))
+	}
+	// An ordinary mention of the word stays plain, matching the runtime.
+	for _, in := range []string{"our deploy workflow is broken", "fix .github/workflows/ci.yml"} {
+		if got := highlightUltracode(in, 0); got != in {
+			t.Fatalf("%q should not light up: %q", in, got)
+		}
+	}
+}

@@ -9,12 +9,13 @@ import (
 	"spettro/internal/agent"
 )
 
-// Typing the workflow keyword lights it up in the input box. The point is not
-// decoration: "ultracode" silently changes what the next turn can do, and a
-// word that looks like every other word gives no sign of that. Lighting it
-// exactly when — and only when — it will actually activate makes the input
-// tell the truth about the mode the run is about to enter, which is why the
-// match comes from agent.WorkflowKeywordSpans rather than a local strings.Contains.
+// Asking for a workflow lights the phrase up in the input box. The point is
+// not decoration: "ultracode" — or "use a workflow to …" — silently changes
+// what the next turn can do, and a phrase that looks like every other phrase
+// gives no sign of that. Lighting it exactly when, and only when, it will
+// actually activate makes the input tell the truth about the mode the run is
+// about to enter, which is why the match comes from
+// agent.WorkflowActivationSpans rather than a local strings.Contains.
 
 // ultracodeRamp is the colour the shimmer travels through: violet into
 // magenta into cyan, looping. Sampled as a continuous gradient, not as
@@ -185,7 +186,14 @@ func decodeFirstRune(s string) (rune, int) {
 // already-rendered text, leaving every other byte — including the cursor cell
 // — exactly as it was.
 func highlightUltracode(rendered string, frame int) string {
-	if rendered == "" || !strings.Contains(strings.ToLower(rendered), agent.WorkflowKeyword) {
+	if rendered == "" {
+		return rendered
+	}
+	// Cheap gate before tokenising: every activating phrase contains one of
+	// these, so a line with none of them cannot match.
+	lower := strings.ToLower(rendered)
+	if !strings.Contains(lower, agent.WorkflowKeyword) && !strings.Contains(lower, "workflow") &&
+		!strings.Contains(lower, "agent") {
 		return rendered
 	}
 	tokens := tokenizeANSI(rendered)
@@ -198,7 +206,7 @@ func highlightUltracode(rendered string, frame int) string {
 			runeToken = append(runeToken, i)
 		}
 	}
-	spans := agent.WorkflowKeywordSpans(string(plain))
+	spans := agent.WorkflowActivationSpans(string(plain))
 	if len(spans) == 0 {
 		return rendered
 	}
@@ -206,6 +214,7 @@ func highlightUltracode(rendered string, frame int) string {
 	// Style each occurrence from its own runes, not from the keyword constant:
 	// the match is case-insensitive, so "ULTRACODE" must come back shouting.
 	lit := make(map[int]string, len(spans)*len(agent.WorkflowKeyword))
+
 	for _, sp := range spans {
 		if sp[1] > len(runeToken) {
 			continue

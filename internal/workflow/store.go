@@ -79,14 +79,58 @@ func Discover(cwd string) []Saved {
 	return out
 }
 
+// Save writes a script to the saved-workflow folder so it can be re-run by
+// name. scope is "global" for ~/.spettro/workflows, anything else for the
+// project's own folder.
+//
+// The script is validated first: a saved workflow that does not compile is a
+// trap for whoever runs it next, and the failure would surface far from
+// whoever wrote it.
+func Save(cwd, name, scope, script string) (string, error) {
+	name = strings.TrimSpace(name)
+	if err := validName(name); err != nil {
+		return "", err
+	}
+	if _, err := Validate(script); err != nil {
+		return "", fmt.Errorf("refusing to save %q: %w", name, err)
+	}
+	paths := SearchPaths(cwd)
+	if len(paths) == 0 {
+		return "", fmt.Errorf("no workflow directory available")
+	}
+	dir := paths[0]
+	if scope == "global" {
+		home, err := homedir.Dir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home: %w", err)
+		}
+		dir = filepath.Join(home, ".spettro", SavedWorkflowsDir)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, name+".js")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return path, nil
+}
+
+func validName(name string) error {
+	if name == "" {
+		return fmt.Errorf("workflow name is required")
+	}
+	if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return fmt.Errorf("invalid workflow name %q", name)
+	}
+	return nil
+}
+
 // Load reads a saved workflow's script by name.
 func Load(cwd, name string) (string, string, error) {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", "", fmt.Errorf("workflow name is required")
-	}
-	if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
-		return "", "", fmt.Errorf("invalid workflow name %q", name)
+	if err := validName(name); err != nil {
+		return "", "", err
 	}
 	for _, dir := range SearchPaths(cwd) {
 		path := filepath.Join(dir, name+".js")

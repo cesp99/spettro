@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,31 +42,98 @@ const (
 	workflowMaxAttempts = 3
 )
 
-// WorkflowKeyword is the word a user writes to opt a turn into workflows.
+// WorkflowKeyword is the shorthand a user writes to opt a turn into
+// workflows. Asking for one in plain English works too — see
+// workflowActivationRes.
 const WorkflowKeyword = workflowKeyword
 
-// workflowKeywordRe matches the activation keyword as a whole word, so
-// "ultracode" in prose turns workflows on but "ultracoded" does not.
-var workflowKeywordRe = regexp.MustCompile(`(?i)\b` + workflowKeyword + `\b`)
+// workflowActivationRes are the ways a user turns workflows on for a turn.
+//
+// The keyword is the shorthand, not the only door: "use a workflow to
+// modernise these handlers" is an unmistakable request for orchestration, and
+// making people learn a magic word to get it would be a worse tool. Every
+// pattern here has to be a phrase that only makes sense as a request for this
+// feature — "our deploy workflow" and ".github/workflows" must stay quiet.
+//
+// A false positive costs a couple of kilobytes of system prompt and nothing
+// else: the tool is offered, not invoked, and the model is told to ignore it
+// when the work does not need it. A false negative costs the user the
+// feature. The patterns lean accordingly.
+var workflowActivationRes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b` + workflowKeyword + `\b`),
+	// "use a workflow", "write a multi-agent workflow", "set up a workflow".
+	// An indefinite article only: "run the workflow" almost always means a CI
+	// job or an already-named saved script, and /workflows run covers the
+	// latter by rewriting the prompt with the keyword in it.
+	regexp.MustCompile(`(?i)\b(?:use|using|run|write|author|make|create|build|set ?up|start|launch|kick off|do this as|do it as)\s+(?:a|an|another)\s+(?:new\s+)?(?:multi[- ]?agent\s+|orchestration\s+)?workflow\b`),
+	// "with workflows", "via workflows"
+	regexp.MustCompile(`(?i)\b(?:use|using|run|with|via)\s+workflows\b`),
+	// an explicit reference to the tool itself
+	regexp.MustCompile(`(?i)\bworkflow tool\b`),
+	// "fan this out across sub-agents"
+	regexp.MustCompile(`(?i)\bfan\s+(?:this|that|it|them|the \w+)?\s*out\s+(?:across|over|to|into)\s+(?:\w+\s+){0,2}(?:sub-?)?agents?\b`),
+	// "orchestrate this with subagents"
+	regexp.MustCompile(`(?i)\borchestrate\s+(?:\w+\s+){0,3}(?:with|using|across|over)\s+(?:\w+\s+){0,2}(?:sub-?)?agents?\b`),
+	// "multi-agent orchestration"
+	regexp.MustCompile(`(?i)\bmulti[- ]?agent\s+(?:orchestration|workflow|pipeline|run)\b`),
+}
+
+// WorkflowPreapproved reports whether the user granted the keyword itself,
+// which counts as consent to spend on a run.
+//
+// Asking for "a workflow" in plain English is a request; typing the keyword is
+// a standing yes. The difference decides whether the tool confirms before it
+// starts spawning agents, so it is kept distinct from WorkflowRequested rather
+// than folded into it.
+func WorkflowPreapproved(task string) bool {
+	return workflowActivationRes[0].MatchString(task)
+}
 
 // WorkflowRequested reports whether a user message opts this turn into
 // workflows. Detection lives here rather than in each host so the TUI, ACP,
-// goal runs, Telegram and headless mode all honour the keyword identically.
+// goal runs, Telegram and headless mode all honour it identically.
 func WorkflowRequested(task string) bool {
-	return len(WorkflowKeywordSpans(task)) > 0
+	return len(WorkflowActivationSpans(task)) > 0
 }
 
-// WorkflowKeywordSpans returns the [start, end) rune ranges of every
-// occurrence of the keyword that actually activates workflows.
+// WorkflowActivationSpans returns the [start, end) rune ranges of every phrase
+// in task that turns workflows on, ordered and non-overlapping.
 //
-// It exists so the TUI can light the word up as you type it and be right:
-// highlighting is driven by the same match that decides whether the tool gets
-// injected, so the input can never promise a mode the run will not enter.
-func WorkflowKeywordSpans(task string) [][2]int {
-	matches := workflowKeywordRe.FindAllStringIndex(task, -1)
-	if len(matches) == 0 {
+// It exists so the TUI can light those words up as they are typed and be
+// right: the highlight is driven by the same match that decides whether the
+// tool gets injected, so the input can never promise a mode the run will not
+// enter.
+func WorkflowActivationSpans(task string) [][2]int {
+	var byteSpans [][2]int
+	for _, re := range workflowActivationRes {
+		for _, m := range re.FindAllStringIndex(task, -1) {
+			byteSpans = append(byteSpans, [2]int{m[0], m[1]})
+		}
+	}
+	if len(byteSpans) == 0 {
 		return nil
 	}
+	sort.Slice(byteSpans, func(i, j int) bool {
+		if byteSpans[i][0] != byteSpans[j][0] {
+			return byteSpans[i][0] < byteSpans[j][0]
+		}
+		return byteSpans[i][1] > byteSpans[j][1]
+	})
+	// Patterns overlap by design ("use a workflow" and "workflow tool" both
+	// match "use a workflow tool"), and a renderer handed overlapping ranges
+	// would style the same cell twice.
+	merged := byteSpans[:1]
+	for _, sp := range byteSpans[1:] {
+		last := &merged[len(merged)-1]
+		if sp[0] <= last[1] {
+			if sp[1] > last[1] {
+				last[1] = sp[1]
+			}
+			continue
+		}
+		merged = append(merged, sp)
+	}
+
 	// Byte offsets are useless to a renderer that works in cells; convert
 	// them once here rather than making every caller redo it.
 	runeAt := make(map[int]int, len(task)+1)
@@ -75,8 +144,8 @@ func WorkflowKeywordSpans(task string) [][2]int {
 	}
 	runeAt[len(task)] = idx
 
-	spans := make([][2]int, 0, len(matches))
-	for _, m := range matches {
+	spans := make([][2]int, 0, len(merged))
+	for _, m := range merged {
 		start, ok1 := runeAt[m[0]]
 		end, ok2 := runeAt[m[1]]
 		if ok1 && ok2 {
@@ -91,9 +160,19 @@ func WorkflowKeywordSpans(task string) [][2]int {
 // the prompt-cache prefix byte-stable.
 const workflowPromptSection = `
 
-WORKFLOWS are active for this turn (the user wrote "ultracode"). You have the workflow tool: it runs a JavaScript orchestration script you write, so the control flow around your sub-agents is deterministic instead of re-decided by you every step.
+WORKFLOWS are available this turn: the user asked for one, either with the word "ultracode" or in their own words. You have the workflow tool, which runs a JavaScript orchestration script you write, so the control flow around your sub-agents is deterministic instead of re-decided by you every step.
+
+Availability is not an instruction to use it. Judge the task: if it is a single edit, a question, a quick fix, or anything you would finish in a few tool calls, just do the work and do not mention the tool. A workflow multiplies token usage — every agent() call is a full agent run — so it has to earn that.
 
 Use it when the work has structure worth encoding — fan out and verify, several independent attempts judged against each other, a sweep that loops until it stops finding things, a migration over a discovered work-list. For a single delegation use the agent tool; for a flat fan-out of one template over N items, ultra is still the simpler choice.
+
+If the user explicitly asked for a workflow and the task genuinely does not warrant one, do the work directly and say in one line why a script would not have helped. Do not manufacture phases to look busy.
+
+There may be no saved workflow for what the user wants, and that is the normal case: write one. Check what exists first if it is plausible one does (the name would be in .spettro/workflows), otherwise author the script yourself from the shape of the task.
+
+When the script is worth keeping — the user will plainly want it again, or they asked for a reusable one — set save_as so it lands in .spettro/workflows and can be re-run by name later. Do not save one-off scripts; a folder of near-duplicates is worse than none.
+
+Unless the user wrote "ultracode", Spettro asks them to confirm before the run starts, and they may choose to keep the script without running it. That is theirs to decide: if they decline, do not run it anyway and do not re-propose it — do the work directly.
 
 Scout inline first (list the files, scope the diff, find the call sites), then hand the discovered work-list to a script. You stay in the loop between workflows: read each result and decide the next phase yourself.
 
@@ -129,6 +208,8 @@ type workflowArgs struct {
 	ResumeFromRunID string          `json:"resume_from_run_id"`
 	MaxConcurrency  int             `json:"max_concurrency"`
 	BudgetTokens    int             `json:"budget_tokens"`
+	SaveAs          string          `json:"save_as"`
+	SaveScope       string          `json:"save_scope"`
 }
 
 // runWorkflow is the workflow tool: resolve the script, run it, and hand the
@@ -159,6 +240,37 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 		return "", fmt.Errorf("workflow: %w", err)
 	}
 
+	var scriptArgs any
+	if len(args.Args) > 0 {
+		if err := json.Unmarshal(args.Args, &scriptArgs); err != nil {
+			return "", fmt.Errorf("workflow: args is not valid JSON: %w", err)
+		}
+	}
+
+	// Consent comes before anything is written or spent. Typing the keyword is
+	// a standing yes; anything else — a plain English "use a workflow", or the
+	// model reaching for one on its own — has to clear a run this expensive
+	// with the person paying for it.
+	decision := r.confirmWorkflow(ctx, meta, args)
+	if decision != workflowRun && decision != workflowSaveOnly {
+		return "", fmt.Errorf("workflow: the user declined to run %q", meta.Name)
+	}
+	saveName := strings.TrimSpace(args.SaveAs)
+	if saveName == "" && decision == workflowSaveOnly {
+		saveName = meta.Name
+	}
+	savedAt := ""
+	if saveName != "" {
+		path, err := workflow.Save(r.cwd, saveName, args.SaveScope, script)
+		if err != nil {
+			return "", fmt.Errorf("workflow: %w", err)
+		}
+		savedAt = path
+	}
+	if decision == workflowSaveOnly {
+		return renderWorkflowSaved(meta, savedAt), nil
+	}
+
 	runID := newWorkflowRunID()
 	journal, jerr := workflow.OpenJournal(r.workflowRunDir(runID))
 	if jerr != nil {
@@ -179,13 +291,6 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 			if err := journal.LoadCache(prior); err != nil {
 				return "", fmt.Errorf("workflow: resume from %s: %w", args.ResumeFromRunID, err)
 			}
-		}
-	}
-
-	var scriptArgs any
-	if len(args.Args) > 0 {
-		if err := json.Unmarshal(args.Args, &scriptArgs); err != nil {
-			return "", fmt.Errorf("workflow: args is not valid JSON: %w", err)
 		}
 	}
 
@@ -216,7 +321,87 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 	if runErr != nil {
 		return "", fmt.Errorf("%w (run %s; transcript at %s)", runErr, runID, r.workflowRunDir(runID))
 	}
-	return renderWorkflowResult(runID, r.workflowRunDir(runID), origin, meta, result), nil
+	out := renderWorkflowResult(runID, r.workflowRunDir(runID), origin, meta, result)
+	if savedAt != "" {
+		out += fmt.Sprintf("\nSaved as a reusable workflow at %s — it can be re-run with /workflows run %s.", savedAt, saveName)
+	}
+	return out, nil
+}
+
+// workflowDecision is what the user said about starting a run.
+type workflowDecision int
+
+const (
+	workflowRun workflowDecision = iota
+	workflowSaveOnly
+	workflowDeclined
+)
+
+// confirmWorkflow asks before spending on a run that was not pre-authorised.
+//
+// When nobody can be asked — headless, a goal loop, a relay — the request that
+// turned workflows on this turn is taken as the answer. The alternative is
+// hanging on a prompt no one will see, or silently refusing work the user
+// explicitly asked for; neither is better than trusting the request that got
+// us here.
+func (r *toolRuntime) confirmWorkflow(ctx context.Context, meta workflow.Meta, args workflowArgs) workflowDecision {
+	if r.workflowPreapproved || r.askUser == nil {
+		return workflowRun
+	}
+	phases := make([]string, 0, len(meta.Phases))
+	for _, p := range meta.Phases {
+		phases = append(phases, p.Title)
+	}
+	detail := meta.Description
+	if len(phases) > 0 {
+		detail += "\nPhases: " + strings.Join(phases, " → ")
+	}
+	saveLabel := "Save it, don't run"
+	saveName := strings.TrimSpace(args.SaveAs)
+	if saveName == "" {
+		saveName = meta.Name
+	}
+	form := AskUserForm{
+		Context: detail,
+		Questions: []AskUserQuestion{{
+			Header:   "Workflow",
+			Question: fmt.Sprintf("Run the %q workflow? It spawns sub-agents, so it costs real tokens.", meta.Name),
+			Options: []AskUserOption{
+				{Label: "Run it", Description: "Start the workflow now.", IsRecommended: true},
+				{Label: saveLabel, Description: "Write it to .spettro/workflows/" + saveName + ".js for later, and do the work another way."},
+				{Label: "Don't run it", Description: "Skip the workflow; handle the task directly."},
+			},
+		}},
+	}
+	answers, err := r.askUser(ctx, form)
+	if err != nil || len(answers) == 0 {
+		// A transport that cannot ask must not become a silent refusal.
+		if errors.Is(err, ErrAskUserReplyInChat) {
+			return workflowDeclined
+		}
+		return workflowRun
+	}
+	a := answers[0]
+	if a.Skipped {
+		return workflowDeclined
+	}
+	choice := strings.ToLower(strings.TrimSpace(strings.Join(a.Selected, " ") + " " + a.Custom))
+	switch {
+	case strings.Contains(choice, "save"):
+		return workflowSaveOnly
+	case strings.Contains(choice, "don't") || strings.Contains(choice, "dont") ||
+		strings.Contains(choice, "no") || strings.Contains(choice, "skip") || strings.Contains(choice, "cancel"):
+		return workflowDeclined
+	}
+	return workflowRun
+}
+
+// renderWorkflowSaved is what the model reads when the user chose to keep the
+// script but not run it.
+func renderWorkflowSaved(meta workflow.Meta, path string) string {
+	return fmt.Sprintf("The user chose not to run the %q workflow. It is saved at %s and can be run later with /workflows run %s.\n"+
+		"Do not run it anyway. Continue with the task directly, or ask what they would prefer.",
+		meta.Name, path, meta.Name)
 }
 
 // resolveWorkflowScript picks the script to run: inline source, a file path
@@ -245,11 +430,14 @@ func (r *toolRuntime) resolveWorkflowScript(args workflowArgs) (script, origin s
 // under the session directory so /storage accounts for it and prunes it with
 // the conversation it belongs to.
 func (r *toolRuntime) workflowRunDir(runID string) string {
-	base := r.sessionDir
-	if strings.TrimSpace(base) == "" {
-		base = filepath.Join(r.cwd, ".spettro")
+	if base := strings.TrimSpace(r.sessionDir); base != "" {
+		return filepath.Join(base, "workflows", runID)
 	}
-	return filepath.Join(base, "workflows", runID)
+	// Without a session (headless one-shots, tests) transcripts fall back into
+	// the project. They must not land in .spettro/workflows: that folder holds
+	// the user's reusable scripts, and filling it with run directories would
+	// bury them.
+	return filepath.Join(r.cwd, ".spettro", "workflow-runs", runID)
 }
 
 // findWorkflowRunDir locates a previous run by id.

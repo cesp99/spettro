@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,7 +204,7 @@ func TestFanOutToolsGrantsByModeAndDepth(t *testing.T) {
 	if !contains(tools, workflowToolID) || contains(tools, ultraToolID) {
 		t.Fatalf("workflows alone should grant only the workflow tool: %v", tools)
 	}
-	if !strings.Contains(prompt, "WORKFLOWS are active") || strings.Contains(prompt, "ULTRA MODE") {
+	if !strings.Contains(prompt, "WORKFLOWS are available") || strings.Contains(prompt, "ULTRA MODE") {
 		t.Fatalf("wrong guidance: %q", prompt)
 	}
 
@@ -211,7 +212,7 @@ func TestFanOutToolsGrantsByModeAndDepth(t *testing.T) {
 	if !contains(tools, workflowToolID) || !contains(tools, ultraToolID) {
 		t.Fatalf("both modes should grant both tools: %v", tools)
 	}
-	if !strings.Contains(prompt, "ULTRA MODE") || !strings.Contains(prompt, "WORKFLOWS are active") {
+	if !strings.Contains(prompt, "ULTRA MODE") || !strings.Contains(prompt, "WORKFLOWS are available") {
 		t.Fatalf("both guidance sections expected: %q", prompt)
 	}
 
@@ -291,9 +292,9 @@ func TestFindWorkflowRunDir(t *testing.T) {
 	}
 }
 
-func TestWorkflowKeywordSpans(t *testing.T) {
+func TestWorkflowActivationSpans(t *testing.T) {
 	// Spans are rune indices, not byte offsets: the TUI highlights cells.
-	spans := WorkflowKeywordSpans("héllo ultracode wörld ULTRACODE")
+	spans := WorkflowActivationSpans("héllo ultracode wörld ULTRACODE")
 	if len(spans) != 2 {
 		t.Fatalf("spans = %v, want 2", spans)
 	}
@@ -304,13 +305,202 @@ func TestWorkflowKeywordSpans(t *testing.T) {
 	if got := string(text[spans[1][0]:spans[1][1]]); got != "ULTRACODE" {
 		t.Fatalf("second span = %q", got)
 	}
-	if WorkflowKeywordSpans("ultracoded") != nil {
+	if WorkflowActivationSpans("ultracoded") != nil {
 		t.Fatal("a non-activating word must produce no span")
 	}
 	// The highlight and the runtime must never disagree.
 	for _, s := range []string{"", "ultracode", "ultracoded", "x ultracode.", "ULTRAcode!", "src/ultracode.go"} {
-		if (len(WorkflowKeywordSpans(s)) > 0) != WorkflowRequested(s) {
+		if (len(WorkflowActivationSpans(s)) > 0) != WorkflowRequested(s) {
 			t.Fatalf("%q: spans and WorkflowRequested disagree", s)
 		}
+	}
+}
+
+// Asking for a workflow in plain English has to work: making people learn a
+// magic word to reach the feature would be a worse tool.
+func TestWorkflowRequestedFromPlainEnglish(t *testing.T) {
+	on := []string{
+		"use a workflow to modernise these handlers",
+		"Use a workflow for this",
+		"can you write a workflow that reviews the diff",
+		"run a multi-agent workflow over the packages",
+		"set up a workflow to migrate the call sites",
+		"do this as a workflow please",
+		"handle it with workflows",
+		"reach for the workflow tool here",
+		"fan this out across sub-agents",
+		"fan it out over several agents",
+		"orchestrate this with subagents",
+		"orchestrate the migration using sub-agents",
+		"I want a multi-agent orchestration for this",
+		"kick off a workflow",
+	}
+	for _, s := range on {
+		if !WorkflowRequested(s) {
+			t.Fatalf("%q should activate workflows", s)
+		}
+	}
+
+	// And ordinary uses of the word "workflow" must stay quiet, or every
+	// conversation about CI would silently pay for the guidance.
+	off := []string{
+		"our deploy workflow is broken",
+		"fix the GitHub workflow in .github/workflows/ci.yml",
+		"what is the workflow for releasing?",
+		"the workflow diagram needs updating",
+		"add a step to the release workflow",
+		"run the workflow again",
+		"trigger the workflow on push",
+		"agents.md documents the agent manifest",
+		"the agent tool delegates one subtask",
+		"this workflow of ours predates the rewrite",
+	}
+	for _, s := range off {
+		if WorkflowRequested(s) {
+			t.Fatalf("%q must not activate workflows", s)
+		}
+	}
+}
+
+// Patterns overlap on purpose; a renderer handed overlapping ranges would
+// style the same cell twice.
+func TestWorkflowActivationSpansAreMergedAndOrdered(t *testing.T) {
+	text := "please use a workflow tool here, then ultracode the rest"
+	spans := WorkflowActivationSpans(text)
+	if len(spans) != 2 {
+		t.Fatalf("spans = %v, want 2 merged spans", spans)
+	}
+	runes := []rune(text)
+	if got := string(runes[spans[0][0]:spans[0][1]]); got != "use a workflow tool" {
+		t.Fatalf("first span = %q, want the merged phrase", got)
+	}
+	if got := string(runes[spans[1][0]:spans[1][1]]); got != "ultracode" {
+		t.Fatalf("second span = %q", got)
+	}
+	if spans[0][1] > spans[1][0] {
+		t.Fatalf("spans overlap: %v", spans)
+	}
+}
+
+func TestWorkflowPreapprovedOnlyByKeyword(t *testing.T) {
+	// The keyword is a standing yes.
+	for _, s := range []string{"ultracode", "ULTRACODE do the thing", "ok, ultracode."} {
+		if !WorkflowPreapproved(s) {
+			t.Fatalf("%q should be pre-approved", s)
+		}
+	}
+	// Asking in plain English turns the tool on but still has to be confirmed.
+	for _, s := range []string{"use a workflow for this", "fan this out across agents", ""} {
+		if WorkflowPreapproved(s) {
+			t.Fatalf("%q must not be pre-approved", s)
+		}
+	}
+	if !WorkflowRequested("use a workflow for this") {
+		t.Fatal("a plain-English request must still activate the tool")
+	}
+}
+
+// askUserFunc adapts a decision function to the callback shape.
+func askUserFunc(pick string, err error) AskUserCallback {
+	return func(context.Context, AskUserForm) ([]AskUserAnswer, error) {
+		if err != nil {
+			return nil, err
+		}
+		if pick == "" {
+			return []AskUserAnswer{{Header: "Workflow", Skipped: true}}, nil
+		}
+		return []AskUserAnswer{{Header: "Workflow", Selected: []string{pick}}}, nil
+	}
+}
+
+func TestConfirmWorkflow(t *testing.T) {
+	meta := workflow.Meta{Name: "audit", Description: "Audit the repo"}
+
+	// The keyword skips the prompt entirely.
+	asked := false
+	rt := &toolRuntime{workflowPreapproved: true, askUser: func(context.Context, AskUserForm) ([]AskUserAnswer, error) {
+		asked = true
+		return nil, nil
+	}}
+	if got := rt.confirmWorkflow(context.Background(), meta, workflowArgs{}); got != workflowRun {
+		t.Fatalf("pre-approved decision = %v", got)
+	}
+	if asked {
+		t.Fatal("a pre-approved run must not prompt")
+	}
+
+	cases := map[string]workflowDecision{
+		"Run it":             workflowRun,
+		"Save it, don't run": workflowSaveOnly,
+		"Don't run it":       workflowDeclined,
+	}
+	for pick, want := range cases {
+		rt := &toolRuntime{askUser: askUserFunc(pick, nil)}
+		if got := rt.confirmWorkflow(context.Background(), meta, workflowArgs{}); got != want {
+			t.Fatalf("%q → %v, want %v", pick, got, want)
+		}
+	}
+
+	// Skipping the question is a refusal, not a yes: silence must never be
+	// read as consent to spend.
+	rt = &toolRuntime{askUser: askUserFunc("", nil)}
+	if got := rt.confirmWorkflow(context.Background(), meta, workflowArgs{}); got != workflowDeclined {
+		t.Fatalf("skipped question = %v, want declined", got)
+	}
+
+	// Nobody to ask (headless, goal loop, relay): the request that turned
+	// workflows on this turn stands in for the answer.
+	rt = &toolRuntime{askUser: nil}
+	if got := rt.confirmWorkflow(context.Background(), meta, workflowArgs{}); got != workflowRun {
+		t.Fatalf("no transport = %v, want run", got)
+	}
+	rt = &toolRuntime{askUser: askUserFunc("", errors.New("no ui"))}
+	if got := rt.confirmWorkflow(context.Background(), meta, workflowArgs{}); got != workflowRun {
+		t.Fatalf("failed transport = %v, want run", got)
+	}
+	// Except the chat exit, which is the user actively stepping away from it.
+	rt = &toolRuntime{askUser: askUserFunc("", ErrAskUserReplyInChat)}
+	if got := rt.confirmWorkflow(context.Background(), meta, workflowArgs{}); got != workflowDeclined {
+		t.Fatalf("chat exit = %v, want declined", got)
+	}
+}
+
+func TestRunWorkflowSavesAndAsksBeforeRunning(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	manifest := config.DefaultAgentManifest()
+	script := "export const meta = {name: 'audit', description: 'Audit the repo', phases: [{title: 'Scan'}]}\nreturn 1"
+
+	rt := &toolRuntime{
+		cwd: cwd, manifest: &manifest, providerMgr: &provider.Manager{},
+		permission: config.PermissionYOLO,
+		askUser:    askUserFunc("Save it, don't run", nil),
+	}
+	args, _ := json.Marshal(workflowArgs{Script: script})
+	out, err := rt.runWorkflow(context.Background(), args)
+	if err != nil {
+		t.Fatalf("save-only run: %v", err)
+	}
+	if !strings.Contains(out, "chose not to run") || !strings.Contains(out, "Do not run it anyway") {
+		t.Fatalf("result must tell the model the user declined:\n%s", out)
+	}
+	saved := filepath.Join(cwd, ".spettro", "workflows", "audit.js")
+	if data, err := os.ReadFile(saved); err != nil || string(data) != script {
+		t.Fatalf("script not saved at %s: %v", saved, err)
+	}
+
+	// A refusal must not save anything either.
+	cwd2 := t.TempDir()
+	rt2 := &toolRuntime{
+		cwd: cwd2, manifest: &manifest, providerMgr: &provider.Manager{},
+		permission: config.PermissionYOLO,
+		askUser:    askUserFunc("Don't run it", nil),
+	}
+	if _, err := rt2.runWorkflow(context.Background(), args); err == nil ||
+		!strings.Contains(err.Error(), "declined") {
+		t.Fatalf("want a declined error, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cwd2, ".spettro", "workflows")); !os.IsNotExist(err) {
+		t.Fatal("a declined workflow must not be written to disk")
 	}
 }

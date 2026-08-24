@@ -134,6 +134,9 @@ type toolLoopConfig struct {
 	// concurrent sub-agents of the same type. AgentID keeps the manifest spec
 	// ID for prompt/handoff resolution; InstanceID only affects observability.
 	InstanceID string
+	// WorkflowPreapproved marks the turn as having the user's standing consent
+	// to start a workflow without confirming first (they typed the keyword).
+	WorkflowPreapproved bool
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
 	GoalMode        bool
@@ -252,7 +255,10 @@ type toolRuntime struct {
 	stopReason           string
 	skillsCatalog        skills.Catalog
 	goalMode             bool
-	shellTimeoutSec      int
+	// workflowPreapproved skips the workflow tool's confirmation prompt: the
+	// user already said yes by writing the keyword.
+	workflowPreapproved bool
+	shellTimeoutSec     int
 	// compactCfg is the auto-compaction policy (zero value → defaults);
 	// compactFailures counts consecutive summarizer failures so the trigger
 	// pauses after MaxFailures instead of burning a failing call every step.
@@ -505,6 +511,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	runtime.maxDelegationDepth = cfg.MaxDepth
 	runtime.maxToolCallsPerStep = cfg.MaxToolCalls
 	runtime.goalMode = cfg.GoalMode
+	runtime.workflowPreapproved = cfg.WorkflowPreapproved
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {

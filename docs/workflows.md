@@ -19,16 +19,42 @@ the TUI, in ACP editors (Zed, …), and in headless/goal runs.
 
 ## Turning it on
 
-Write **`ultracode`** anywhere in a message:
+Ask for one however you like:
+
+```text
+use a workflow to modernise these handlers
+fan this out across sub-agents and verify each finding
+orchestrate the migration with subagents
+```
+
+or write the shorthand, **`ultracode`**, anywhere in a message:
 
 ```text
 ultracode: review this branch across correctness, perf and tests, then
 try to refute every finding before you report it
 ```
 
-That grants the agent the `workflow` tool for **that turn only**, and
-appends the authoring guidance to its system prompt. The keyword matches
-as a whole word, so `src/ultracoder.go` does not trip it.
+Either grants the agent the `workflow` tool for **that turn only**, and
+appends the authoring guidance to its system prompt. Ordinary uses of the
+word stay quiet — "our deploy workflow is broken" and
+`.github/workflows/ci.yml` do not activate anything, and `ultracoded` is
+not the keyword.
+
+The difference between the two forms is **consent**, not capability:
+
+| You wrote | What happens |
+| --- | --- |
+| `ultracode` | A standing yes. The agent writes the script and runs it. |
+| "use a workflow …", or the agent proposing one itself | You are asked first: **Run it** / **Save it, don't run** / **Don't run it**. |
+
+Declining is final — the agent is told not to run it anyway and not to
+re-propose it. "Save it, don't run" writes the script to
+`.spettro/workflows/<name>.js` so you can run it later with
+`/workflows run <name>`.
+
+Where nobody can be asked — headless mode, a `/goal` loop, the Telegram
+relay — the request that turned workflows on is taken as the answer.
+Hanging on a prompt no one will see is not better.
 
 As you type it, the word lights up in the input box — a slow violet-to-cyan
 shimmer with a highlight sweeping across it. That is not decoration: the
@@ -213,6 +239,11 @@ same phase tree growing in place. Each sub-agent additionally gets its
 own tool call, so "follow the agent" navigation keeps working.
 
 ## Saved workflows
+
+The agent writes these too. If no saved workflow fits what you asked for
+— the normal case — it authors one from scratch; if the script is worth
+keeping it sets `save_as` and the script lands in the folder below,
+runnable by name from then on.
 
 Two ready-to-run scripts ship in
 [`docs/examples/workflows/`](examples/workflows/): `review-branch.js`
