@@ -72,6 +72,11 @@ type Options struct {
 	Resolve func(name string) (string, error)
 	// Args is the value exposed to the script as the `args` global.
 	Args any
+	// DefaultAgentType names the agent an agent() call runs as when the script
+	// does not pick one. It only affects display: instance names read
+	// "general-purpose#7" rather than "agent#7", which matters because those
+	// names are how a user tells concurrent members apart.
+	DefaultAgentType string
 }
 
 func (o Options) withDefaults() Options {
@@ -489,6 +494,9 @@ func (r *vmRun) jsAgent(ctx context.Context) func(goja.FunctionCall) goja.Value 
 			phase = r.currentPhase()
 		}
 		agentType := opts.AgentType
+		if agentType == "" {
+			agentType = r.sh.opts.DefaultAgentType
+		}
 		req := Request{
 			Prompt:    prompt,
 			Label:     labelFor(opts.Label, prompt),

@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -233,4 +235,58 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestFindWorkflowRunDir(t *testing.T) {
+	root := t.TempDir()
+	sessions := filepath.Join(root, "sessions")
+	thisSession := filepath.Join(sessions, "session-a")
+	otherSession := filepath.Join(sessions, "session-b")
+
+	mkRun := func(sessionDir, runID string) string {
+		dir := filepath.Join(sessionDir, "workflows", runID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "journal.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	mine := mkRun(thisSession, "wf_mine")
+	theirs := mkRun(otherSession, "wf_theirs")
+
+	r := &toolRuntime{sessionDir: thisSession}
+
+	if got, err := r.findWorkflowRunDir("wf_mine", ""); err != nil || got != mine {
+		t.Fatalf("own session: %q %v", got, err)
+	}
+	// The common case: an editor opens a fresh session per prompt, so the run
+	// being resumed lives under a sibling.
+	if got, err := r.findWorkflowRunDir("wf_theirs", ""); err != nil || got != theirs {
+		t.Fatalf("sibling session: %q %v", got, err)
+	}
+	// Re-running <run>/script.js is the documented resume path, so the
+	// script's own directory counts even outside the session tree.
+	loose := filepath.Join(root, "elsewhere", "wf_loose")
+	if err := os.MkdirAll(loose, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(loose, "journal.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.findWorkflowRunDir("wf_loose", filepath.Join(loose, "script.js")); err != nil || got != loose {
+		t.Fatalf("script-adjacent run: %q %v", got, err)
+	}
+	// A run that does not exist must be an error, not a silent full re-run.
+	if _, err := r.findWorkflowRunDir("wf_missing", ""); err == nil ||
+		!strings.Contains(err.Error(), "no journal found") {
+		t.Fatalf("want a not-found error, got %v", err)
+	}
+	for _, bad := range []string{"", "../escape", "a/b"} {
+		if _, err := r.findWorkflowRunDir(bad, ""); err == nil ||
+			!strings.Contains(err.Error(), "invalid resume_from_run_id") {
+			t.Fatalf("%q: want an invalid-id error, got %v", bad, err)
+		}
+	}
 }

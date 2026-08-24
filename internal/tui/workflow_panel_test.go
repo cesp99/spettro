@@ -184,3 +184,20 @@ func TestProgressBar(t *testing.T) {
 		t.Fatalf("bar width = %d, want exactly 10 cells", n)
 	}
 }
+
+func TestTruncateAgentNameKeepsTheInstanceNumber(t *testing.T) {
+	// The number is the only part that distinguishes concurrent members, so a
+	// plain right-truncation would make the panel useless.
+	if got := truncateAgentName("general-purpose#12", 14); got != "general-pu…#12" {
+		t.Fatalf("got %q", got)
+	}
+	if got := truncateAgentName("code#3", 14); got != "code#3" {
+		t.Fatalf("a short name must be left alone, got %q", got)
+	}
+	if got := truncateAgentName("noinstancename", 8); got != "noinsta…" {
+		t.Fatalf("a name with no suffix falls back to plain truncation, got %q", got)
+	}
+	if n := len([]rune(truncateAgentName("general-purpose#7", 10))); n > 10 {
+		t.Fatalf("result is %d cells wide, want at most 10", n)
+	}
+}

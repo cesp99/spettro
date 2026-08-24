@@ -468,3 +468,20 @@ func TestResultValueIsJSONEncodable(t *testing.T) {
 		t.Fatalf("encoded = %s", encoded)
 	}
 }
+
+func TestDefaultAgentTypeNamesInstances(t *testing.T) {
+	runner := echoRunner(0)
+	run(t, `await agent('one'); await agent('two', {agentType: 'review'})`, Options{
+		Runner: runner, DefaultAgentType: "general-purpose",
+	})
+	if runner.calls[0].Instance != "general-purpose#1" {
+		t.Fatalf("instance = %q, want general-purpose#1", runner.calls[0].Instance)
+	}
+	if runner.calls[0].AgentType != "general-purpose" {
+		t.Fatalf("agent type = %q, want the default filled in", runner.calls[0].AgentType)
+	}
+	// An explicit agentType still wins.
+	if runner.calls[1].Instance != "review#2" {
+		t.Fatalf("instance = %q, want review#2", runner.calls[1].Instance)
+	}
+}

@@ -77,6 +77,8 @@ const results = await pipeline(DIMENSIONS,
     agent('Try to refute: ' + f.title, {phase: 'Verify', schema: VERDICT}))))
 return results.flat().filter(Boolean)
 
+Use opts.schema whenever a stage produces data the next stage consumes. Spettro appends the contract to the prompt, parses the answer back, and retries the agent with the parse error if it does not fit — hand-rolling JSON.parse over the text in the script gets none of that, and one malformed answer silently drops a result.
+
 Globals: agent(prompt, opts) → the sub-agent's final text, or the parsed object when opts.schema is a JSON Schema, or null if it failed; parallel(thunks) → runs all concurrently and waits for every one (a barrier); pipeline(items, ...stages) → pushes each item through every stage independently with NO barrier between stages; phase(title); log(message); args (whatever the tool call passed); budget.remaining(); workflow(name, args) to run a saved workflow as a sub-step.
 
 Prefer pipeline over parallel-then-parallel: a barrier is only right when a stage genuinely needs every previous result at once (dedup across the whole set, an early exit on zero findings). Give agent() a label and a phase so the user can follow the run.
@@ -136,7 +138,11 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 			_ = journal.WriteFile("meta.json", string(encoded))
 		}
 		if args.ResumeFromRunID != "" {
-			if err := journal.LoadCache(r.workflowRunDir(args.ResumeFromRunID)); err != nil {
+			prior, err := r.findWorkflowRunDir(args.ResumeFromRunID, args.ScriptPath)
+			if err != nil {
+				return "", fmt.Errorf("workflow: %w", err)
+			}
+			if err := journal.LoadCache(prior); err != nil {
 				return "", fmt.Errorf("workflow: resume from %s: %w", args.ResumeFromRunID, err)
 			}
 		}
@@ -152,13 +158,14 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 	obs := &workflowObserver{rt: r, runID: runID, meta: meta}
 	obs.start(origin)
 	result, runErr := workflow.Run(ctx, script, workflow.Options{
-		Runner:         &workflowRunner{rt: r, runID: runID},
-		Observer:       obs.handle,
-		MaxConcurrency: args.MaxConcurrency,
-		MaxAgents:      workflowMaxAgents,
-		MaxItems:       workflowMaxItems,
-		BudgetTokens:   args.BudgetTokens,
-		Journal:        journal,
+		Runner:           &workflowRunner{rt: r, runID: runID},
+		Observer:         obs.handle,
+		MaxConcurrency:   args.MaxConcurrency,
+		MaxAgents:        workflowMaxAgents,
+		MaxItems:         workflowMaxItems,
+		BudgetTokens:     args.BudgetTokens,
+		Journal:          journal,
+		DefaultAgentType: defaultWorkflowAgentType(r.manifest),
 		Resolve: func(name string) (string, error) {
 			src, _, err := workflow.Load(r.cwd, name)
 			return src, err
@@ -201,14 +208,56 @@ func (r *toolRuntime) resolveWorkflowScript(args workflowArgs) (script, origin s
 }
 
 // workflowRunDir is where a run's script, journal and result live. It sits
-// under the session directory so /storage accounts for it and resume can find
-// a previous run by id.
+// under the session directory so /storage accounts for it and prunes it with
+// the conversation it belongs to.
 func (r *toolRuntime) workflowRunDir(runID string) string {
 	base := r.sessionDir
 	if strings.TrimSpace(base) == "" {
 		base = filepath.Join(r.cwd, ".spettro")
 	}
 	return filepath.Join(base, "workflows", runID)
+}
+
+// findWorkflowRunDir locates a previous run by id.
+//
+// Run directories are session-scoped, but the run being resumed very often is
+// not from this session — an editor opens a fresh one per prompt, and a
+// crashed run is exactly the case you want to resume from a new session. So
+// the current session is only the first place to look: the script's own
+// directory is checked next (re-running <run>/script.js is the documented way
+// to resume an edited script), then the sibling sessions, since run ids are
+// unique. Not finding it is an error rather than an empty cache: silently
+// replaying nothing would re-run every agent at full price under a flag that
+// promised the opposite.
+func (r *toolRuntime) findWorkflowRunDir(runID, scriptPath string) (string, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || strings.ContainsAny(runID, `/\`) || strings.Contains(runID, "..") {
+		return "", fmt.Errorf("invalid resume_from_run_id %q", runID)
+	}
+	var candidates []string
+	if dir := r.workflowRunDir(runID); dir != "" {
+		candidates = append(candidates, dir)
+	}
+	if scriptPath != "" {
+		if parent := filepath.Dir(scriptPath); filepath.Base(parent) == runID {
+			candidates = append(candidates, parent)
+		}
+	}
+	if sessions := filepath.Dir(strings.TrimRight(r.sessionDir, string(filepath.Separator))); sessions != "" && r.sessionDir != "" {
+		if entries, err := os.ReadDir(sessions); err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					candidates = append(candidates, filepath.Join(sessions, e.Name(), "workflows", runID))
+				}
+			}
+		}
+	}
+	for _, dir := range candidates {
+		if _, err := os.Stat(filepath.Join(dir, "journal.jsonl")); err == nil {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("resume_from_run_id %q: no journal found for that run (looked under this session and its siblings)", runID)
 }
 
 // newWorkflowRunID mints a run id that sorts by start time and never collides.
@@ -336,6 +385,17 @@ func resolveWorkflowTarget(manifest *config.AgentManifest, agentType string) (co
 		return spec, fmt.Errorf("workflow: %s", strings.TrimPrefix(err.Error(), "ultra: "))
 	}
 	return spec, nil
+}
+
+// defaultWorkflowAgentType is the agent an unqualified agent() call resolves
+// to, resolved once so instance names in the panel read "general-purpose#7"
+// instead of a generic "agent#7".
+func defaultWorkflowAgentType(manifest *config.AgentManifest) string {
+	spec, err := resolveWorkflowTarget(manifest, "")
+	if err != nil {
+		return ""
+	}
+	return spec.ID
 }
 
 func workflowEffort(effort string) (provider.ThinkingLevel, bool) {

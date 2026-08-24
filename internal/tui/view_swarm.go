@@ -69,7 +69,7 @@ func (m Model) swarmMemberRow(a parallelAgentEntry, budget int) string {
 	if a.Status != "running" {
 		nameStyle = nameStyle.Faint(true)
 	}
-	name := truncateLabel(a.ID, max(8, budget/3))
+	name := truncateAgentName(a.ID, max(8, budget/3))
 	detail := a.Task
 	if a.Status == "running" {
 		if live := m.latestAgentActivity(a.ID); live != "" {

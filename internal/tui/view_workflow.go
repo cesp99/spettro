@@ -42,6 +42,25 @@ func progressBar(width, done, failed, total int) string {
 	return b.String()
 }
 
+// truncateAgentName shortens an instance name while keeping its "#N" suffix.
+// Workflow members share a long agent-type prefix ("general-purpose#7"), so a
+// plain truncation clips off the only part that tells them apart.
+func truncateAgentName(name string, width int) string {
+	if width < 4 || lipgloss.Width(name) <= width {
+		return truncateLabel(name, width)
+	}
+	hash := strings.LastIndexByte(name, '#')
+	if hash <= 0 {
+		return truncateLabel(name, width)
+	}
+	suffix := name[hash:]
+	keep := width - lipgloss.Width(suffix) - 1
+	if keep < 1 {
+		return truncateLabel(name, width)
+	}
+	return name[:keep] + "…" + suffix
+}
+
 func agentStatusGlyph(status string) (string, lipgloss.Style) {
 	switch status {
 	case "running":
@@ -161,7 +180,7 @@ func (m Model) workflowPhaseLines(w *workflowRun, phase string, budget int) []st
 	lines := []string{head}
 	for _, a := range agents {
 		icon, iconStyle := agentStatusGlyph(a.Status)
-		name := truncateLabel(a.Instance, max(8, budget/3))
+		name := truncateAgentName(a.Instance, max(8, budget/3))
 		detail := a.Label
 		if a.Status == "failed" && a.Detail != "" {
 			detail = a.Detail
