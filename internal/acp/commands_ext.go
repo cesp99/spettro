@@ -53,11 +53,20 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 		return acpUltraText(cfg, fields), false, true
 
 	case "/workflows", "/workflow":
-		// "run" is the one subcommand that needs a turn: it falls through so
-		// the caller dispatches the rewritten prompt as a normal request.
+		// "run" is the one subcommand that needs a turn, and only when the
+		// named workflow actually resolves — the bridge has already rewritten
+		// it into a prompt in that case. Falling through unconditionally would
+		// hand "/workflows run nope" to the model as a plain request and send
+		// it hunting for a file that does not exist.
 		if len(fields) >= 2 {
 			switch strings.ToLower(fields[1]) {
 			case "run", "start":
+				if len(fields) < 3 {
+					return "usage: /workflows run <name> [json]", false, true
+				}
+				if _, _, err := workflow.Load(s.cwd, fields[2]); err != nil {
+					return err.Error(), false, true
+				}
 				return "", false, false
 			}
 		}

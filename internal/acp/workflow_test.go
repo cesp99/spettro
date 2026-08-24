@@ -166,3 +166,33 @@ func TestACPWorkflowsTextAndRunRewrite(t *testing.T) {
 		}
 	}
 }
+
+// A "run" of a workflow that does not exist must answer with the error, not
+// fall through and become a prompt the model tries to satisfy by guessing.
+func TestACPWorkflowsRunUnknownIsHandledInline(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	sess := &acpSession{cwd: cwd}
+
+	reply, _, handled := handleExtendedSlashCommand(nil, sess, nil, nil, "/workflows run nope")
+	if !handled || !strings.Contains(reply, "no saved workflow") {
+		t.Fatalf("handled=%v reply=%q", handled, reply)
+	}
+	reply, _, handled = handleExtendedSlashCommand(nil, sess, nil, nil, "/workflows run")
+	if !handled || !strings.Contains(reply, "usage:") {
+		t.Fatalf("handled=%v reply=%q", handled, reply)
+	}
+
+	dir := filepath.Join(cwd, ".spettro", workflow.SavedWorkflowsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "audit.js"),
+		[]byte("export const meta = {name: 'audit', description: 'Audit'}\nreturn 1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An existing one falls through so the bridge's rewritten prompt runs.
+	if _, _, handled := handleExtendedSlashCommand(nil, sess, nil, nil, "/workflows run audit"); handled {
+		t.Fatal("a runnable workflow must fall through to the prompt path")
+	}
+}
