@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -136,22 +137,20 @@ func WorkflowActivationSpans(task string) [][2]int {
 	}
 
 	// Byte offsets are useless to a renderer that works in cells; convert
-	// them once here rather than making every caller redo it.
-	runeAt := make(map[int]int, len(task)+1)
-	idx := 0
-	for byteOff := range task {
-		runeAt[byteOff] = idx
-		idx++
-	}
-	runeAt[len(task)] = idx
-
+	// them once here rather than making every caller redo it. The merged
+	// spans are sorted and disjoint, so one forward walk over task counts
+	// every rune at most once — no map of the whole input to size.
 	spans := make([][2]int, 0, len(merged))
+	byteIdx, runeIdx := 0, 0
 	for _, m := range merged {
-		start, ok1 := runeAt[m[0]]
-		end, ok2 := runeAt[m[1]]
-		if ok1 && ok2 {
-			spans = append(spans, [2]int{start, end})
+		if m[0] < byteIdx || m[1] > len(task) {
+			continue
 		}
+		runeIdx += utf8.RuneCountInString(task[byteIdx:m[0]])
+		start := runeIdx
+		runeIdx += utf8.RuneCountInString(task[m[0]:m[1]])
+		byteIdx = m[1]
+		spans = append(spans, [2]int{start, runeIdx})
 	}
 	return spans
 }
