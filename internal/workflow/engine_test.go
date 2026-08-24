@@ -592,3 +592,23 @@ func (f *failingScoper) BeginCall(context.Context, Request) error {
 	return fmt.Errorf("cannot create workspace")
 }
 func (f *failingScoper) EndCall(context.Context, Request, error) {}
+
+func TestMissingArgsIsExplained(t *testing.T) {
+	_, err := Run(context.Background(), header("log('n=' + args.packages.length)"),
+		Options{Runner: echoRunner(0)})
+	if err == nil || !strings.Contains(err.Error(), "passed no args") {
+		t.Fatalf("want the missing-args hint, got %v", err)
+	}
+	// The hint must not fire when args were supplied and the script has some
+	// other undefined-property bug.
+	_, err = Run(context.Background(), header("log('n=' + args.a.b)"),
+		Options{Runner: echoRunner(0), Args: map[string]any{"other": 1}})
+	if err == nil || strings.Contains(err.Error(), "passed no args") {
+		t.Fatalf("hint fired despite args being supplied: %v", err)
+	}
+	// Nor when the script never mentions args.
+	_, err = Run(context.Background(), header("log(nope.length)"), Options{Runner: echoRunner(0)})
+	if err == nil || strings.Contains(err.Error(), "passed no args") {
+		t.Fatalf("hint fired on an unrelated error: %v", err)
+	}
+}

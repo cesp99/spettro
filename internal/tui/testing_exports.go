@@ -76,6 +76,11 @@ func (m *Model) SetTextareaValueForTesting(v string) {
 	m.ta.SetValue(v)
 }
 
+// ViewInputForTesting renders the input box exactly as the TUI draws it.
+func (m Model) ViewInputForTesting(width int) string {
+	return m.viewInput(width)
+}
+
 func (m *Model) SetCommandItemsForTesting(items []string) {
 	m.cmdItems = make([]commandDef, 0, len(items))
 	for _, item := range items {

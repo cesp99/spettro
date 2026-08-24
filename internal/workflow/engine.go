@@ -312,7 +312,7 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	value, err := r.pump(ctx, promise)
 	if err != nil {
 		s.emit(Event{Kind: EventFinish, Message: err.Error(), Nested: r.nested})
-		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, err)
+		return nil, meta, fmt.Errorf("workflow %q: %w%s", meta.Name, err, missingArgsHint(script, args, err))
 	}
 	s.emit(Event{Kind: EventFinish, Message: meta.Name, Nested: r.nested})
 	return value, meta, nil
@@ -359,6 +359,17 @@ func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 		return nil, nil
 	}
 	return result.Export(), nil
+}
+
+// missingArgsHint explains the commonest way a first run dies: the script
+// reads args, but the tool call passed none, so every property access on it is
+// a TypeError. The raw message names the property and not the cause, and a
+// live run burned three attempts rediscovering it.
+func missingArgsHint(script string, args any, err error) string {
+	if args != nil || !strings.Contains(err.Error(), "of undefined") || !strings.Contains(script, "args") {
+		return ""
+	}
+	return " — the tool call passed no args, so the `args` global is undefined; pass args in the workflow tool call, or stop reading it in the script"
 }
 
 func describeRejection(v goja.Value) string {
