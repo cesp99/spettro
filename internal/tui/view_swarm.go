@@ -56,6 +56,32 @@ func (s swarmSummary) headline() string {
 	return strings.Join(parts, " · ")
 }
 
+// compactHeadline is the glyph form used when the panel is too narrow to spell
+// the counts out; see workflowRun.compactHeadline.
+func (s swarmSummary) compactHeadline() string {
+	out := fmt.Sprintf("%d▶ %d✓", s.running, s.done)
+	if s.failed > 0 {
+		out += fmt.Sprintf(" %d✗", s.failed)
+	}
+	return out
+}
+
+// swarmTitleLine renders the header, falling back to glyph counts when the
+// spelled-out ones will not fit.
+func (s swarmSummary) titleLine(budget int) string {
+	title := "ultra swarm"
+	if len(s.types) == 1 {
+		title += " · " + s.types[0]
+	}
+	prefix := "⚡ " + truncateLabel(title, max(10, budget/2))
+	headline := s.headline()
+	if lipgloss.Width(prefix)+1+lipgloss.Width(headline) > budget {
+		headline = s.compactHeadline()
+	}
+	return lipgloss.NewStyle().Bold(true).Foreground(colorWarn).Render(prefix) + " " +
+		styleMuted.Render(truncateLabel(headline, max(4, budget-lipgloss.Width(prefix)-1)))
+}
+
 // swarmMemberRow renders one member: status glyph, instance name in the
 // agent's manifest colour, and its live activity (falling back to the item it
 // was assigned when it has not called a tool yet).
@@ -100,13 +126,8 @@ func (m Model) renderSwarmBlock(width int) string {
 		return ""
 	}
 	budget := max(width-4, 24)
-	title := "ultra swarm"
-	if len(s.types) == 1 {
-		title += " · " + s.types[0]
-	}
 	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(colorWarn).Render("⚡ "+truncateLabel(title, max(10, budget/2))) +
-			" " + styleMuted.Render(s.headline()),
+		s.titleLine(budget),
 		progressBar(min(24, max(8, budget-14)), s.done, s.failed, len(s.members)) + " " +
 			styleMuted.Render(fmt.Sprintf("%d/%d", s.done+s.failed, len(s.members))),
 	}

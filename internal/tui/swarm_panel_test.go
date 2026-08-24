@@ -66,11 +66,17 @@ func TestSidePanelSwarmLines_RendersMembers(t *testing.T) {
 		t.Fatalf("want header + meter + 2 members, got %d: %v", len(lines), lines)
 	}
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "1 running · 0 done · 1 failed") {
-		t.Fatalf("bad header: %s", lines[0])
+	// At 48 columns the spelled-out counts do not fit, so the header falls
+	// back to glyphs rather than clipping "1 failed" to "1 fai…".
+	if !strings.Contains(joined, "1▶ 0✓ 1✗") {
+		t.Fatalf("bad compact header: %s", lines[0])
 	}
 	if !strings.Contains(joined, "ultra swarm · code") {
 		t.Fatalf("header should name the swarm and its agent type: %s", lines[0])
+	}
+	// With room, the counts are spelled out.
+	if wide := m.sidePanelSwarmLines(90); !strings.Contains(wide[0], "1 running · 0 done · 1 failed") {
+		t.Fatalf("wide header should spell the counts out: %s", wide[0])
 	}
 	// The meter counts a failure as finished work, not as still running.
 	if !strings.Contains(lines[1], "1/2") {

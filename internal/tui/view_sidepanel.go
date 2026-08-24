@@ -168,13 +168,8 @@ func (m Model) sidePanelSwarmLines(width int) []string {
 		return nil
 	}
 	budget := max(12, width-2)
-	title := "ultra swarm"
-	if len(s.types) == 1 {
-		title += " · " + s.types[0]
-	}
 	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(colorWarn).Render("⚡ "+truncateLabel(title, max(10, budget/2))) +
-			" " + styleMuted.Render(s.headline()),
+		s.titleLine(budget),
 		progressBar(min(20, max(8, budget-12)), s.done, s.failed, len(s.members)) + " " +
 			styleMuted.Render(fmt.Sprintf("%d/%d", s.done+s.failed, len(s.members))),
 	}
@@ -188,7 +183,7 @@ func (m Model) sidePanelSwarmLines(width int) []string {
 // the vertical room the footer block does not, so this is the full tree with
 // no row cap.
 func (m Model) sidePanelWorkflowLines(width int) []string {
-	return m.workflowTreeLines(max(12, width-2))
+	return m.workflowTreeLines(max(12, width-2), 0)
 }
 
 // sidePanelReservedRows is the vertical space the git summary, workflow tree

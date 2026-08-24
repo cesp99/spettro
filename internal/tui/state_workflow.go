@@ -143,7 +143,7 @@ func (m *Model) applyWorkflowTrace(name, argsJSON, output, status string) bool {
 			}
 			m.workflow = run
 			if !m.showSidePanel {
-				m.showBanner("workflow "+run.Name+" started — press ctrl+b to watch each phase", "info")
+				m.showBanner("workflow "+run.Name+" — ctrl+b for the phase tree", "info")
 			}
 			return true
 		}

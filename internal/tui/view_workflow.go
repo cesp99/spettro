@@ -86,9 +86,48 @@ func (w *workflowRun) headline() string {
 	return strings.Join(parts, " · ")
 }
 
+// compactHeadline is the same counts in glyphs, for a panel too narrow to
+// spell them out. Clipping "1 failed" to "1 fai…" would hide the one number
+// that matters, so the narrow case gets its own form rather than a truncation.
+func (w *workflowRun) compactHeadline() string {
+	running, done, failed, _ := w.counts()
+	out := fmt.Sprintf("%d▶ %d✓", running, done)
+	if failed > 0 {
+		out += fmt.Sprintf(" %d✗", failed)
+	}
+	return out
+}
+
+// workflowRow is one agent line, tagged so the row budget drops the least
+// interesting work first.
+type workflowRow struct {
+	line string
+	// prio orders survival when rows must be dropped: still running beats
+	// failed beats succeeded. A failure is the row a reader most wants to see
+	// among finished work, so it must outlive the successes around it.
+	prio int
+}
+
+const (
+	wfRowRunning = iota
+	wfRowFailed
+	wfRowDone
+)
+
+// workflowGroup is a phase header plus the agents under it.
+type workflowGroup struct {
+	header string
+	rows   []workflowRow
+}
+
 // workflowTreeLines renders the panel body: title, description, one group per
 // phase with its own meter and agent rows, then the tail of the script's log.
-func (m Model) workflowTreeLines(width int) []string {
+//
+// maxRows caps the output (0 = uncapped, which is what the side panel uses).
+// The cap never drops a phase: a phase nobody has reached yet is exactly the
+// information the panel exists to show, so trimming takes finished agent rows
+// instead and reports how many it hid.
+func (m Model) workflowTreeLines(width, maxRows int) []string {
 	w := m.workflow
 	if w == nil {
 		return nil
@@ -108,30 +147,109 @@ func (m Model) workflowTreeLines(width int) []string {
 
 	running, done, failed, _ := w.counts()
 	total := running + done + failed
-	lines := []string{
-		titleStyle.Render(marker+" workflow "+truncateLabel(w.Name, max(10, budget/2))) + " " +
-			styleMuted.Render(w.headline()),
+	// The header is built to fit: in the side panel an unclamped one wraps
+	// onto a second line and knocks the whole tree out of alignment.
+	name := truncateLabel(w.Name, max(10, budget/2))
+	headline := w.headline()
+	prefix := marker + " workflow " + name
+	if lipgloss.Width(prefix)+1+lipgloss.Width(headline) > budget {
+		headline = w.compactHeadline()
 	}
+	title := titleStyle.Render(prefix) + " " +
+		styleMuted.Render(truncateLabel(headline, max(4, budget-lipgloss.Width(prefix)-1)))
+	head := []string{title}
 	if w.Description != "" {
-		lines = append(lines, styleMuted.Render("  "+truncateLabel(w.Description, budget-2)))
+		head = append(head, styleMuted.Render("  "+truncateLabel(w.Description, budget-2)))
 	}
 	if total > 0 {
-		lines = append(lines, "  "+progressBar(min(24, max(8, budget-24)), done, failed, total)+" "+
+		head = append(head, "  "+progressBar(min(24, max(8, budget-24)), done, failed, total)+" "+
 			styleMuted.Render(fmt.Sprintf("%d/%d", done+failed, total)))
 	}
 
+	var groups []workflowGroup
 	for _, phase := range w.phaseOrder() {
-		lines = append(lines, m.workflowPhaseLines(w, phase, budget)...)
+		groups = append(groups, m.workflowPhaseGroup(w, phase, budget))
 	}
+
+	var tail []string
 	if len(w.Logs) > 0 {
-		lines = append(lines, "")
+		tail = append(tail, "")
 		for _, entry := range lastLogs(w.Logs, 4) {
-			lines = append(lines, styleMuted.Render("  log ")+
+			tail = append(tail, styleMuted.Render("  log ")+
 				lipgloss.NewStyle().Foreground(colorText).Render(truncateLabel(entry.Message, budget-7)))
 		}
 	}
 	if w.Status != "running" && w.Summary != "" {
-		lines = append(lines, styleMuted.Render("  "+truncateLabel(w.Summary, budget-2)))
+		tail = append(tail, styleMuted.Render("  "+truncateLabel(w.Summary, budget-2)))
+	}
+
+	return assembleWorkflowTree(head, groups, tail, maxRows)
+}
+
+// assembleWorkflowTree flattens the tree, dropping rows only when it has to.
+// Phase headers and running agents are never dropped; finished agents go
+// first, then the log tail, and whatever was hidden is counted in a final line.
+func assembleWorkflowTree(head []string, groups []workflowGroup, tail []string, maxRows int) []string {
+	totalRows, runningRows := 0, 0
+	for _, g := range groups {
+		totalRows += len(g.rows)
+		for _, r := range g.rows {
+			if r.prio == wfRowRunning {
+				runningRows++
+			}
+		}
+	}
+	fixed := len(head) + len(groups)
+	full := fixed + totalRows + len(tail)
+	if maxRows <= 0 || full <= maxRows {
+		return flattenWorkflowTree(head, groups, tail, nil, 0)
+	}
+	// Reserve one row for the "… N hidden" notice.
+	spare := maxRows - fixed - 1
+	keepTail := len(tail)
+	if spare-keepTail < runningRows {
+		keepTail = 0
+	}
+	allowedFinished := max(spare-keepTail-runningRows, 0)
+	hidden := (totalRows - runningRows - allowedFinished) + (len(tail) - keepTail)
+	// Spend the finished-row budget on failures first, then successes, so a
+	// trimmed panel still shows what went wrong.
+	keep := map[int]bool{}
+	budgetLeft := allowedFinished
+	for _, prio := range []int{wfRowFailed, wfRowDone} {
+		i := 0
+		for _, g := range groups {
+			for _, r := range g.rows {
+				if r.prio != wfRowRunning {
+					if r.prio == prio && budgetLeft > 0 {
+						keep[i] = true
+						budgetLeft--
+					}
+				}
+				i++
+			}
+		}
+	}
+	return flattenWorkflowTree(head, groups, tail[:keepTail], keep, hidden)
+}
+
+// flattenWorkflowTree emits the lines. A nil keep set means "no trimming";
+// otherwise a finished row survives only if its index is in the set.
+func flattenWorkflowTree(head []string, groups []workflowGroup, tail []string, keep map[int]bool, hidden int) []string {
+	lines := append([]string(nil), head...)
+	i := 0
+	for _, g := range groups {
+		lines = append(lines, g.header)
+		for _, r := range g.rows {
+			if r.prio == wfRowRunning || keep == nil || keep[i] {
+				lines = append(lines, r.line)
+			}
+			i++
+		}
+	}
+	lines = append(lines, tail...)
+	if hidden > 0 {
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d finished rows hidden — ctrl+b for the full tree", hidden)))
 	}
 	return lines
 }
@@ -143,7 +261,7 @@ func lastLogs(logs []workflowLogEntry, n int) []workflowLogEntry {
 	return logs[len(logs)-n:]
 }
 
-func (m Model) workflowPhaseLines(w *workflowRun, phase string, budget int) []string {
+func (m Model) workflowPhaseGroup(w *workflowRun, phase string, budget int) workflowGroup {
 	agents := w.agentsInPhase(phase)
 	title := phase
 	if title == "" {
@@ -177,7 +295,7 @@ func (m Model) workflowPhaseLines(w *workflowRun, phase string, budget int) []st
 		head += "  " + progressBar(10, pDone, pFailed, len(agents)) + " " +
 			styleMuted.Render(fmt.Sprintf("%d/%d", pDone+pFailed, len(agents)))
 	}
-	lines := []string{head}
+	group := workflowGroup{header: head}
 	for _, a := range agents {
 		icon, iconStyle := agentStatusGlyph(a.Status)
 		name := truncateAgentName(a.Instance, max(8, budget/3))
@@ -193,25 +311,31 @@ func (m Model) workflowPhaseLines(w *workflowRun, phase string, budget int) []st
 			detail = "replayed · " + detail
 		}
 		prefix := "    " + iconStyle.Render(icon+" ") + lipgloss.NewStyle().Foreground(colorText).Render(name)
-		lines = append(lines, prefix+" "+
-			styleMuted.Render(truncateLabel(strings.ReplaceAll(detail, "\n", " "), max(6, budget-lipgloss.Width(prefix)-1))))
+		prio := wfRowDone
+		switch a.Status {
+		case "running":
+			prio = wfRowRunning
+		case "failed":
+			prio = wfRowFailed
+		}
+		group.rows = append(group.rows, workflowRow{
+			prio: prio,
+			line: prefix + " " + styleMuted.Render(
+				truncateLabel(strings.ReplaceAll(detail, "\n", " "), max(6, budget-lipgloss.Width(prefix)-1))),
+		})
 	}
-	return lines
+	return group
 }
 
 // renderWorkflowBlock is the footer form of the panel, shown under the
 // transcript when the side panel is hidden.
 func (m Model) renderWorkflowBlock(width int) string {
-	lines := m.workflowTreeLines(width - 4)
+	// The footer competes with the transcript for rows, so a large run is
+	// trimmed rather than allowed to push the conversation off screen.
+	const maxRows = 14
+	lines := m.workflowTreeLines(width-4, maxRows)
 	if len(lines) == 0 {
 		return ""
-	}
-	// The footer competes with the transcript for rows, so a large run is
-	// summarised rather than allowed to push the conversation off screen.
-	const maxRows = 14
-	if len(lines) > maxRows {
-		hidden := len(lines) - maxRows + 1
-		lines = append(lines[:maxRows-1], styleMuted.Render(fmt.Sprintf("  … %d more rows — ctrl+b for the full tree", hidden)))
 	}
 	return lipgloss.NewStyle().
 		Width(width-2).

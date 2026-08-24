@@ -38,7 +38,7 @@ func newWorkflowModel(t *testing.T) Model {
 
 func TestWorkflowPanelLifecycle(t *testing.T) {
 	m := newWorkflowModel(t)
-	if lines := m.workflowTreeLines(60); lines != nil {
+	if lines := m.workflowTreeLines(60, 0); lines != nil {
 		t.Fatalf("no workflow → no panel, got %v", lines)
 	}
 
@@ -51,7 +51,7 @@ func TestWorkflowPanelLifecycle(t *testing.T) {
 	if len(m.workflow.Phases) != 2 {
 		t.Fatalf("declared phases lost: %+v", m.workflow.Phases)
 	}
-	joined := strings.Join(m.workflowTreeLines(70), "\n")
+	joined := strings.Join(m.workflowTreeLines(70, 0), "\n")
 	for _, want := range []string{"review-changes", "Review", "Verify", "Review then verify"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("panel missing %q:\n%s", want, joined)
@@ -104,7 +104,7 @@ func TestWorkflowPanelProgressEvents(t *testing.T) {
 	if len(m.workflow.Logs) != 1 || m.workflow.Logs[0].Message != "round 1: 3 found" {
 		t.Fatalf("logs = %+v", m.workflow.Logs)
 	}
-	joined := strings.Join(m.workflowTreeLines(70), "\n")
+	joined := strings.Join(m.workflowTreeLines(70, 0), "\n")
 	if !strings.Contains(joined, "round 1: 3 found") {
 		t.Fatalf("log not rendered:\n%s", joined)
 	}
@@ -134,7 +134,7 @@ func TestWorkflowPanelGroupsAgentsUnderPhases(t *testing.T) {
 	if got := len(m.workflow.agentsInPhase("")); got != 1 {
 		t.Fatalf("phaseless agents = %d", got)
 	}
-	joined := strings.Join(m.workflowTreeLines(70), "\n")
+	joined := strings.Join(m.workflowTreeLines(70, 0), "\n")
 	if !strings.Contains(joined, "(no phase)") {
 		t.Fatalf("agents dispatched outside a phase must still show:\n%s", joined)
 	}
@@ -152,7 +152,7 @@ func TestWorkflowPanelMarksReplayedAgents(t *testing.T) {
 	if _, _, _, cached := m.workflow.counts(); cached != 1 {
 		t.Fatalf("cached count = %d", cached)
 	}
-	joined := strings.Join(m.workflowTreeLines(70), "\n")
+	joined := strings.Join(m.workflowTreeLines(70, 0), "\n")
 	if !strings.Contains(joined, "replayed") {
 		t.Fatalf("a journal replay must be labelled:\n%s", joined)
 	}
@@ -199,5 +199,48 @@ func TestTruncateAgentNameKeepsTheInstanceNumber(t *testing.T) {
 	}
 	if n := len([]rune(truncateAgentName("general-purpose#7", 10))); n > 10 {
 		t.Fatalf("result is %d cells wide, want at most 10", n)
+	}
+}
+
+func TestWorkflowPanelTrimsFinishedRowsNotPhases(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	// Twelve finished Scan agents, one of them failed, plus a running one.
+	for i := 1; i <= 12; i++ {
+		inst := fmt.Sprintf("general-purpose#%d", i)
+		m.applyToolTraceToObservability(wfAgentTrace(inst, fmt.Sprintf("scan:%d", i), "Review", "running", false))
+		status := "success"
+		if i == 4 {
+			status = "error"
+		}
+		m.applyToolTraceToObservability(wfAgentTrace(inst, fmt.Sprintf("scan:%d", i), "Review", status, false))
+	}
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#13", "verify:1", "Verify", "running", false))
+
+	lines := m.workflowTreeLines(80, 10)
+	if len(lines) > 10 {
+		t.Fatalf("panel is %d rows, want at most 10", len(lines))
+	}
+	joined := strings.Join(lines, "\n")
+	// Both declared phases must survive: what is still to come is the point.
+	for _, want := range []string{"Review", "Verify"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("trimming dropped phase %q:\n%s", want, joined)
+		}
+	}
+	// The running agent must survive.
+	if !strings.Contains(joined, "verify:1") {
+		t.Fatalf("trimming dropped a running agent:\n%s", joined)
+	}
+	// The failure must outlive the successes around it.
+	if !strings.Contains(joined, "scan:4") {
+		t.Fatalf("trimming dropped the failed agent but kept successes:\n%s", joined)
+	}
+	if !strings.Contains(joined, "hidden") {
+		t.Fatalf("trimming must say how much it hid:\n%s", joined)
+	}
+	// Uncapped, everything is there.
+	if full := m.workflowTreeLines(80, 0); len(full) <= len(lines) {
+		t.Fatalf("uncapped tree (%d rows) should be longer than the capped one (%d)", len(full), len(lines))
 	}
 }
