@@ -138,12 +138,13 @@ func TestRenderWorkflowResult(t *testing.T) {
 		Agents: 7, Failed: 2, Cached: 1, Tokens: 4200,
 		Logs:   []string{"round 1: 3 found"},
 		Phases: []string{"Find", "Verify"},
-	})
+	}, []string{`general-purpose#3: workspace merge conflict — branch "spettro/gp-3" kept at /w/gp-3`})
 	for _, want := range []string{
 		`name="audit"`, `run_id="wf_1"`,
 		"7 agents · 2 failed · 1 replayed from journal · 4200 tokens",
 		"Find → Verify", "round 1: 3 found", `"confirmed"`,
 		"resume_from_run_id", "Some agents failed",
+		"<unmerged>", `branch "spettro/gp-3"`, "did not merge back",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("result missing %q:\n%s", want, out)
@@ -154,9 +155,12 @@ func TestRenderWorkflowResult(t *testing.T) {
 func TestRenderWorkflowResultCleanRun(t *testing.T) {
 	out := renderWorkflowResult("wf_2", "/tmp/run", "inline", workflow.Meta{Name: "sweep"}, workflow.Result{
 		Value: "all clear", Agents: 3,
-	})
+	}, nil)
 	if strings.Contains(out, "Some agents failed") {
 		t.Fatalf("a clean run must not warn about failures:\n%s", out)
+	}
+	if strings.Contains(out, "unmerged") {
+		t.Fatalf("a clean run must not mention unmerged work:\n%s", out)
 	}
 	if !strings.Contains(out, "all clear") {
 		t.Fatalf("a string return value should pass through verbatim:\n%s", out)

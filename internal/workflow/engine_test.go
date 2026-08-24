@@ -485,3 +485,110 @@ func TestDefaultAgentTypeNamesInstances(t *testing.T) {
 		t.Fatalf("instance = %q, want review#2", runner.calls[1].Instance)
 	}
 }
+
+// scopedRunner records the per-call bracket the engine gives it.
+type scopedRunner struct {
+	*fakeRunner
+	mu     sync.Mutex
+	begins []int
+	ends   []int
+	errs   []error
+}
+
+func (s *scopedRunner) BeginCall(_ context.Context, req Request) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.begins = append(s.begins, req.Index)
+	return nil
+}
+
+func (s *scopedRunner) EndCall(_ context.Context, req Request, runErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ends = append(s.ends, req.Index)
+	s.errs = append(s.errs, runErr)
+}
+
+// A schema call is retried until its answer parses. Anything the Runner sets
+// up for the call — Spettro creates a git worktree — must be created once, not
+// once per attempt: a worktree per attempt left two branches of overlapping
+// edits for a single agent, and merging both back collided.
+func TestCallScoperBracketsRetriesOnce(t *testing.T) {
+	var attempts atomic.Int32
+	runner := &scopedRunner{fakeRunner: &fakeRunner{fn: func(req Request) (Response, error) {
+		if attempts.Add(1) < 3 {
+			return Response{Text: "not json at all"}, nil
+		}
+		return Response{Text: `{"ok": true}`}, nil
+	}}}
+	res := run(t, `return await agent('x', {schema: {type:'object', required:['ok']}})`, Options{Runner: runner})
+	if res.Value == nil {
+		t.Fatal("the call never produced a value")
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts.Load())
+	}
+	if len(runner.begins) != 1 || len(runner.ends) != 1 {
+		t.Fatalf("begins = %v, ends = %v — want exactly one bracket for one agent() call",
+			runner.begins, runner.ends)
+	}
+	if runner.errs[0] != nil {
+		t.Fatalf("EndCall saw %v, want nil after a successful parse", runner.errs[0])
+	}
+}
+
+func TestCallScoperReportsFailureAndBracketsEveryCall(t *testing.T) {
+	runner := &scopedRunner{fakeRunner: &fakeRunner{fn: func(req Request) (Response, error) {
+		if strings.Contains(req.Prompt, "boom") {
+			return Response{}, fmt.Errorf("provider exploded")
+		}
+		return Response{Text: "fine"}, nil
+	}}}
+	run(t, `await parallel([() => agent('boom'), () => agent('ok'), () => agent('ok2')])`,
+		Options{Runner: runner})
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.begins) != 3 || len(runner.ends) != 3 {
+		t.Fatalf("begins = %v, ends = %v — every call needs a bracket", runner.begins, runner.ends)
+	}
+	// EndCall has to learn the call failed, or the Runner would merge a broken
+	// workspace back instead of preserving it.
+	failures := 0
+	for _, err := range runner.errs {
+		if err != nil {
+			failures++
+		}
+	}
+	if failures != 1 {
+		t.Fatalf("EndCall saw %d failures, want 1", failures)
+	}
+}
+
+// A Runner that does not implement CallScoper must keep working untouched.
+func TestRunnerWithoutCallScoper(t *testing.T) {
+	res := run(t, `return await agent('plain')`, Options{Runner: echoRunner(0)})
+	if res.Value != "done:plain" {
+		t.Fatalf("value = %#v", res.Value)
+	}
+}
+
+// BeginCall failing must fail the call rather than run it unscoped: a workspace
+// that could not be created means the agent would edit the shared checkout.
+func TestCallScoperBeginFailureAbortsTheCall(t *testing.T) {
+	runner := &failingScoper{fakeRunner: echoRunner(0)}
+	res := run(t, `return (await agent('x')) === null`, Options{Runner: runner})
+	if res.Value != true {
+		t.Fatalf("value = %#v, want the call to have failed to null", res.Value)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("the agent ran %d times despite setup failing", runner.count())
+	}
+}
+
+type failingScoper struct{ *fakeRunner }
+
+func (f *failingScoper) BeginCall(context.Context, Request) error {
+	return fmt.Errorf("cannot create workspace")
+}
+func (f *failingScoper) EndCall(context.Context, Request, error) {}

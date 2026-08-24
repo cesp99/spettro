@@ -64,6 +64,24 @@ func workspaceGit(ctx context.Context, dir string, args ...string) (string, erro
 	return strings.TrimSpace(string(out)), err
 }
 
+// gitIdentityArgs supplies a committer identity only when git cannot find one.
+//
+// Every commit Spettro writes on the user's behalf needs an identity, and git
+// refuses outright when none is configured — no global ~/.gitconfig, a
+// container, CI, or a process whose HOME was redirected. commitPending already
+// passes one for the sub-agent's own commit; the merge commit that folds that
+// work back needs the same, or the branch is stranded and the agent's work
+// looks lost.
+//
+// It is a fallback, not an override: when the user has an identity, their
+// merge commits stay theirs.
+func gitIdentityArgs(ctx context.Context, dir string) []string {
+	if _, err := workspaceGit(ctx, dir, "var", "GIT_COMMITTER_IDENT"); err == nil {
+		return nil
+	}
+	return []string{"-c", "user.name=" + spettroCommitName, "-c", "user.email=" + spettroCommitEmail}
+}
+
 // workspaceSlug maps an agent instance name ("code#3") onto a branch/dir-safe
 // slug ("code-3").
 func workspaceSlug(name string) string {
@@ -274,7 +292,8 @@ func (w *agentWorkspace) finalize(ctx context.Context) workspaceMerge {
 	}
 	workspaceMu.Lock()
 	msg := fmt.Sprintf("Merge branch '%s' (spettro subagent %s)", w.branch, w.name)
-	out, err := workspaceGit(ctx, w.repoRoot, "merge", "--no-ff", "-m", msg, "--", w.branch)
+	mergeArgs := append(gitIdentityArgs(ctx, w.repoRoot), "merge", "--no-ff", "-m", msg, "--", w.branch)
+	out, err := workspaceGit(ctx, w.repoRoot, mergeArgs...)
 	if err != nil {
 		_, _ = workspaceGit(ctx, w.repoRoot, "merge", "--abort")
 		workspaceMu.Unlock()

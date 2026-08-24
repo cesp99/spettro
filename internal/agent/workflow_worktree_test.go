@@ -1,0 +1,70 @@
+package agent
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"spettro/internal/workflow"
+)
+
+// The engine only brackets a call when the Runner implements CallScoper; if
+// this assertion ever stops holding, worktree isolation silently stops
+// happening and agents edit the shared checkout instead.
+var _ workflow.CallScoper = (*workflowRunner)(nil)
+
+func TestWorkflowRunnerCreatesAndMergesWorktree(t *testing.T) {
+	repo := testGitRepo(t)
+	rt := &toolRuntime{cwd: repo}
+	runner := &workflowRunner{rt: rt}
+	ctx := context.Background()
+
+	req := workflow.Request{Index: 1, Instance: "general-purpose#1", Isolation: "worktree"}
+	if err := runner.BeginCall(ctx, req); err != nil {
+		t.Fatalf("BeginCall: %v", err)
+	}
+	ws := runner.workspaceFor(1)
+	if ws == nil {
+		t.Fatal("isolation:worktree did not produce a workspace")
+	}
+	if ws.subCWD == repo {
+		t.Fatalf("the agent would run in the shared checkout, not its worktree: %s", ws.subCWD)
+	}
+
+	// An edit made with a repository-relative path from inside the worktree
+	// must land in the worktree, not the main checkout.
+	if err := os.WriteFile(filepath.Join(ws.subCWD, "added.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "added.txt")); !os.IsNotExist(err) {
+		t.Fatal("the edit leaked into the main checkout before the merge")
+	}
+
+	runner.EndCall(ctx, req, nil)
+	if runner.workspaceFor(1) != nil {
+		t.Fatal("the workspace was not released")
+	}
+	if _, err := os.Stat(filepath.Join(repo, "added.txt")); err != nil {
+		t.Fatalf("the worktree was not merged back: %v", err)
+	}
+	if branches := gitOut(t, repo, "branch", "--list", "spettro/*"); branches != "" {
+		t.Fatalf("a clean merge must delete its branch, got:\n%s", branches)
+	}
+	if len(runner.mergeNotes()) != 0 {
+		t.Fatalf("a clean merge must not be reported as a problem: %v", runner.mergeNotes())
+	}
+}
+
+func TestWorkflowRunnerWithoutIsolationTouchesNothing(t *testing.T) {
+	repo := testGitRepo(t)
+	runner := &workflowRunner{rt: &toolRuntime{cwd: repo}}
+	req := workflow.Request{Index: 1, Instance: "general-purpose#1"}
+	if err := runner.BeginCall(context.Background(), req); err != nil {
+		t.Fatalf("BeginCall: %v", err)
+	}
+	if runner.workspaceFor(1) != nil {
+		t.Fatal("a call without isolation must not get a worktree")
+	}
+	runner.EndCall(context.Background(), req, nil)
+}

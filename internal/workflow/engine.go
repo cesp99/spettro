@@ -46,6 +46,23 @@ type Runner interface {
 	RunAgent(ctx context.Context, req Request) (Response, error)
 }
 
+// CallScoper lets a Runner hold state for the whole of one agent() call rather
+// than for one attempt at it.
+//
+// The engine may call RunAgent several times for a single agent() — a
+// schema-carrying call is retried until its answer parses — and a Runner that
+// sets up per-call resources must not redo that work per attempt. Spettro's
+// worktree isolation is the case that forced this: creating a fresh worktree
+// on every attempt left two branches carrying overlapping edits for one call,
+// and merging both back collided.
+//
+// BeginCall runs once before the first attempt; EndCall runs once after the
+// last, with the error the call ended on (nil on success).
+type CallScoper interface {
+	BeginCall(ctx context.Context, req Request) error
+	EndCall(ctx context.Context, req Request, runErr error)
+}
+
 // Options configures one workflow run.
 type Options struct {
 	Runner   Runner
@@ -570,7 +587,7 @@ func (s *shared) dispatch(ctx context.Context, req Request, nested bool) (string
 		return "", nil, ctx.Err()
 	}
 
-	text, value, err := s.callWithSchema(ctx, req)
+	text, value, err := s.callScoped(ctx, req)
 	entry := JournalEntry{
 		Key: key, Index: req.Index, Label: req.Label, Phase: req.Phase,
 		Instance: req.Instance, AgentType: req.AgentType, Output: text,
@@ -600,6 +617,21 @@ func instanceName(req Request) string {
 		name = "agent"
 	}
 	return fmt.Sprintf("%s#%d", name, req.Index)
+}
+
+// callScoped brackets the attempt loop with the Runner's per-call setup and
+// teardown, so resources scoped to one agent() call are created once however
+// many attempts it takes.
+func (s *shared) callScoped(ctx context.Context, req Request) (text string, value any, err error) {
+	scoper, ok := s.opts.Runner.(CallScoper)
+	if !ok {
+		return s.callWithSchema(ctx, req)
+	}
+	if err := scoper.BeginCall(ctx, req); err != nil {
+		return "", nil, err
+	}
+	defer func() { scoper.EndCall(ctx, req, err) }()
+	return s.callWithSchema(ctx, req)
 }
 
 // callWithSchema runs the agent, and when the call carries a schema, retries

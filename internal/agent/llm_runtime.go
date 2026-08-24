@@ -215,9 +215,15 @@ type toolCall struct {
 }
 
 type toolRuntime struct {
-	cwd           string
-	mu            sync.Mutex
-	shellMu       sync.Mutex
+	cwd     string
+	mu      sync.Mutex
+	shellMu sync.Mutex
+	// worktreeMu serializes every git operation that touches the shared
+	// repository — creating a sub-agent worktree, and merging one back. Two of
+	// those running at once contend on the repo's index and ref locks, and git
+	// reports the loser as a plain failure rather than as a conflict, so the
+	// work looks merged when it is not.
+	worktreeMu    sync.Mutex
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
 	searcher      RepoSearcher

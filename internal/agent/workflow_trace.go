@@ -121,7 +121,7 @@ func (o *workflowObserver) emitAgent(ev workflow.Event, status, output string) {
 // renderWorkflowResult is what the model reads when the tool returns. It is
 // the script's return value first — that is the answer the script computed —
 // framed by enough run metadata to re-run, resume, or explain the run.
-func renderWorkflowResult(runID, dir, origin string, meta workflow.Meta, res workflow.Result) string {
+func renderWorkflowResult(runID, dir, origin string, meta workflow.Meta, res workflow.Result, mergeNotes []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<workflow_result name=%q run_id=%q>\n", meta.Name, runID)
 	fmt.Fprintf(&b, "<summary>%d agents · %d failed · %d replayed from journal · %d tokens</summary>\n",
@@ -140,9 +140,20 @@ func renderWorkflowResult(runID, dir, origin string, meta workflow.Meta, res wor
 	b.WriteString("<returned>\n")
 	b.WriteString(truncate(encodeWorkflowValue(res.Value), 24000))
 	b.WriteString("\n</returned>\n")
+	if len(mergeNotes) > 0 {
+		b.WriteString("<unmerged>\n")
+		for _, n := range mergeNotes {
+			b.WriteString(truncate(n, 600))
+			b.WriteByte('\n')
+		}
+		b.WriteString("</unmerged>\n")
+	}
 	b.WriteString("</workflow_result>")
 	fmt.Fprintf(&b, "\nScript: %s · transcript: %s", origin, dir)
 	b.WriteString(fmt.Sprintf("\nTo resume after an edit, re-run with script_path and resume_from_run_id=%q: unchanged calls replay from the journal instead of re-running.", runID))
+	if len(mergeNotes) > 0 {
+		b.WriteString("\nSome sub-agent workspaces did not merge back. Their work is on the branches listed above: resolve each one yourself (merge it, fix conflicts, commit), then delete the branch and its worktree.")
+	}
 	if res.Failed > 0 {
 		b.WriteString("\nSome agents failed and resolved to null in the script. Check the returned value for gaps before trusting it, and re-dispatch what is missing.")
 	}

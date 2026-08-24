@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -198,6 +199,8 @@ Prefer pipeline over parallel-then-parallel: a barrier is only right when a stag
 
 Every agent is a fresh sub-agent that cannot see your context or the other agents: each prompt must be self-contained, with paths, constraints, and the expected output. Never give two concurrently running agents work that touches the same file — set isolation:"worktree" on the ones that edit.
 
+With isolation:"worktree" the agent runs inside its own checkout, so give it REPOSITORY-RELATIVE paths ("internal/budget/budget.go"). An absolute path built from the main checkout points outside its worktree: the edit lands in the shared tree, the worktree merges back empty, and the isolation you asked for silently did nothing.
+
 Date.now(), Math.random() and argless new Date() are unavailable (they would break resume); pass timestamps in through args and vary work by index.`
 
 type workflowArgs struct {
@@ -296,8 +299,9 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 
 	obs := &workflowObserver{rt: r, runID: runID, meta: meta}
 	obs.start(origin)
+	runner := &workflowRunner{rt: r, runID: runID}
 	result, runErr := workflow.Run(ctx, script, workflow.Options{
-		Runner:           &workflowRunner{rt: r, runID: runID},
+		Runner:           runner,
 		Observer:         obs.handle,
 		MaxConcurrency:   args.MaxConcurrency,
 		MaxAgents:        workflowMaxAgents,
@@ -321,7 +325,7 @@ func (r *toolRuntime) runWorkflow(ctx context.Context, rawArgs json.RawMessage) 
 	if runErr != nil {
 		return "", fmt.Errorf("%w (run %s; transcript at %s)", runErr, runID, r.workflowRunDir(runID))
 	}
-	out := renderWorkflowResult(runID, r.workflowRunDir(runID), origin, meta, result)
+	out := renderWorkflowResult(runID, r.workflowRunDir(runID), origin, meta, result, runner.mergeNotes())
 	if savedAt != "" {
 		out += fmt.Sprintf("\nSaved as a reusable workflow at %s — it can be re-run with /workflows run %s.", savedAt, saveName)
 	}
@@ -494,6 +498,87 @@ func newWorkflowRunID() string {
 type workflowRunner struct {
 	rt    *toolRuntime
 	runID string
+
+	// spaces holds the isolated worktree for each in-flight call, keyed by the
+	// engine's call index. It is keyed per call rather than per attempt
+	// because the engine retries a schema call until its answer parses, and a
+	// worktree per attempt means two branches of overlapping edits for one
+	// agent — which is how a live run lost a merge.
+	mu     sync.Mutex
+	spaces map[int]*agentWorkspace
+	// notes collects workspaces that did not merge cleanly, so the run's
+	// result can tell the model where the stranded work is. They cannot ride
+	// on the agent's answer: by the time EndCall runs that answer has already
+	// been parsed against the call's schema.
+	notes []string
+}
+
+func (w *workflowRunner) mergeNotes() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.notes...)
+}
+
+// BeginCall creates the call's isolated workspace, once, before the first
+// attempt.
+func (w *workflowRunner) BeginCall(ctx context.Context, req workflow.Request) error {
+	if req.Isolation != "worktree" {
+		return nil
+	}
+	ws, err := w.rt.newSubagentWorkspace(ctx, req.Instance)
+	if err != nil {
+		return fmt.Errorf("workflow: %w", err)
+	}
+	w.mu.Lock()
+	if w.spaces == nil {
+		w.spaces = map[int]*agentWorkspace{}
+	}
+	w.spaces[req.Index] = ws
+	w.mu.Unlock()
+	return nil
+}
+
+// EndCall folds the workspace back once the call is finished, however many
+// attempts it took.
+//
+// A failed call's work is preserved rather than merged; a successful one is
+// merged back. Both run on an uncancellable context so a cancelled workflow
+// still cleans its worktrees up instead of leaking them.
+func (w *workflowRunner) EndCall(ctx context.Context, req workflow.Request, runErr error) {
+	ws := w.takeWorkspace(req.Index)
+	if ws == nil {
+		return
+	}
+	mergeCtx := context.WithoutCancel(ctx)
+	if runErr != nil || ctx.Err() != nil {
+		ws.abandon(mergeCtx)
+		return
+	}
+	if m := ws.finalize(mergeCtx); m.Status != "merged" && m.Status != "no_changes" {
+		// Anything that is not a clean merge has to reach both the user and
+		// the model: silently dropping it leaves work on a branch nobody
+		// knows about.
+		note := fmt.Sprintf("%s: workspace merge %s — branch %q kept at %s%s",
+			req.Instance, m.Status, m.Branch, m.Path, mergeDetail(m))
+		w.mu.Lock()
+		w.notes = append(w.notes, note)
+		w.mu.Unlock()
+		w.rt.emitWorkflowMergeNote(req, note)
+	}
+}
+
+func (w *workflowRunner) takeWorkspace(index int) *agentWorkspace {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ws := w.spaces[index]
+	delete(w.spaces, index)
+	return ws
+}
+
+func (w *workflowRunner) workspaceFor(index int) *agentWorkspace {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.spaces[index]
 }
 
 func (w *workflowRunner) RunAgent(ctx context.Context, req workflow.Request) (workflow.Response, error) {
@@ -506,12 +591,7 @@ func (w *workflowRunner) RunAgent(ctx context.Context, req workflow.Request) (wo
 		spec.Permission = p
 	}
 	cwd := r.cwd
-	var ws *agentWorkspace
-	if req.Isolation == "worktree" {
-		ws, err = r.newSubagentWorkspace(ctx, req.Instance)
-		if err != nil {
-			return workflow.Response{}, fmt.Errorf("workflow: %w", err)
-		}
+	if ws := w.workspaceFor(req.Index); ws != nil {
 		cwd = ws.subCWD
 	}
 
@@ -547,21 +627,32 @@ func (w *workflowRunner) RunAgent(ctx context.Context, req workflow.Request) (wo
 		sub.Thinking = level
 	}
 
-	resp, runErr := w.runWithRetries(ctx, sub, req.Prompt)
-	if ws != nil {
-		// A failed member's work is preserved rather than merged; a successful
-		// one is folded back. Both run on an uncancellable context so a
-		// cancelled workflow still cleans its worktrees up.
-		mergeCtx := context.WithoutCancel(ctx)
-		if runErr != nil || ctx.Err() != nil {
-			if kept := ws.abandon(mergeCtx); kept != nil && runErr != nil {
-				runErr = fmt.Errorf("%w (work preserved on branch %s at %s)", runErr, kept.Branch, kept.Path)
-			}
-		} else if m := ws.finalize(mergeCtx); m.Status == "conflict" || m.Status == "error" {
-			resp.Text += fmt.Sprintf("\n\n[workspace merge %s: branch %q kept at %s]", m.Status, m.Branch, m.Path)
-		}
+	return w.runWithRetries(ctx, sub, req.Prompt)
+}
+
+// emitWorkflowMergeNote surfaces a workspace that did not merge cleanly. It
+// goes out as a trace rather than being appended to the agent's answer,
+// because by the time EndCall runs the answer has already been parsed against
+// the call's schema and appending prose to it would break that contract.
+func mergeDetail(m workspaceMerge) string {
+	if strings.TrimSpace(m.Detail) == "" {
+		return ""
 	}
-	return resp, runErr
+	return " — " + truncate(m.Detail, 400)
+}
+
+func (r *toolRuntime) emitWorkflowMergeNote(req workflow.Request, note string) {
+	if r.toolCallback == nil {
+		return
+	}
+	args, _ := json.Marshal(map[string]any{"kind": "log", "phase": req.Phase})
+	r.toolCallback(ToolTrace{
+		AgentID: req.Instance,
+		Name:    workflowProgressTraceName,
+		Status:  "error",
+		Args:    string(args),
+		Output:  note,
+	})
 }
 
 // runWithRetries retries transient provider failures per agent, matching the
