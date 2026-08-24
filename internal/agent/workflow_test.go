@@ -290,3 +290,27 @@ func TestFindWorkflowRunDir(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkflowKeywordSpans(t *testing.T) {
+	// Spans are rune indices, not byte offsets: the TUI highlights cells.
+	spans := WorkflowKeywordSpans("héllo ultracode wörld ULTRACODE")
+	if len(spans) != 2 {
+		t.Fatalf("spans = %v, want 2", spans)
+	}
+	text := []rune("héllo ultracode wörld ULTRACODE")
+	if got := string(text[spans[0][0]:spans[0][1]]); got != "ultracode" {
+		t.Fatalf("first span = %q", got)
+	}
+	if got := string(text[spans[1][0]:spans[1][1]]); got != "ULTRACODE" {
+		t.Fatalf("second span = %q", got)
+	}
+	if WorkflowKeywordSpans("ultracoded") != nil {
+		t.Fatal("a non-activating word must produce no span")
+	}
+	// The highlight and the runtime must never disagree.
+	for _, s := range []string{"", "ultracode", "ultracoded", "x ultracode.", "ULTRAcode!", "src/ultracode.go"} {
+		if (len(WorkflowKeywordSpans(s)) > 0) != WorkflowRequested(s) {
+			t.Fatalf("%q: spans and WorkflowRequested disagree", s)
+		}
+	}
+}

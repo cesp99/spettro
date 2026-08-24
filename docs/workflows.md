@@ -30,6 +30,12 @@ That grants the agent the `workflow` tool for **that turn only**, and
 appends the authoring guidance to its system prompt. The keyword matches
 as a whole word, so `src/ultracoder.go` does not trip it.
 
+As you type it, the word lights up in the input box — a slow violet-to-cyan
+shimmer with a highlight sweeping across it. That is not decoration: the
+highlight is driven by the *same* match that decides whether the tool gets
+injected, so a lit word is a word that will activate, and `ultracoded` stays
+plain.
+
 It is one-shot rather than a persistent toggle on purpose: the guidance
 is a couple of kilobytes of system prompt, and the prompt has to stay
 byte-stable within a run for caching to hit, so a permanent toggle would

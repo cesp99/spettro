@@ -243,6 +243,12 @@ func (m Model) viewSep(width int) string {
 		Render(strings.Repeat("─", width))
 }
 
+// planLabelFrameDivisor slows the MAX rainbow down. The frame counter ticks
+// every 50 ms; advancing a hue per tick made the label strobe in the corner of
+// the eye, which is the opposite of what a status label should do. One step
+// per 150 ms keeps it visibly alive without pulling focus.
+const planLabelFrameDivisor = 3
+
 // renderPlanLabel renders a plan name with its tier color.
 // "max" animates through rainbow colors using the given frame counter.
 func renderPlanLabel(plan string, frame int) string {
@@ -263,7 +269,7 @@ func renderPlanLabel(plan string, frame int) string {
 		}
 		var out strings.Builder
 		for i, ch := range label {
-			c := rainbow[(i+frame)%len(rainbow)]
+			c := rainbow[(i+frame/planLabelFrameDivisor)%len(rainbow)]
 			out.WriteString(lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(ch)))
 		}
 		return out.String()
@@ -415,6 +421,13 @@ func clampTextLines(lines []string, maxLines, width int) []string {
 	return lines
 }
 
+// inputTextareaView is the textarea with the workflow keyword lit up. Every
+// place the input is drawn goes through here so the effect cannot appear in
+// one input state and vanish in another.
+func (m Model) inputTextareaView() string {
+	return highlightUltracode(m.ta.View(), m.eyeFrame)
+}
+
 func (m Model) viewInput(width int) string {
 	mc := m.currentColor()
 	agentLabel := m.mode
@@ -433,7 +446,7 @@ func (m Model) viewInput(width int) string {
 			mc,
 		))
 		if m.pendingPlan != "" {
-			lines = append(lines, m.ta.View())
+			lines = append(lines, m.inputTextareaView())
 		}
 	} else if m.showSteerChoice {
 		lines = append(lines, styleMuted.Render("  "+truncateLabel(m.steerPending, 100)))
@@ -460,7 +473,7 @@ func (m Model) viewInput(width int) string {
 		}
 		if m.approvalCursor == 3 {
 			lines = append(lines, styleMuted.Render("  type what to do instead, then press enter:"))
-			lines = append(lines, m.ta.View())
+			lines = append(lines, m.inputTextareaView())
 		} else {
 			lines = append(lines, m.renderApprovalPicker(
 				"allow this command?",
@@ -476,7 +489,7 @@ func (m Model) viewInput(width int) string {
 		if m.showAttachPrompt {
 			lines = append(lines, styleMuted.Render("  attach file: (esc cancels)"))
 		}
-		lines = append(lines, m.ta.View())
+		lines = append(lines, m.inputTextareaView())
 	}
 	boxStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).

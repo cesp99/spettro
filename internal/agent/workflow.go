@@ -40,16 +40,50 @@ const (
 	workflowMaxAttempts = 3
 )
 
+// WorkflowKeyword is the word a user writes to opt a turn into workflows.
+const WorkflowKeyword = workflowKeyword
+
 // workflowKeywordRe matches the activation keyword as a whole word, so
-// "ultracode" in prose turns workflows on but "ultracoded" or a path like
-// src/ultracode.go does not.
-var workflowKeywordRe = regexp.MustCompile(`(?i)\bultracode\b`)
+// "ultracode" in prose turns workflows on but "ultracoded" does not.
+var workflowKeywordRe = regexp.MustCompile(`(?i)\b` + workflowKeyword + `\b`)
 
 // WorkflowRequested reports whether a user message opts this turn into
 // workflows. Detection lives here rather than in each host so the TUI, ACP,
 // goal runs, Telegram and headless mode all honour the keyword identically.
 func WorkflowRequested(task string) bool {
-	return workflowKeywordRe.MatchString(task)
+	return len(WorkflowKeywordSpans(task)) > 0
+}
+
+// WorkflowKeywordSpans returns the [start, end) rune ranges of every
+// occurrence of the keyword that actually activates workflows.
+//
+// It exists so the TUI can light the word up as you type it and be right:
+// highlighting is driven by the same match that decides whether the tool gets
+// injected, so the input can never promise a mode the run will not enter.
+func WorkflowKeywordSpans(task string) [][2]int {
+	matches := workflowKeywordRe.FindAllStringIndex(task, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	// Byte offsets are useless to a renderer that works in cells; convert
+	// them once here rather than making every caller redo it.
+	runeAt := make(map[int]int, len(task)+1)
+	idx := 0
+	for byteOff := range task {
+		runeAt[byteOff] = idx
+		idx++
+	}
+	runeAt[len(task)] = idx
+
+	spans := make([][2]int, 0, len(matches))
+	for _, m := range matches {
+		start, ok1 := runeAt[m[0]]
+		end, ok2 := runeAt[m[1]]
+		if ok1 && ok2 {
+			spans = append(spans, [2]int{start, end})
+		}
+	}
+	return spans
 }
 
 // workflowPromptSection is appended to the system prompt when workflows are
