@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -500,7 +501,37 @@ func TestRunWorkflowSavesAndAsksBeforeRunning(t *testing.T) {
 		!strings.Contains(err.Error(), "declined") {
 		t.Fatalf("want a declined error, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(cwd2, ".spettro", "workflows")); !os.IsNotExist(err) {
-		t.Fatal("a declined workflow must not be written to disk")
+	// Nothing at all, not just no saved script: consent has to come before the
+	// run directory is created, or a refusal still leaves a transcript behind.
+	var leftovers []string
+	_ = filepath.WalkDir(filepath.Join(cwd2, ".spettro"), func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			leftovers = append(leftovers, path)
+		}
+		return nil
+	})
+	if len(leftovers) > 0 {
+		t.Fatalf("a declined workflow wrote to disk: %v", leftovers)
+	}
+}
+
+// Run transcripts and the user's reusable scripts must not share a directory:
+// filling .spettro/workflows with run directories would bury the scripts the
+// user actually keeps there.
+func TestWorkflowRunDirIsSeparateFromSavedScripts(t *testing.T) {
+	withSession := &toolRuntime{cwd: "/proj", sessionDir: "/home/u/.spettro/sessions/session-1"}
+	if got, want := withSession.workflowRunDir("wf_1"),
+		filepath.Join("/home/u/.spettro/sessions/session-1", "workflows", "wf_1"); got != want {
+		t.Fatalf("session run dir = %q, want %q", got, want)
+	}
+
+	sessionless := &toolRuntime{cwd: "/proj"}
+	got := sessionless.workflowRunDir("wf_1")
+	if want := filepath.Join("/proj", ".spettro", "workflow-runs", "wf_1"); got != want {
+		t.Fatalf("sessionless run dir = %q, want %q", got, want)
+	}
+	saved := filepath.Join("/proj", ".spettro", workflow.SavedWorkflowsDir)
+	if strings.HasPrefix(got, saved+string(filepath.Separator)) {
+		t.Fatalf("run transcripts land inside the saved-workflow folder: %q", got)
 	}
 }
