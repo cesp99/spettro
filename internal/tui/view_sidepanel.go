@@ -158,71 +158,46 @@ func (m Model) latestAgentActivity(agentID string) string {
 	return ""
 }
 
-// sidePanelSwarmLines renders the swarm section of the side panel: one row per
-// Ultra sub-agent with its status, instance name, and live activity (falling
-// back to its assigned task). Empty when no swarm ran this turn.
+// sidePanelSwarmLines renders the swarm section of the side panel: a header
+// with the fan-out's progress meter and one row per Ultra sub-agent showing
+// what it is doing right now. Finished members stay listed so the panel shows
+// the whole fan-out, not a list that shrinks as the swarm succeeds.
 func (m Model) sidePanelSwarmLines(width int) []string {
-	var members []parallelAgentEntry
-	running, done, failed := 0, 0, 0
-	for _, a := range m.parallelAgents {
-		if a.Kind != "swarm" {
-			continue
-		}
-		members = append(members, a)
-		switch a.Status {
-		case "running":
-			running++
-		case "failed", "error":
-			failed++
-		default:
-			done++
-		}
-	}
-	if len(members) == 0 {
+	s := m.swarmSummary()
+	if len(s.members) == 0 {
 		return nil
 	}
-	rowBudget := max(12, width-2)
-	header := lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("swarm") + " " +
-		styleMuted.Render(fmt.Sprintf("%d running · %d done · %d failed", running, done, failed))
-	lines := []string{header}
-	for _, a := range members {
-		agentColor := modeColor("")
-		if spec, ok := m.manifest.AgentByID(swarmSpecID(a.ID)); ok {
-			agentColor = modeColor(spec.Color)
-		}
-		doing := m.latestAgentActivity(a.ID)
-		if doing == "" {
-			doing = a.Task
-		}
-		var icon string
-		style := lipgloss.NewStyle().Foreground(agentColor)
-		switch a.Status {
-		case "running":
-			icon = "▶"
-		case "failed", "error":
-			icon = "✗"
-			style = lipgloss.NewStyle().Foreground(colorError)
-		default:
-			icon = "✓"
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E"))
-		}
-		name := truncateLabel(a.ID, max(6, rowBudget/3))
-		line := style.Render(icon+" "+name) + " " +
-			styleMuted.Render(truncateLabel(strings.ReplaceAll(doing, "\n", " "), max(6, rowBudget-lipgloss.Width(icon+" "+name)-1)))
-		lines = append(lines, line)
+	budget := max(12, width-2)
+	lines := []string{
+		s.titleLine(budget),
+		progressBar(min(20, max(8, budget-12)), s.done, s.failed, len(s.members)) + " " +
+			styleMuted.Render(fmt.Sprintf("%d/%d", s.done+s.failed, len(s.members))),
+	}
+	for _, a := range s.members {
+		lines = append(lines, m.swarmMemberRow(a, budget))
 	}
 	return lines
 }
 
-// sidePanelReservedRows is the vertical space the git summary and swarm
-// sections occupy above the activity list (each block includes its leading
-// separator line).
+// sidePanelWorkflowLines renders the workflow phase tree. The side panel has
+// the vertical room the footer block does not, so this is the full tree with
+// no row cap.
+func (m Model) sidePanelWorkflowLines(width int) []string {
+	return m.workflowTreeLines(max(12, width-2), 0)
+}
+
+// sidePanelReservedRows is the vertical space the git summary, workflow tree
+// and swarm sections occupy above the activity list (each block includes its
+// leading separator line).
 func (m Model) sidePanelReservedRows(width int) int {
-	_, gitRows := m.sidePanelGitSummary(width)
-	if lines := m.sidePanelSwarmLines(width); len(lines) > 0 {
-		gitRows += len(lines) + 1
+	_, rows := m.sidePanelGitSummary(width)
+	if lines := m.sidePanelWorkflowLines(width); len(lines) > 0 {
+		rows += len(lines) + 1
 	}
-	return gitRows
+	if lines := m.sidePanelSwarmLines(width); len(lines) > 0 {
+		rows += len(lines) + 1
+	}
+	return rows
 }
 
 func activityAgentLabel(agent string) string {
@@ -420,12 +395,16 @@ func (m Model) sidePanelDetailMaxScroll(width int) int {
 func (m Model) viewSidePanel(width int) string {
 	innerHeight := m.sidePanelInnerHeight() - sidePanelHintRows
 	gitSummary, _ := m.sidePanelGitSummary(width)
+	workflowLines := m.sidePanelWorkflowLines(width)
 	swarmLines := m.sidePanelSwarmLines(width)
 	reserved := m.sidePanelReservedRows(width)
 	items := m.sidePanelItems()
 	hints := m.sidePanelHintsView()
 	subtitle := "Operational tool activity"
-	if m.cfg.UltraActive() {
+	switch {
+	case m.workflow != nil:
+		subtitle = "Workflow · phase-by-phase progress"
+	case m.cfg.UltraActive():
 		subtitle = "Ultra swarm · per-agent activity"
 	}
 	if len(items) == 0 {
@@ -435,6 +414,10 @@ func (m Model) viewSidePanel(width int) string {
 		}
 		if gitSummary != "" {
 			parts = append(parts, "", gitSummary)
+		}
+		if len(workflowLines) > 0 {
+			parts = append(parts, "")
+			parts = append(parts, workflowLines...)
 		}
 		if len(swarmLines) > 0 {
 			parts = append(parts, "")
@@ -480,6 +463,10 @@ func (m Model) viewSidePanel(width int) string {
 	}
 	if gitSummary != "" {
 		contentParts = append(contentParts, "", gitSummary)
+	}
+	if len(workflowLines) > 0 {
+		contentParts = append(contentParts, "")
+		contentParts = append(contentParts, workflowLines...)
 	}
 	if len(swarmLines) > 0 {
 		contentParts = append(contentParts, "")

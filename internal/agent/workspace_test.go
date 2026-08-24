@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -301,5 +303,161 @@ func TestWorkspaceSlug(t *testing.T) {
 		if got := workspaceSlug(in); got != want {
 			t.Errorf("workspaceSlug(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Sub-agent worktrees are created and merged from whichever goroutine the
+// agent happened to finish on. Both operations write the shared repository's
+// index and refs, and git reports the loser of a concurrent write as a plain
+// failure rather than as a conflict, so the work would look merged when it is
+// not. workspaceMu is what stops that; nothing exercised it concurrently
+// before, and a live workflow is the first thing that merges from whichever
+// goroutine an agent happened to finish on.
+//
+// The barrier releases every member at once, which is the shape ultra never
+// produces: it creates its workspaces up front and merges them in a serial
+// loop.
+func TestConcurrentWorktreeMergesAllLand(t *testing.T) {
+	ctx := context.Background()
+	repo := testGitRepo(t)
+	rt := &toolRuntime{cwd: repo}
+
+	const members = 8
+	type outcome struct {
+		name  string
+		merge workspaceMerge
+		err   error
+	}
+	results := make([]outcome, members)
+	spaces := make([]*agentWorkspace, members)
+
+	for i := range members {
+		name := fmt.Sprintf("general-purpose#%d", i+1)
+		ws, err := rt.newSubagentWorkspace(ctx, name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		// Each member edits its own file, the way a fan-out on disjoint
+		// scopes is supposed to.
+		f := filepath.Join(ws.subCWD, fmt.Sprintf("pkg%d.txt", i))
+		if err := os.WriteFile(f, []byte(fmt.Sprintf("written by %s\n", name)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		spaces[i] = ws
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range members {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i] = outcome{
+				name:  fmt.Sprintf("general-purpose#%d", i+1),
+				merge: spaces[i].finalize(ctx),
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, r := range results {
+		if r.merge.Status != "merged" {
+			t.Fatalf("%s: merge status %q (%s) — a disjoint edit must merge cleanly",
+				r.name, r.merge.Status, r.merge.Detail)
+		}
+		if _, err := os.Stat(filepath.Join(repo, fmt.Sprintf("pkg%d.txt", i))); err != nil {
+			t.Fatalf("%s: its file never reached the main checkout: %v", r.name, err)
+		}
+	}
+	// A clean merge deletes its branch; a leftover means work was stranded.
+	if branches := gitOut(t, repo, "branch", "--list", "spettro/*"); branches != "" {
+		t.Fatalf("orphan branches left behind:\n%s", branches)
+	}
+}
+
+// repoWithoutIdentity builds a repo with no committer identity reachable at
+// all: no local config, and HOME and the git config env pointed at paths that
+// do not exist. This is a container, a CI runner, or any process whose HOME
+// was redirected — not an exotic setup.
+func repoWithoutIdentity(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "no-such-gitconfig"))
+	t.Setenv("GIT_CONFIG_SYSTEM", filepath.Join(home, "no-such-gitsystem"))
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "init")
+	return dir
+}
+
+// Folding a worktree back writes a merge commit, and git refuses to write any
+// commit without an identity. commitPending supplies one for the sub-agent's
+// own commit; the merge needs the same or the branch is stranded and the
+// agent's work looks lost — which is exactly what a live workflow hit.
+func TestFinalizeSuppliesACommitterIdentity(t *testing.T) {
+	repo := repoWithoutIdentity(t)
+	rt := &toolRuntime{cwd: repo}
+	ctx := context.Background()
+
+	ws, err := rt.newSubagentWorkspace(ctx, "general-purpose#1")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.subCWD, "added.txt"), []byte("agent work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := ws.finalize(ctx)
+	if m.Status != "merged" {
+		t.Fatalf("merge status = %q (%s) — the agent's work is stranded", m.Status, m.Detail)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "added.txt")); err != nil {
+		t.Fatalf("work did not reach the main checkout: %v", err)
+	}
+	if got := gitOut(t, repo, "log", "-1", "--format=%cn"); got != "Spettro" {
+		t.Fatalf("fallback committer = %q, want Spettro", got)
+	}
+}
+
+// The fallback must not override a configured identity: the user's merge
+// commits stay theirs.
+func TestFinalizeKeepsTheUsersIdentity(t *testing.T) {
+	repo := testGitRepo(t) // sets local user.name=test
+	rt := &toolRuntime{cwd: repo}
+	ctx := context.Background()
+
+	ws, err := rt.newSubagentWorkspace(ctx, "general-purpose#1")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws.subCWD, "added.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m := ws.finalize(ctx); m.Status != "merged" {
+		t.Fatalf("merge status = %q (%s)", m.Status, m.Detail)
+	}
+	if got := gitOut(t, repo, "log", "-1", "--format=%cn"); got != "test" {
+		t.Fatalf("committer = %q, want the repo's own identity", got)
 	}
 }

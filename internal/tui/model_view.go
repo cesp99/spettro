@@ -243,6 +243,12 @@ func (m Model) viewSep(width int) string {
 		Render(strings.Repeat("─", width))
 }
 
+// planLabelFrameDivisor slows the MAX rainbow down. The frame counter ticks
+// every 50 ms; advancing a hue per tick made the label strobe in the corner of
+// the eye, which is the opposite of what a status label should do. One step
+// per 150 ms keeps it visibly alive without pulling focus.
+const planLabelFrameDivisor = 3
+
 // renderPlanLabel renders a plan name with its tier color.
 // "max" animates through rainbow colors using the given frame counter.
 func renderPlanLabel(plan string, frame int) string {
@@ -263,7 +269,7 @@ func renderPlanLabel(plan string, frame int) string {
 		}
 		var out strings.Builder
 		for i, ch := range label {
-			c := rainbow[(i+frame)%len(rainbow)]
+			c := rainbow[(i+frame/planLabelFrameDivisor)%len(rainbow)]
 			out.WriteString(lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(ch)))
 		}
 		return out.String()
@@ -415,6 +421,13 @@ func clampTextLines(lines []string, maxLines, width int) []string {
 	return lines
 }
 
+// inputTextareaView is the textarea with the workflow keyword lit up. Every
+// place the input is drawn goes through here so the effect cannot appear in
+// one input state and vanish in another.
+func (m Model) inputTextareaView() string {
+	return highlightUltracode(m.ta.View(), m.eyeFrame)
+}
+
 func (m Model) viewInput(width int) string {
 	mc := m.currentColor()
 	agentLabel := m.mode
@@ -433,7 +446,7 @@ func (m Model) viewInput(width int) string {
 			mc,
 		))
 		if m.pendingPlan != "" {
-			lines = append(lines, m.ta.View())
+			lines = append(lines, m.inputTextareaView())
 		}
 	} else if m.showSteerChoice {
 		lines = append(lines, styleMuted.Render("  "+truncateLabel(m.steerPending, 100)))
@@ -460,7 +473,7 @@ func (m Model) viewInput(width int) string {
 		}
 		if m.approvalCursor == 3 {
 			lines = append(lines, styleMuted.Render("  type what to do instead, then press enter:"))
-			lines = append(lines, m.ta.View())
+			lines = append(lines, m.inputTextareaView())
 		} else {
 			lines = append(lines, m.renderApprovalPicker(
 				"allow this command?",
@@ -476,7 +489,7 @@ func (m Model) viewInput(width int) string {
 		if m.showAttachPrompt {
 			lines = append(lines, styleMuted.Render("  attach file: (esc cancels)"))
 		}
-		lines = append(lines, m.ta.View())
+		lines = append(lines, m.inputTextareaView())
 	}
 	boxStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
@@ -534,97 +547,227 @@ func renderGlare(text string, frame int, agentColor color.Color) string {
 	return sb.String()
 }
 
+// footerBudget is the total number of rows everything between the transcript
+// and the input may occupy: workflow, swarm, delegations and todos combined.
+//
+// Each of those used to size itself independently, so a run with a workflow
+// and a todo list could eat two thirds of a short terminal between them. They
+// now share one allowance, scaled to the window, and spend it in priority
+// order — what is happening right now first.
+func footerBudget(height int) int {
+	return min(max(height/4, 4), 12)
+}
+
+// renderParallelAgents draws everything that sits between the transcript and
+// the input: the workflow summary, the Ultra swarm, ordinary delegations, and
+// the todo list. Swarms and workflows get their own bordered blocks — a
+// fan-out of twenty agents mixed into the plain delegation list was
+// unreadable, and the two are different enough that sharing one flat list
+// helped nobody.
+//
+// Whatever is here is an annotation on the conversation, never a replacement
+// for it, so the whole region is bounded and each block takes only what the
+// ones before it left.
 func (m Model) renderParallelAgents() string {
+	paneW := m.paneWidth()
+	remaining := footerBudget(m.height)
+	var blocks []string
+
+	// A bordered block costs its lines plus the border.
+	spend := func(block string) {
+		if block == "" {
+			return
+		}
+		blocks = append(blocks, block)
+		remaining -= lipgloss.Height(block)
+	}
+
 	active := make([]parallelAgentEntry, 0, len(m.parallelAgents))
 	for _, a := range m.parallelAgents {
-		if a.Status == "running" {
+		// Swarm members have their own block above; listing them here too
+		// would double every row of a fan-out.
+		if a.Status == "running" && a.Kind != "swarm" {
 			active = append(active, a)
 		}
 	}
-	if len(active) == 0 && len(m.todos) == 0 {
-		return ""
-	}
-	var lines []string
+	// Delegations and todos are shown nowhere else, so a swarm must not be
+	// able to push them off the screen entirely: one row each is held back,
+	// which is what their one-line forms need.
+	reserved := 0
 	if len(active) > 0 {
-		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  agents"))
-		orchText := "orchestrator: " + m.mode
-		lines = append(lines, "  "+renderGlare(orchText, m.eyeFrame, m.currentColor()))
-	}
-	for _, a := range active {
-		agentColor := modeColor("")
-		if spec, ok := m.manifest.AgentByID(swarmSpecID(a.ID)); ok {
-			agentColor = modeColor(spec.Color)
-		}
-		label := a.ID
-		if a.Instance > 1 {
-			label = fmt.Sprintf("%s [%d]", a.ID, a.Instance)
-		}
-		task := a.Task
-		if len(task) > 50 {
-			task = task[:47] + "..."
-		}
-
-		var line string
-		switch a.Status {
-		case "running":
-			combined := fmt.Sprintf("%-20s %s", label, task)
-			line = "  " + renderGlare(combined, m.eyeFrame, agentColor)
-		case "done":
-			line = lipgloss.NewStyle().Foreground(agentColor).Render(fmt.Sprintf("  ● %-18s", label)) +
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
-		case "error", "failed":
-			line = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("  ✗ %-18s", label)) +
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
-		default:
-			line = lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("  ○ %-18s", label)) +
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
-		}
-		lines = append(lines, line)
+		reserved++
 	}
 	if len(m.todos) > 0 {
-		if len(lines) > 0 {
+		reserved++
+	}
+	if rows := remaining - reserved - 2; rows >= 2 {
+		spend(m.renderWorkflowBlock(paneW, rows))
+	}
+	if rows := remaining - reserved - 2; rows >= 2 {
+		spend(m.renderSwarmBlock(paneW, rows))
+	}
+	if remaining <= 0 || (len(active) == 0 && len(m.todos) == 0) {
+		return strings.Join(blocks, "\n")
+	}
+
+	var lines []string
+	todoReserve := 0
+	if len(m.todos) > 0 {
+		todoReserve = 1
+	}
+	if deleg := m.delegationLines(active, remaining-todoReserve); len(deleg) > 0 {
+		lines = append(lines, deleg...)
+		remaining -= len(deleg)
+	}
+	if len(m.todos) > 0 && remaining >= 1 {
+		if len(lines) > 0 && remaining >= 2 {
 			lines = append(lines, "")
+			remaining--
 		}
-		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  todos"))
-		blockedIDs := session.BlockedIDs(m.todos)
-		for _, td := range m.todos {
-			status := td.Status
-			// A pending task gated by incomplete dependencies renders as
-			// blocked so the graph state is visible at a glance.
-			if _, gated := blockedIDs[td.ID]; gated && status == "pending" {
-				status = "blocked"
-			}
-			var line string
-			switch status {
-			case "completed", "done":
-				label := td.Content
-				if len(label) > 56 {
-					label = label[:53] + "..."
-				}
-				line = lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Render("  ✓ ") + styleMuted.Render(label)
-			case "in_progress", "running":
-				label := td.Content
-				if len(label) > 56 {
-					label = label[:53] + "..."
-				}
-				line = "  " + renderGlare(label, m.eyeFrame, lipgloss.Color("#F59E0B"))
-			case "blocked", "failed", "cancelled":
-				label := td.Content
-				if len(label) > 56 {
-					label = label[:53] + "..."
-				}
-				line = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  ! ") + styleMuted.Render(label)
-			default:
-				label := td.Content
-				if len(label) > 56 {
-					label = label[:53] + "..."
-				}
-				line = lipgloss.NewStyle().Foreground(colorMuted).Render("  ○ ") + styleMuted.Render(label)
-			}
-			lines = append(lines, line)
+		lines = append(lines, m.todoLines(remaining)...)
+	}
+	if len(lines) > 0 {
+		blocks = append(blocks, strings.Join(lines, "\n"))
+	}
+	return strings.Join(blocks, "\n")
+}
+
+// delegationLines lists the ordinary sub-agents inside the row budget it is
+// given — the count of hidden workers included, since that line costs a row
+// too and forgetting it is how the block used to overrun and shove the todo
+// list off the screen.
+func (m Model) delegationLines(active []parallelAgentEntry, rows int) []string {
+	if rows < 1 || len(active) == 0 {
+		return nil
+	}
+	header := lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  agents")
+	// The tightest form still says the work exists and where to look.
+	compact := []string{header + styleMuted.Render(fmt.Sprintf("  %d running · ctrl+b", len(active)))}
+	if rows == 1 {
+		return compact
+	}
+	avail := rows - 2 // header + orchestrator
+	if len(active) > avail {
+		avail-- // the "… N more" line
+	}
+	shown := max(min(len(active), avail), 0)
+	lines := []string{
+		header,
+		"  " + renderGlare("orchestrator: "+m.mode, m.eyeFrame, m.currentColor()),
+	}
+	for _, a := range active[:shown] {
+		lines = append(lines, m.delegationRow(a))
+	}
+	if hidden := len(active) - shown; hidden > 0 {
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more · ctrl+b for all of them", hidden)))
+	}
+	// When the listed form does not fit, the count does — better one honest
+	// line than a truncated list that reads as the whole story.
+	if len(lines) > rows {
+		return compact
+	}
+	return lines
+}
+
+// delegationRow renders one ordinary (non-swarm) sub-agent.
+func (m Model) delegationRow(a parallelAgentEntry) string {
+	agentColor := modeColor("")
+	if spec, ok := m.manifest.AgentByID(swarmSpecID(a.ID)); ok {
+		agentColor = modeColor(spec.Color)
+	}
+	label := a.ID
+	if a.Instance > 1 {
+		label = fmt.Sprintf("%s [%d]", a.ID, a.Instance)
+	}
+	task := a.Task
+	if len(task) > 50 {
+		task = task[:47] + "..."
+	}
+	switch a.Status {
+	case "running":
+		return "  " + renderGlare(fmt.Sprintf("%-20s %s", label, task), m.eyeFrame, agentColor)
+	case "done":
+		return lipgloss.NewStyle().Foreground(agentColor).Render(fmt.Sprintf("  ● %-18s", label)) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+	case "error", "failed":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("  ✗ %-18s", label)) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+	default:
+		return lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("  ○ %-18s", label)) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(task)
+	}
+}
+
+// todoLines renders the task list within a row budget, keeping what is live:
+// in-progress and blocked tasks first, then whatever is still pending.
+// Completed ones are counted rather than listed — a finished task is not news.
+// With a single row to spend it collapses to a count plus the current task.
+func (m Model) todoLines(rows int) []string {
+	blockedIDs := session.BlockedIDs(m.todos)
+	statusOf := func(td session.Todo) string {
+		if _, gated := blockedIDs[td.ID]; gated && td.Status == "pending" {
+			return "blocked"
+		}
+		return td.Status
+	}
+	rank := map[string]int{"in_progress": 0, "running": 0, "blocked": 1, "failed": 1, "cancelled": 1}
+	var live, rest []session.Todo
+	completed := 0
+	for _, td := range m.todos {
+		st := statusOf(td)
+		if st == "completed" || st == "done" {
+			completed++
+			continue
+		}
+		if _, hot := rank[st]; hot {
+			live = append(live, td)
+		} else {
+			rest = append(rest, td)
 		}
 	}
-	return strings.Join(lines, "\n")
+	ordered := append(live, rest...)
+	if len(ordered) == 0 {
+		return nil
+	}
+	header := lipgloss.NewStyle().Bold(true).Foreground(colorMuted).Render("  todos")
+	if completed > 0 {
+		header += styleMuted.Render(fmt.Sprintf("  %d/%d done", completed, completed+len(ordered)))
+	}
+	compact := []string{header + " " + styleMuted.Render(truncateLabel(ordered[0].Content, 56))}
+	if rows < 2 {
+		return compact
+	}
+	lines := []string{header}
+	avail := rows - 1
+	if len(ordered) > avail {
+		avail-- // the "… N more" line
+	}
+	shown := min(len(ordered), max(avail, 1))
+	for _, td := range ordered[:shown] {
+		lines = append(lines, todoRow(td, statusOf(td), m.eyeFrame))
+	}
+	if hidden := len(ordered) - shown; hidden > 0 {
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more", hidden)))
+	}
+	if len(lines) > rows {
+		return compact
+	}
+	return lines
+}
+
+func todoRow(td session.Todo, status string, frame int) string {
+	label := td.Content
+	if len(label) > 56 {
+		label = label[:53] + "..."
+	}
+	switch status {
+	case "in_progress", "running":
+		return "  " + renderGlare(label, frame, lipgloss.Color("#F59E0B"))
+	case "blocked", "failed", "cancelled":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("  ! ") + styleMuted.Render(label)
+	default:
+		return lipgloss.NewStyle().Foreground(colorMuted).Render("  ○ ") + styleMuted.Render(label)
+	}
 }
 
 func (m Model) contextWindow() int {

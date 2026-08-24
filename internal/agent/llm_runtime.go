@@ -134,6 +134,9 @@ type toolLoopConfig struct {
 	// concurrent sub-agents of the same type. AgentID keeps the manifest spec
 	// ID for prompt/handoff resolution; InstanceID only affects observability.
 	InstanceID string
+	// WorkflowPreapproved marks the turn as having the user's standing consent
+	// to start a workflow without confirming first (they typed the keyword).
+	WorkflowPreapproved bool
 	// GoalMode enables generous tool timeouts and (step 03) goal-complete
 	// signaling. Non-goal runs behave exactly as before.
 	GoalMode        bool
@@ -212,9 +215,15 @@ type toolCall struct {
 }
 
 type toolRuntime struct {
-	cwd           string
-	mu            sync.Mutex
-	shellMu       sync.Mutex
+	cwd     string
+	mu      sync.Mutex
+	shellMu sync.Mutex
+	// worktreeMu serializes every git operation that touches the shared
+	// repository — creating a sub-agent worktree, and merging one back. Two of
+	// those running at once contend on the repo's index and ref locks, and git
+	// reports the loser as a plain failure rather than as a conflict, so the
+	// work looks merged when it is not.
+	worktreeMu    sync.Mutex
 	readSet       map[string]struct{}
 	requiredReads map[string]struct{}
 	searcher      RepoSearcher
@@ -252,7 +261,10 @@ type toolRuntime struct {
 	stopReason           string
 	skillsCatalog        skills.Catalog
 	goalMode             bool
-	shellTimeoutSec      int
+	// workflowPreapproved skips the workflow tool's confirmation prompt: the
+	// user already said yes by writing the keyword.
+	workflowPreapproved bool
+	shellTimeoutSec     int
 	// compactCfg is the auto-compaction policy (zero value → defaults);
 	// compactFailures counts consecutive summarizer failures so the trigger
 	// pauses after MaxFailures instead of burning a failing call every step.
@@ -505,6 +517,7 @@ func runToolLoop(ctx context.Context, cfg toolLoopConfig) (toolLoopResult, error
 	runtime.maxDelegationDepth = cfg.MaxDepth
 	runtime.maxToolCallsPerStep = cfg.MaxToolCalls
 	runtime.goalMode = cfg.GoalMode
+	runtime.workflowPreapproved = cfg.WorkflowPreapproved
 	runtime.shellTimeoutSec = cfg.ShellTimeoutSec
 	allowedShell, err := loadAllowedCommandSet(cfg.CWD)
 	if err != nil {
@@ -1014,8 +1027,9 @@ func (r *toolRuntime) executeWithTimeout(ctx context.Context, call toolCall, all
 	if spec, ok := r.toolPolicies[call.Tool]; ok && spec.TimeoutSec > 0 {
 		timeoutSec = spec.TimeoutSec
 	}
-	if call.Tool == "ultra" {
-		// A swarm runs many full sub-agent turns; the per-tool default (and any
+	if call.Tool == "ultra" || call.Tool == "workflow" {
+		// A swarm — or a workflow script, which may run several rounds of them
+		// — is many full sub-agent turns; the per-tool default (and any
 		// manifest value tuned for single tools) would kill it mid-flight.
 		timeoutSec = 7200
 	}
@@ -1517,6 +1531,8 @@ func (r *toolRuntime) execute(ctx context.Context, call toolCall, allowed map[st
 		return marshalSubagentResult(target, result, merge), nil
 	case "ultra":
 		return r.runUltra(ctx, call.Args)
+	case "workflow":
+		return r.runWorkflow(ctx, call.Args)
 	default:
 		return "", fmt.Errorf("unsupported tool %q", call.Tool)
 	}

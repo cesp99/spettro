@@ -46,6 +46,7 @@ It uses a configurable agent manifest (`spettro.agents.toml` + `agents/*.md` pro
 - Multi-provider model support via `models.dev` catalog + OpenAI-compatible endpoints
 - Normalized [thinking/reasoning levels](docs/thinking.md) across providers (`/thinking off|low|medium|high|x-high|max`)
 - [Ultra mode](docs/ultra.md) — fan hard tasks out across a swarm of parallel sub-agents (`/ultra`, any model)
+- [Workflows](docs/workflows.md) — write `ultracode` and the agent orchestrates sub-agents with a script: phases, fan-out, verification loops, resumable runs
 - [Interactive PTY sessions](docs/pty.md) — the agent drives REPLs, debuggers, and ssh through a real terminal
 - Conversation persistence and resume per project
 - Project trust prompt before first use in a folder
@@ -93,6 +94,7 @@ Spettro commands are entered with a leading `/`.
 - `/budget <n|0>` set request token budget (`0` = unlimited)
 - `/thinking <off|low|medium|high|x-high|max>` set the reasoning level (Anthropic thinking budget, OpenAI-style `reasoning_effort`; hidden for non-reasoning models, auto-falls back if a level is rejected)
 - `/ultra [on|off]` toggle Ultra swarm mode (requires `restricted` or `yolo` permission)
+- `/workflows [list|show|run|where]` list, show, or run saved workflow scripts (write `ultracode` in a message to hand the agent the workflow tool for that turn)
 - `/plan [prompt]` switch to plan mode or run plan prompt
 - `/approve` execute pending approved plan through coding agent
 - `/tasks [list|add|done|set|show]` manage session tasks
@@ -142,6 +144,7 @@ switching, and permission prompts. See [`docs/acp.md`](docs/acp.md).
 - [Telegram relay](docs/telegram.md)
 - [Extended thinking levels](docs/thinking.md)
 - [Ultra mode (agent swarm)](docs/ultra.md)
+- [Workflows](docs/workflows.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Documentation Index](docs/README.md)
 

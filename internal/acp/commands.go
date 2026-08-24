@@ -40,6 +40,7 @@ var acpAvailableCommands = []acpsdk.AvailableCommand{
 	{Name: "hooks", Description: "list effective runtime hooks"},
 	{Name: "diff", Description: "show diffs of files modified this session", Input: hintInput("[path ...]")},
 	{Name: "ultra", Description: "toggle Ultra swarm mode", Input: hintInput("[on|off]")},
+	{Name: "workflows", Description: "list, show, or run saved workflow scripts", Input: hintInput("[list|show <name>|run <name> [json]|where]")},
 	{Name: "plan", Description: "switch to plan mode", Input: hintInput("[task]")},
 	{Name: "permissions", Description: "show/set permission level and debug", Input: hintInput("[yolo|restricted|ask-first] | debug <on|off>")},
 }
@@ -326,5 +327,8 @@ const acpHelpText = `commands:
   /hooks                list effective runtime hooks
   /diff [path...]       diffs of files modified this session
   /ultra [on|off]       toggle Ultra swarm mode
+  /workflows            list, show, or run saved workflow scripts
+                        (write "ultracode" in a message to give the agent
+                        the workflow tool for that turn)
   /plan [task]          switch to plan mode
   /permissions          show/set permission level, debug details`

@@ -29,6 +29,9 @@ type turnState struct {
 	// open maps a running tool call (name+args) to its ACP tool call IDs so
 	// the completion trace, which repeats name+args, updates the right call.
 	open map[string][]acpsdk.ToolCallId
+	// workflow is the in-flight workflow run whose tool call is rewritten as
+	// the run progresses; nil outside a workflow.
+	workflow *acpWorkflow
 }
 
 // sessionUpdate sends a session/update notification, dropping it silently if
@@ -83,6 +86,11 @@ func (t *turnState) onTool(tr agent.ToolTrace) {
 		if strings.HasPrefix(tr.Output, "steering delivered") {
 			t.sessionUpdate(acpsdk.UpdateAgentMessageText("✔ " + tr.Output + "\n"))
 		}
+		return
+	}
+	// Workflow traces drive a single long-lived tool call; the helper reports
+	// whether the trace has been fully consumed by it.
+	if t.onWorkflowTool(tr) {
 		return
 	}
 	key := tr.AgentID + "\x00" + tr.Name + "\x00" + tr.Args
@@ -196,10 +204,14 @@ func planEntriesFromTodos(todos []session.Todo) []acpsdk.PlanEntry {
 
 func (t *turnState) nextToolCallID(prefix string) acpsdk.ToolCallId {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.nextToolCallIDLocked(prefix)
+}
+
+// nextToolCallIDLocked is the same, for callers already holding t.mu.
+func (t *turnState) nextToolCallIDLocked(prefix string) acpsdk.ToolCallId {
 	t.seq++
-	n := t.seq
-	t.mu.Unlock()
-	return acpsdk.ToolCallId(fmt.Sprintf("%s-%d", prefix, n))
+	return acpsdk.ToolCallId(fmt.Sprintf("%s-%d", prefix, t.seq))
 }
 
 // openToolCallID returns the most recent in-flight tool call for the given
@@ -240,6 +252,22 @@ func toolCallTitle(tr agent.ToolTrace) string {
 			return title
 		}
 	}
+	if tr.Name == "workflow" || tr.Name == "workflow-progress" {
+		var args struct {
+			Workflow string `json:"workflow"`
+			Phase    string `json:"phase"`
+			Kind     string `json:"kind"`
+		}
+		if json.Unmarshal([]byte(tr.Args), &args) == nil && args.Workflow != "" {
+			switch args.Kind {
+			case "phase":
+				return "workflow " + args.Workflow + " ▸ " + args.Phase
+			case "log":
+				return "workflow " + args.Workflow + " · log"
+			}
+			return "workflow " + args.Workflow
+		}
+	}
 	title := tr.Name
 	if tr.Args != "" {
 		args := tr.Args
@@ -262,6 +290,8 @@ func toolCallTitle(tr agent.ToolTrace) string {
 func toolKind(name string) acpsdk.ToolKind {
 	n := strings.ToLower(name)
 	switch {
+	case strings.HasPrefix(n, "workflow"):
+		return acpsdk.ToolKindThink
 	case n == "view-image":
 		return acpsdk.ToolKindRead
 	case strings.Contains(n, "edit"), strings.Contains(n, "write"), strings.Contains(n, "patch"):

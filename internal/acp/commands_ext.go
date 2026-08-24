@@ -2,7 +2,7 @@ package acp
 
 // Extended slash-command surface for ACP clients: the read-only, text-
 // resolvable commands the TUI offers (/stats, /tasks, /jobs, /hooks, /diff,
-// /plan, /permissions, /ultra) so GUI clients driving the binary over ACP
+// /plan, /permissions, /ultra, /workflows) so GUI clients driving the binary
 // reach feature parity with the interactive CLI without reimplementing any
 // of it. Everything here mirrors the TUI implementations in internal/tui
 // (model_commands_ext.go, model_stats.go, model_state.go).
@@ -22,6 +22,7 @@ import (
 	"spettro/internal/jobs"
 	"spettro/internal/provider"
 	"spettro/internal/session"
+	"spettro/internal/workflow"
 )
 
 // handleExtendedSlashCommand executes the second tier of slash commands
@@ -50,6 +51,26 @@ func handleExtendedSlashCommand(b *bridge, s *acpSession, cfg *config.UserConfig
 
 	case "/ultra":
 		return acpUltraText(cfg, fields), false, true
+
+	case "/workflows", "/workflow":
+		// "run" is the one subcommand that needs a turn, and only when the
+		// named workflow actually resolves — the bridge has already rewritten
+		// it into a prompt in that case. Falling through unconditionally would
+		// hand "/workflows run nope" to the model as a plain request and send
+		// it hunting for a file that does not exist.
+		if len(fields) >= 2 {
+			switch strings.ToLower(fields[1]) {
+			case "run", "start":
+				if len(fields) < 3 {
+					return "usage: /workflows run <name> [json]", false, true
+				}
+				if _, _, err := workflow.Load(s.cwd, fields[2]); err != nil {
+					return err.Error(), false, true
+				}
+				return "", false, false
+			}
+		}
+		return acpWorkflowsText(s.cwd, fields), false, true
 
 	case "/plan":
 		if len(fields) == 1 {
@@ -514,4 +535,90 @@ func acpPermissionsText(s *acpSession, cfg *config.UserConfig, fields []string) 
 	// decision, so the new level applies to the current turn too.
 	s.permission = level
 	return "permission set to " + string(level)
+}
+
+// acpWorkflowsText mirrors /workflows for its read-only subcommands: list the
+// saved scripts, show one, or report where they are looked up.
+func acpWorkflowsText(cwd string, fields []string) string {
+	sub := "list"
+	if len(fields) >= 2 {
+		sub = strings.ToLower(fields[1])
+	}
+	switch sub {
+	case "where", "paths":
+		var b strings.Builder
+		b.WriteString("workflow search paths (first match wins):\n")
+		for _, p := range workflow.SearchPaths(cwd) {
+			b.WriteString("  " + p + "\n")
+		}
+		return strings.TrimRight(b.String(), "\n")
+	case "show", "cat", "info":
+		if len(fields) < 3 {
+			return "usage: /workflows show <name>"
+		}
+		script, path, err := workflow.Load(cwd, fields[2])
+		if err != nil {
+			return err.Error()
+		}
+		return path + "\n\n```javascript\n" + strings.TrimRight(script, "\n") + "\n```"
+	case "list", "ls":
+		saved := workflow.Discover(cwd)
+		if len(saved) == 0 {
+			return "no saved workflows — add scripts to .spettro/workflows/<name>.js or ~/.spettro/workflows/<name>.js.\n" +
+				"Write \"ultracode\" in a message to give the agent the workflow tool for that turn."
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "saved workflows (%d):\n", len(saved))
+		for _, s := range saved {
+			if s.Err != nil {
+				fmt.Fprintf(&b, "  %-24s [%s] header does not parse: %v\n", s.Name, s.Scope, s.Err)
+				continue
+			}
+			fmt.Fprintf(&b, "  %-24s [%s] %s\n", s.Name, s.Scope, s.Meta.Description)
+		}
+		b.WriteString("\nrun one with /workflows run <name>")
+		return strings.TrimRight(b.String(), "\n")
+	default:
+		return "usage: /workflows [list|show <name>|run <name> [json]|where]"
+	}
+}
+
+// acpWorkflowRunPrompt rewrites "/workflows run <name> [json]" into the plain
+// request that makes the agent invoke that saved script. ok is false for
+// anything else, including a run of a workflow that does not exist — the
+// error then travels the normal command path instead of becoming a prompt.
+func acpWorkflowRunPrompt(cwd, input string) (string, bool) {
+	fields := strings.Fields(input)
+	if len(fields) < 3 {
+		return "", false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "/workflows", "/workflow":
+	default:
+		return "", false
+	}
+	switch strings.ToLower(fields[1]) {
+	case "run", "start":
+	default:
+		return "", false
+	}
+	name := fields[2]
+	script, _, err := workflow.Load(cwd, name)
+	if err != nil {
+		return "", false
+	}
+	meta, err := workflow.ParseMeta(script)
+	if err != nil {
+		return "", false
+	}
+	quoted, _ := json.Marshal(name)
+	rawArgs := strings.TrimSpace(strings.Join(fields[3:], " "))
+	var b strings.Builder
+	fmt.Fprintf(&b, "ultracode: run the saved workflow %s — %s.\nCall the workflow tool with {\"name\": %s",
+		quoted, meta.Description, quoted)
+	if rawArgs != "" && json.Valid([]byte(rawArgs)) {
+		b.WriteString(", \"args\": " + rawArgs)
+	}
+	b.WriteString("}. Do not rewrite the script; run it as saved, then review the result and act on it.")
+	return b.String(), true
 }

@@ -1,0 +1,182 @@
+package workflow
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+)
+
+// Journal records every agent call a run makes, so a workflow that was killed
+// (cancelled, crashed, or edited mid-flight) can be relaunched without paying
+// for the agents that already answered.
+//
+// Entries are keyed by a hash of the call's prompt and options rather than by
+// call order: parallel() and pipeline() interleave, so ordinal position is not
+// reproducible, while the (prompt, opts) pair of a given call is. Identical
+// calls are replayed first-come-first-served from a per-key queue, which makes
+// a fan-out of N identical prompts resume correctly too.
+type Journal struct {
+	dir string
+
+	mu     sync.Mutex
+	file   *os.File
+	cached map[string][]JournalEntry
+	hits   int
+}
+
+// JournalEntry is one recorded agent call.
+type JournalEntry struct {
+	Key       string `json:"key"`
+	Index     int    `json:"index"`
+	Label     string `json:"label,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	Instance  string `json:"instance,omitempty"`
+	AgentType string `json:"agent_type,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Tokens    int    `json:"tokens,omitempty"`
+}
+
+// OpenJournal creates the run directory and opens its journal for appending.
+// A nil Journal is valid everywhere and simply disables persistence.
+func OpenJournal(dir string) (*Journal, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create workflow run dir: %w", err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "journal.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open workflow journal: %w", err)
+	}
+	return &Journal{dir: dir, file: f}, nil
+}
+
+// Dir is the run directory holding script.js, meta.json and journal.jsonl.
+func (j *Journal) Dir() string {
+	if j == nil {
+		return ""
+	}
+	return j.dir
+}
+
+// LoadCache reads a previous run's journal into this one, so matching calls
+// resolve from it instead of executing. Missing files are not an error: a run
+// id that no longer exists just means nothing is cached.
+func (j *Journal) LoadCache(dir string) error {
+	if j == nil {
+		return nil
+	}
+	f, err := os.Open(filepath.Join(dir, "journal.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read workflow journal: %w", err)
+	}
+	defer f.Close()
+	cached := map[string][]JournalEntry{}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var e JournalEntry
+		if json.Unmarshal([]byte(line), &e) != nil || e.Key == "" {
+			continue
+		}
+		// Failures are not cached: the point of resuming is to retry them.
+		if e.Error != "" {
+			continue
+		}
+		cached[e.Key] = append(cached[e.Key], e)
+	}
+	j.mu.Lock()
+	j.cached = cached
+	j.mu.Unlock()
+	return sc.Err()
+}
+
+// Take consumes a cached result for the given key, if one is left.
+func (j *Journal) Take(key string) (JournalEntry, bool) {
+	if j == nil {
+		return JournalEntry{}, false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	queue := j.cached[key]
+	if len(queue) == 0 {
+		return JournalEntry{}, false
+	}
+	j.cached[key] = queue[1:]
+	j.hits++
+	return queue[0], true
+}
+
+// Hits is how many calls this run replayed from a previous journal.
+func (j *Journal) Hits() int {
+	if j == nil {
+		return 0
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.hits
+}
+
+// Append records a completed call. Write errors are returned but callers
+// treat them as non-fatal: losing resumability must not fail a run that is
+// otherwise succeeding.
+func (j *Journal) Append(e JournalEntry) error {
+	if j == nil || j.file == nil {
+		return nil
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	_, err = j.file.Write(append(line, '\n'))
+	return err
+}
+
+// WriteFile stores a companion artifact (script.js, meta.json, result.json)
+// next to the journal.
+func (j *Journal) WriteFile(name, content string) error {
+	if j == nil {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(j.dir, name), []byte(content), 0o644)
+}
+
+// Close flushes and closes the journal file.
+func (j *Journal) Close() error {
+	if j == nil || j.file == nil {
+		return nil
+	}
+	return j.file.Close()
+}
+
+// callKey hashes everything that determines a call's result. Two calls with
+// the same key are interchangeable for resume purposes; changing a prompt,
+// schema, model or agent type invalidates the cache entry, which is exactly
+// the "longest unchanged prefix" behaviour an edited script needs.
+func callKey(req Request) string {
+	h := sha256.New()
+	for _, part := range []string{
+		req.Prompt, req.AgentType, req.Model, req.Effort, req.Isolation, string(req.Schema),
+	} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}

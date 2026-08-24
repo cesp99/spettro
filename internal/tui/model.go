@@ -401,7 +401,10 @@ type Model struct {
 	showPlanApproval   bool
 	planApprovalCursor int
 
-	parallelAgents   []parallelAgentEntry
+	parallelAgents []parallelAgentEntry
+	// workflow is the most recent workflow run, kept after it finishes so the
+	// panel still shows the whole tree until the next turn clears it.
+	workflow         *workflowRun
 	tickCount        int
 	sideCursor       int
 	sideDetailScroll int

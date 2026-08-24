@@ -215,6 +215,8 @@ func (m Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		return m.handleMCPCommand(input)
 	case "/skills", "/skill":
 		return m.handleSkillsCommand(input)
+	case "/workflows", "/workflow":
+		return m.handleWorkflowsCommand(input)
 	case "/hooks":
 		return m.handleHooksCommand()
 	case "/memory":
@@ -310,6 +312,7 @@ func (m Model) startPromptRun(req queuedPrompt) (tea.Model, tea.Cmd) {
 	// re-queued as prompts by the agentDoneMsg handler).
 	m.steering.Drain()
 	m.parallelAgents = nil
+	m.workflow = nil
 	m.ensureSession()
 	m.messages = append(m.messages, ChatMessage{
 		Role:    RoleUser,

@@ -367,6 +367,12 @@ func (b *bridge) Prompt(ctx context.Context, params acpsdk.PromptRequest) (acpsd
 			b.mu.Unlock()
 			trimmedTask = strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/plan"))
 			task = trimmedTask
+		} else if rewritten, ok := acpWorkflowRunPrompt(s.cwd, trimmedTask); ok {
+			// /workflows run <name> becomes an ordinary turn instructing the
+			// agent to invoke the saved script, so the model reviews and acts
+			// on the result exactly as it would for one it wrote itself.
+			trimmedTask = rewritten
+			task = rewritten
 		} else if fields[0] == "/goal" {
 			if strings.TrimSpace(strings.TrimPrefix(trimmedTask, "/goal")) == "stop" {
 				// /goal stop while a goal turn is running: cancel that run.
