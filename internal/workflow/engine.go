@@ -245,6 +245,10 @@ type vmRun struct {
 	done   chan struct{}
 	depth  int
 	nested bool
+	// syncStart is the nanotime at which the current stretch of synchronous
+	// JavaScript began, or 0 when the engine is not inside the runtime. The
+	// watchdog reads it to tell "waiting on agents" from "looping".
+	syncStart atomic.Int64
 
 	mu       sync.Mutex
 	phase    string
@@ -302,20 +306,16 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	// running script from outside it.
 	stopWatchdog := make(chan struct{})
 	defer close(stopWatchdog)
-	go func() {
-		select {
-		case <-ctx.Done():
-			r.vm.Interrupt(ctx.Err())
-		case <-stopWatchdog:
-		}
-	}()
+	go r.watchdog(ctx, stopWatchdog)
 	s.emit(Event{Kind: EventStart, Message: meta.Name, Nested: r.nested})
 
 	program, err := compileScript(meta.Name, script)
 	if err != nil {
 		return nil, meta, fmt.Errorf("workflow %q: script does not parse: %w", meta.Name, err)
 	}
+	leave := r.enterJS()
 	val, err := r.vm.RunProgram(program)
+	leave()
 	if err != nil {
 		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, describeRunError(err, ctx))
 	}
@@ -332,6 +332,19 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	s.emit(Event{Kind: EventFinish, Message: meta.Name, Nested: r.nested})
 	return value, meta, nil
 }
+
+// maxSyncExecution bounds one uninterrupted stretch of JavaScript — the time
+// between two awaits.
+//
+// A workflow legitimately runs for hours, but it spends that time waiting on
+// agents, not executing script: the synchronous segments are milliseconds. A
+// stretch this long therefore means a runaway loop, and bounding it is the
+// only defence against one that allocates, since goja exposes no memory limit
+// and the tool's own two-hour deadline is far too late to stop an OOM.
+const maxSyncExecution = 30 * time.Second
+
+// errRunawayScript distinguishes the watchdog's interrupt from a cancellation.
+var errRunawayScript = errors.New("script ran for more than 30s without awaiting anything — it is looping")
 
 // idlePoll bounds how long the loop waits before checking whether the script
 // is deadlocked. It only fires when nothing else is happening, so it costs
@@ -353,7 +366,7 @@ func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 		timer.Reset(idlePoll)
 		select {
 		case job := <-r.jobs:
-			if err := runJob(job); err != nil {
+			if err := r.runJob(job); err != nil {
 				return nil, err
 			}
 		case <-ctx.Done():
@@ -384,6 +397,9 @@ func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 func describeRunError(err error, ctx context.Context) error {
 	var interrupted *goja.InterruptedError
 	if errors.As(err, &interrupted) {
+		if v, ok := interrupted.Value().(error); ok && errors.Is(v, errRunawayScript) {
+			return fmt.Errorf("script stopped: %w", errRunawayScript)
+		}
 		if cause := ctx.Err(); cause != nil {
 			return fmt.Errorf("script stopped: %w", cause)
 		}
@@ -403,14 +419,45 @@ func missingArgsHint(script string, args any, err error) string {
 	return " — the tool call passed no args, so the `args` global is undefined; pass args in the workflow tool call, or stop reading it in the script"
 }
 
+// watchdog is the only thing that can stop a script from outside it: it
+// interrupts on cancellation, and on a stretch of synchronous execution long
+// enough to mean a runaway loop.
+func (r *vmRun) watchdog(ctx context.Context, stop <-chan struct{}) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			r.vm.Interrupt(ctx.Err())
+			return
+		case <-stop:
+			return
+		case now := <-ticker.C:
+			if start := r.syncStart.Load(); start != 0 && now.Sub(time.Unix(0, start)) > maxSyncExecution {
+				r.vm.Interrupt(errRunawayScript)
+				return
+			}
+		}
+	}
+}
+
+// enterJS marks the start of a synchronous stretch for the watchdog; the
+// returned function marks its end.
+func (r *vmRun) enterJS() func() {
+	r.syncStart.Store(time.Now().UnixNano())
+	return func() { r.syncStart.Store(0) }
+}
+
 // runJob executes one queued promise resolution.
 //
 // Resolving a promise runs JS — the continuation of whatever awaited it — so
 // an interrupt lands here as a panic rather than as a returned error, and a
 // bug in a binding would too. Neither may take the process down: this is a
 // script a model wrote, executing inside the user's editor session.
-func runJob(job func()) (err error) {
+func (r *vmRun) runJob(job func()) (err error) {
+	leave := r.enterJS()
 	defer func() {
+		leave()
 		rec := recover()
 		if rec == nil {
 			return

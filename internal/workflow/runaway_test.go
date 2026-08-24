@@ -53,15 +53,50 @@ func TestRunawayScriptsAreStopped(t *testing.T) {
 }
 
 func TestRunJobContainsPanics(t *testing.T) {
-	if err := runJob(func() {}); err != nil {
+	if err := (&vmRun{}).runJob(func() {}); err != nil {
 		t.Fatalf("a clean job must not error: %v", err)
 	}
-	err := runJob(func() { panic("binding blew up") })
+	err := (&vmRun{}).runJob(func() { panic("binding blew up") })
 	if err == nil || !strings.Contains(err.Error(), "binding blew up") {
 		t.Fatalf("a panicking job must become an error, got %v", err)
 	}
 	// The process must still be alive to run this line.
-	if err := runJob(func() {}); err != nil {
+	if err := (&vmRun{}).runJob(func() {}); err != nil {
 		t.Fatalf("the engine did not survive: %v", err)
+	}
+}
+
+// The tool's own deadline is two hours, because a workflow legitimately runs
+// that long waiting on agents. That is far too late to stop a loop that
+// allocates, and goja exposes no memory limit — so a stretch of synchronous
+// execution is bounded on its own, independently of the context.
+func TestRunawayLoopIsStoppedWithoutADeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the synchronous-execution watchdog")
+	}
+	done := make(chan error, 1)
+	go func() {
+		// No deadline at all: only the watchdog can end this.
+		_, err := Run(context.Background(), header("const a = []; while (true) { a.push('x') }"),
+			Options{Runner: echoRunner(0)})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "without awaiting") {
+			t.Fatalf("want the runaway-loop error, got %v", err)
+		}
+	case <-time.After(maxSyncExecution + 20*time.Second):
+		t.Fatal("an allocating loop ran unbounded with no context deadline")
+	}
+}
+
+// The bound is on synchronous execution, not on the run: a workflow that
+// spends an hour awaiting agents must not be killed.
+func TestWaitingOnAgentsIsNotRunaway(t *testing.T) {
+	slow := echoRunner(maxSyncExecution/10 + 200*time.Millisecond)
+	res := run(t, `return await agent('slow')`, Options{Runner: slow})
+	if res.Value != "done:slow" {
+		t.Fatalf("value = %#v — waiting on an agent was mistaken for a runaway loop", res.Value)
 	}
 }
