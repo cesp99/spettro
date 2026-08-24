@@ -232,6 +232,11 @@ terminal and never takes more than a few rows, because a running workflow
 must not be the reason you cannot read what the agent just said. Once the
 run ends it collapses to a single line and gives the rows back.
 
+It shares one budget — about a quarter of the terminal height — with an
+ultra swarm, ordinary delegations and the todo list, so the four of them
+together stay bounded no matter how much is in flight. Each block says
+how many entries it left out; nothing is hidden silently.
+
 `ctrl+b` has the whole thing: every declared phase drawn from the start
 (dimmed until reached), filling in as agents land under it, with
 per-phase meters, each agent's live tool call, `log()` lines, and

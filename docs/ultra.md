@@ -121,20 +121,31 @@ Every swarm member gets a **distinct instance name** — `code#1`,
 `code#2`, … in item order — and every tool trace it emits carries that
 name, so its activity is attributable end to end:
 
-- **TUI transcript** — the swarm renders as its own bordered block,
+- **TUI footer** — the swarm renders as its own bordered block,
   separate from ordinary delegations, headed by the agent type and a
-  `N running · N done · N failed` count with a progress meter. Failures
-  count as finished work, drawn red, so a struggling swarm reads as one
-  at a glance. Every member stays listed with its outcome (`▶` running,
-  `✓` done, `✗` failed) and shows what it is doing *right now* — its
-  latest tool call, falling back to the item it was assigned. A fan-out
-  wider than ten members is capped in the transcript block, keeping
-  running members in preference to finished ones, so a swarm can never
-  push the conversation off screen; the full list is one `ctrl+b` away.
-- **`ctrl+b` activity panel** — the same swarm section, uncapped, above
-  the activity list (which groups tool calls per instance name). A
-  banner reminds you of `ctrl+b` when a swarm starts with the panel
-  hidden.
+  `N done / N total` progress meter. Failures count as finished work,
+  drawn red, so a struggling swarm reads as one at a glance.
+
+  The footer is an annotation on the conversation, never a replacement
+  for it, so the whole region below the transcript lives inside a single
+  budget of roughly a quarter of the terminal height. Inside that budget
+  the swarm block lists only the members that are **running right now**,
+  each showing what it is doing at this moment — its latest tool call,
+  falling back to the item it was assigned — and owns up to the rest with
+  a `… N more running · ctrl+b for the whole swarm` line. When the swarm
+  finishes it collapses to a single `N running · N done · N failed` line,
+  so a completed fan-out stops costing the transcript anything.
+
+  A workflow block, ordinary delegations and the todo list share the same
+  budget. Delegations and todos each keep a row in reserve and fall back
+  to a one-line `N running · ctrl+b` form, so a wide swarm can shrink them
+  but can never push them off the screen entirely. Nothing is ever hidden
+  silently — every capped block says how many it left out, and the full,
+  uncapped list is one `ctrl+b` away.
+- **`ctrl+b` activity panel** — the same swarm section, uncapped and
+  including every finished member, above the activity list (which groups
+  tool calls per instance name). A banner reminds you of `ctrl+b` when a
+  swarm starts with the panel hidden.
 - **ACP editors** — each member's lifecycle arrives as an
   `agent code#3: <item>` tool call, and its individual tool calls are
   prefixed `[code#3] …`, so editors show which agent is doing what.

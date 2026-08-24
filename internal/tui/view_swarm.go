@@ -118,33 +118,61 @@ func swarmStatus(status string) string {
 	return "done"
 }
 
-// renderSwarmBlock is the footer form of the swarm view, shown under the
-// transcript when the side panel is hidden.
-func (m Model) renderSwarmBlock(width, height int) string {
+// swarmSummaryLines is the footer form: how far the fan-out has got and what
+// is running, not the whole roster. The full list is in the side panel, which
+// has the room; down here the swarm competes with the conversation.
+func (m Model) swarmSummaryLines(width, rows int) []string {
 	s := m.swarmSummary()
 	if len(s.members) == 0 {
+		return nil
+	}
+	budget := max(width, 24)
+	title := "ultra swarm"
+	if len(s.types) == 1 {
+		title += " · " + s.types[0]
+	}
+	head := lipgloss.NewStyle().Bold(true).Foreground(colorWarn).
+		Render("⚡ " + truncateLabel(title, max(10, budget/3)))
+
+	// A finished swarm collapses to one line: nothing is moving, and the
+	// conversation needs the rows back.
+	if s.running == 0 {
+		return []string{head + " " + styleMuted.Render(truncateLabel(s.headline(), max(6, budget-lipgloss.Width(head)-1)))}
+	}
+
+	counts := fmt.Sprintf("%d/%d", s.done+s.failed, len(s.members))
+	if s.failed > 0 {
+		counts += fmt.Sprintf(" · %d✗", s.failed)
+	}
+	// Meter and counts share the header's line rather than taking one of
+	// their own — a row is a row.
+	lines := []string{head + "  " +
+		progressBar(min(14, max(6, budget/4)), s.done, s.failed, len(s.members)) + " " +
+		styleMuted.Render(counts)}
+
+	var live []parallelAgentEntry
+	for _, a := range s.members {
+		if a.Status == "running" {
+			live = append(live, a)
+		}
+	}
+	shown := min(len(live), liveRowsFor(rows, len(live)))
+	for _, a := range live[:shown] {
+		lines = append(lines, "  "+m.swarmMemberRow(a, budget-2))
+	}
+	if hidden := len(live) - shown; hidden > 0 {
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more running · ctrl+b for the whole swarm", hidden)))
+	}
+	return lines
+}
+
+// renderSwarmBlock is the footer form of the swarm view, shown under the
+// transcript when the side panel is hidden. rows is the row budget it must
+// fit inside, border excluded.
+func (m Model) renderSwarmBlock(width, rows int) string {
+	lines := m.swarmSummaryLines(width-4, rows)
+	if len(lines) == 0 {
 		return ""
-	}
-	budget := max(width-4, 24)
-	lines := []string{
-		s.titleLine(budget),
-		progressBar(min(24, max(8, budget-14)), s.done, s.failed, len(s.members)) + " " +
-			styleMuted.Render(fmt.Sprintf("%d/%d", s.done+s.failed, len(s.members))),
-	}
-	// A wide fan-out is capped so the swarm never crowds the conversation off
-	// screen; running members are kept in preference to finished ones. The cap
-	// scales with the terminal, because ten rows is a footnote on a tall
-	// window and most of a short one.
-	maxRows := min(max(height/5, 3), 10)
-	rows := s.members
-	if len(rows) > maxRows {
-		rows = prioritiseRunning(rows, maxRows)
-	}
-	for _, a := range rows {
-		lines = append(lines, m.swarmMemberRow(a, budget))
-	}
-	if len(rows) < len(s.members) {
-		lines = append(lines, styleMuted.Render(fmt.Sprintf("… %d more — ctrl+b for the full swarm", len(s.members)-len(rows))))
 	}
 	return lipgloss.NewStyle().
 		Width(width-2).

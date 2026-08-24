@@ -369,17 +369,26 @@ func (w *workflowRun) currentPhase() (title string, done, failed, total int, pen
 	return best, done, failed, total, false
 }
 
-// workflowFooterRows is how many rows the footer block may spend, scaled to
-// the terminal. The full tree lives in the side panel; down here it competes
-// with the conversation, and a fan-out of twenty agents must never be the
-// reason you cannot read what the agent just said.
-func workflowFooterRows(height int) int {
-	return min(max(height/10, 1), 4)
+// liveRowsFor is how many agent rows fit in a row budget, once the header and
+// — when there is more live work than fits — the "… N more" line are paid for.
+// Forgetting the second one is how a block quietly overruns its allowance.
+func liveRowsFor(rows, live int) int {
+	avail := rows - 1 // header
+	if live > avail {
+		avail-- // the "… N more running" line
+	}
+	return max(avail, 1)
 }
+
+// workflowFooterCap bounds the footer summary however much room there is. The
+// full tree lives in the side panel; down here it competes with the
+// conversation, and a fan-out of twenty agents must never be the reason you
+// cannot read what the agent just said.
+const workflowFooterCap = 5
 
 // workflowSummaryLines is the footer form: where the run is now and what is
 // running, not the whole plan.
-func (m Model) workflowSummaryLines(width, height int) []string {
+func (m Model) workflowSummaryLines(width, rows int) []string {
 	w := m.workflow
 	if w == nil {
 		return nil
@@ -437,8 +446,7 @@ func (m Model) workflowSummaryLines(width, height int) []string {
 			live = append(live, a)
 		}
 	}
-	rows := workflowFooterRows(height)
-	shown := min(len(live), rows)
+	shown := min(len(live), liveRowsFor(min(rows, workflowFooterCap), len(live)))
 	for _, a := range live[:shown] {
 		icon, iconStyle := agentStatusGlyph(a.Status)
 		name := truncateAgentName(a.Instance, max(8, budget/3))
@@ -452,9 +460,9 @@ func (m Model) workflowSummaryLines(width, height int) []string {
 	}
 	if hidden := len(live) - shown; hidden > 0 {
 		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more running · ctrl+b for the full tree", hidden)))
-	} else if len(w.Phases) > 1 && height >= 30 {
-		// On a short terminal every row belongs to the conversation; the hint
-		// is the first thing to go.
+	} else if len(w.Phases) > 1 && len(lines)+shown < rows {
+		// The hint only earns a row when one is going spare; on a short
+		// terminal every row belongs to the conversation.
 		lines = append(lines, styleMuted.Render("  ctrl+b for the full tree"))
 	}
 	return lines
@@ -462,8 +470,8 @@ func (m Model) workflowSummaryLines(width, height int) []string {
 
 // renderWorkflowBlock is the footer form of the panel, shown under the
 // transcript when the side panel is hidden.
-func (m Model) renderWorkflowBlock(width, height int) string {
-	lines := m.workflowSummaryLines(width-4, height)
+func (m Model) renderWorkflowBlock(width, rows int) string {
+	lines := m.workflowSummaryLines(width-4, rows)
 	if len(lines) == 0 {
 		return ""
 	}

@@ -262,13 +262,21 @@ func TestWorkflowFooterStaysOutOfTheWay(t *testing.T) {
 	}
 
 	for _, height := range []int{20, 24, 40, 60} {
-		summary := m.workflowSummaryLines(90, height)
+		// The budget the renderer would actually hand it, border excluded.
+		rows := footerBudget(height) - 2
+		summary := m.workflowSummaryLines(90, rows)
 		if len(summary) == 0 {
 			t.Fatalf("height %d: no summary", height)
 		}
-		// The block plus its border must stay a small share of the screen.
-		if rows := len(summary) + 2; rows > height/3 {
-			t.Fatalf("height %d: the footer takes %d of %d rows", height, rows, height)
+		// The block must fit the allowance it was given — the "… N more" line
+		// included, which is the part that is easy to forget to pay for.
+		if len(summary) > rows {
+			t.Fatalf("height %d: the block took %d rows of a %d-row allowance:\n%s",
+				height, len(summary), rows, strings.Join(summary, "\n"))
+		}
+		// And the whole region stays a small share of the screen.
+		if total := len(summary) + 2; total > height/3 {
+			t.Fatalf("height %d: the footer takes %d of %d rows", height, total, height)
 		}
 		joined := strings.Join(summary, "\n")
 		// Only live work: finished agents are history, and history is what the
@@ -276,7 +284,6 @@ func TestWorkflowFooterStaysOutOfTheWay(t *testing.T) {
 		if strings.Contains(joined, "scan:1") {
 			t.Fatalf("height %d: the footer lists finished agents:\n%s", height, joined)
 		}
-		// It still has to say where the run is and how to see the rest.
 		if !strings.Contains(joined, "Verify") {
 			t.Fatalf("height %d: the footer does not name the current phase:\n%s", height, joined)
 		}
@@ -286,7 +293,9 @@ func TestWorkflowFooterStaysOutOfTheWay(t *testing.T) {
 	}
 
 	// A taller terminal may show more of the live work than a short one.
-	if short, tall := len(m.workflowSummaryLines(90, 20)), len(m.workflowSummaryLines(90, 60)); short >= tall {
+	short := len(m.workflowSummaryLines(90, footerBudget(20)-2))
+	tall := len(m.workflowSummaryLines(90, footerBudget(60)-2))
+	if short >= tall {
 		t.Fatalf("the footer does not scale with the terminal: %d rows at 20, %d at 60", short, tall)
 	}
 	// The side panel keeps everything, including the finished agents.
@@ -311,7 +320,7 @@ func TestFinishedWorkflowCollapsesToOneLine(t *testing.T) {
 		Args:   `{"run_id":"wf_1","workflow":"review-changes"}`,
 		Output: "6 agents · 0 failed · 0 replayed",
 	})
-	summary := m.workflowSummaryLines(90, 40)
+	summary := m.workflowSummaryLines(90, footerBudget(40)-2)
 	if len(summary) != 1 {
 		t.Fatalf("a finished run should collapse to one line, got %d:\n%s", len(summary), strings.Join(summary, "\n"))
 	}
