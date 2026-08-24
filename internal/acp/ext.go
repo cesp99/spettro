@@ -41,6 +41,9 @@ const (
 	extModelsList          = "_spettro/models/list"
 	extModelsFavorite      = "_spettro/models/favorite"
 
+	// Workflow authoring lives in ext_workflow.go, which owns its own
+	// constants; see that file for why running is deliberately not here.
+
 	// Agent -> client requests. Unlike the methods above, this one is served
 	// by the CLIENT: the agent calls it (CallExtension) to put a structured
 	// question to the user. See question.go.
@@ -60,7 +63,10 @@ const (
 // alongside it for the form's first question, so a v2 client is not broken by
 // the change; the version number is what lets a client know it can answer the
 // rest.
-const extensionsVersion = 3
+// v4: `_spettro/workflow/*` — list, read, write, delete, validate and the
+// recent-run index. A client can now author and keep workflows instead of
+// spelling "/workflows run <name>" into the prompt and hoping.
+const extensionsVersion = 4
 
 // metaExtensionsKey is the `_meta` key carrying the extension surface at
 // handshake, in both directions: the agent advertises what it serves, and a
@@ -83,6 +89,12 @@ var extensionMethods = []string{
 	extLocalRemove,
 	extModelsList,
 	extModelsFavorite,
+	extWorkflowList,
+	extWorkflowRead,
+	extWorkflowWrite,
+	extWorkflowDelete,
+	extWorkflowValidate,
+	extWorkflowRuns,
 }
 
 // extensionClientMethods is advertised alongside extensionMethods as the
@@ -127,6 +139,19 @@ func (b *bridge) HandleExtensionMethod(ctx context.Context, method string, param
 		return b.modelsList()
 	case extModelsFavorite:
 		return decodeInto(ctx, params, b.modelsFavorite)
+
+	case extWorkflowList:
+		return decodeInto(ctx, params, b.workflowList)
+	case extWorkflowRead:
+		return decodeInto(ctx, params, b.workflowRead)
+	case extWorkflowWrite:
+		return decodeInto(ctx, params, b.workflowWrite)
+	case extWorkflowDelete:
+		return decodeInto(ctx, params, b.workflowDelete)
+	case extWorkflowValidate:
+		return decodeInto(ctx, params, b.workflowValidate)
+	case extWorkflowRuns:
+		return decodeInto(ctx, params, b.workflowRuns)
 	}
 	return nil, acpsdk.NewMethodNotFound(method)
 }
