@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -294,6 +295,20 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	if err := r.bindGlobals(ctx, args); err != nil {
 		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, err)
 	}
+	// A script is written by a model, so it can contain a loop that never
+	// yields. goja runs it on this goroutine and checks nothing, so without
+	// this the loop ignores Esc, ignores the tool timeout, and burns a core
+	// for the life of the process. Interrupt is the only thing that stops a
+	// running script from outside it.
+	stopWatchdog := make(chan struct{})
+	defer close(stopWatchdog)
+	go func() {
+		select {
+		case <-ctx.Done():
+			r.vm.Interrupt(ctx.Err())
+		case <-stopWatchdog:
+		}
+	}()
 	s.emit(Event{Kind: EventStart, Message: meta.Name, Nested: r.nested})
 
 	program, err := compileScript(meta.Name, script)
@@ -302,7 +317,7 @@ func (s *shared) execute(ctx context.Context, script string, args any, depth int
 	}
 	val, err := r.vm.RunProgram(program)
 	if err != nil {
-		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, err)
+		return nil, meta, fmt.Errorf("workflow %q: %w", meta.Name, describeRunError(err, ctx))
 	}
 	promise, ok := val.Export().(*goja.Promise)
 	if !ok {
@@ -338,7 +353,9 @@ func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 		timer.Reset(idlePoll)
 		select {
 		case job := <-r.jobs:
-			job()
+			if err := runJob(job); err != nil {
+				return nil, err
+			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-timer.C:
@@ -361,6 +378,20 @@ func (r *vmRun) pump(ctx context.Context, promise *goja.Promise) (any, error) {
 	return result.Export(), nil
 }
 
+// describeRunError turns goja's interrupt into the cancellation it actually
+// is, so a script killed by Esc or by the tool timeout does not read as a
+// mysterious engine fault.
+func describeRunError(err error, ctx context.Context) error {
+	var interrupted *goja.InterruptedError
+	if errors.As(err, &interrupted) {
+		if cause := ctx.Err(); cause != nil {
+			return fmt.Errorf("script stopped: %w", cause)
+		}
+		return fmt.Errorf("script stopped: %v", interrupted.Value())
+	}
+	return err
+}
+
 // missingArgsHint explains the commonest way a first run dies: the script
 // reads args, but the tool call passed none, so every property access on it is
 // a TypeError. The raw message names the property and not the cause, and a
@@ -370,6 +401,28 @@ func missingArgsHint(script string, args any, err error) string {
 		return ""
 	}
 	return " — the tool call passed no args, so the `args` global is undefined; pass args in the workflow tool call, or stop reading it in the script"
+}
+
+// runJob executes one queued promise resolution.
+//
+// Resolving a promise runs JS — the continuation of whatever awaited it — so
+// an interrupt lands here as a panic rather than as a returned error, and a
+// bug in a binding would too. Neither may take the process down: this is a
+// script a model wrote, executing inside the user's editor session.
+func runJob(job func()) (err error) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		if interrupted, ok := rec.(*goja.InterruptedError); ok {
+			err = fmt.Errorf("script stopped: %v", interrupted.Value())
+			return
+		}
+		err = fmt.Errorf("workflow engine panic: %v", rec)
+	}()
+	job()
+	return nil
 }
 
 func describeRejection(v goja.Value) string {
