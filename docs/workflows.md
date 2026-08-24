@@ -225,13 +225,18 @@ cap.
 
 ## Watching a run
 
-**TUI.** A workflow gets its own panel: every declared phase is drawn
-from the start (dimmed until reached) and fills in as agents land under
-it, with per-phase progress meters, each agent's live tool call, `log()`
-lines, and replayed-from-journal markers. A height-capped version sits
-under the transcript; the full tree is in the `ctrl+b` side panel. The
-tree survives the turn that produced it and is cleared when the next one
-starts.
+**TUI.** Under the transcript you get a summary: the phase the run is in,
+overall progress, and what is running *right now* — finished agents are
+history, and history is what the side panel is for. It scales with the
+terminal and never takes more than a few rows, because a running workflow
+must not be the reason you cannot read what the agent just said. Once the
+run ends it collapses to a single line and gives the rows back.
+
+`ctrl+b` has the whole thing: every declared phase drawn from the start
+(dimmed until reached), filling in as agents land under it, with
+per-phase meters, each agent's live tool call, `log()` lines, and
+replayed-from-journal markers. The tree survives the turn that produced
+it and is cleared when the next one starts.
 
 **ACP editors.** The run opens a single `workflow <name>` tool call
 whose content is rewritten as it progresses, so the editor shows the

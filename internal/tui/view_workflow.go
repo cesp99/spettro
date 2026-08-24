@@ -327,13 +327,143 @@ func (m Model) workflowPhaseGroup(w *workflowRun, phase string, budget int) work
 	return group
 }
 
+// currentPhase is the phase a reader should be looking at: the one with work
+// in flight, else the last one that produced anything, else the first that has
+// not been reached.
+func (w *workflowRun) currentPhase() (title string, done, failed, total int, pending bool) {
+	order := w.phaseOrder()
+	best, bestRank := "", -1
+	for _, phase := range order {
+		agents := w.agentsInPhase(phase)
+		rank := 0 // untouched
+		for _, a := range agents {
+			if a.Status == "running" {
+				rank = 2
+				break
+			}
+			rank = 1
+		}
+		if rank >= bestRank && rank > 0 {
+			best, bestRank = phase, rank
+		}
+	}
+	if bestRank < 0 || best == "" && bestRank <= 0 {
+		for _, phase := range order {
+			return phase, 0, 0, 0, true
+		}
+		return "", 0, 0, 0, true
+	}
+	for _, a := range w.agentsInPhase(best) {
+		total++
+		switch a.Status {
+		case "running":
+		case "failed":
+			failed++
+		default:
+			done++
+		}
+	}
+	if best == "" {
+		best = "(no phase)"
+	}
+	return best, done, failed, total, false
+}
+
+// workflowFooterRows is how many rows the footer block may spend, scaled to
+// the terminal. The full tree lives in the side panel; down here it competes
+// with the conversation, and a fan-out of twenty agents must never be the
+// reason you cannot read what the agent just said.
+func workflowFooterRows(height int) int {
+	return min(max(height/10, 1), 4)
+}
+
+// workflowSummaryLines is the footer form: where the run is now and what is
+// running, not the whole plan.
+func (m Model) workflowSummaryLines(width, height int) []string {
+	w := m.workflow
+	if w == nil {
+		return nil
+	}
+	budget := max(width, 24)
+	running, done, failed, _ := w.counts()
+	total := running + done + failed
+
+	var titleStyle lipgloss.Style
+	var marker string
+	switch w.Status {
+	case "failed":
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorError), "✗"
+	case "running":
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorToolRun), "◆"
+	default:
+		titleStyle, marker = lipgloss.NewStyle().Bold(true).Foreground(colorSuccess), "✓"
+	}
+	head := titleStyle.Render(marker + " " + truncateLabel(w.Name, max(10, budget/3)))
+
+	// A finished run collapses to one line: the detail stopped being live and
+	// the conversation needs the rows back.
+	if w.Status != "running" {
+		tail := w.Summary
+		if tail == "" {
+			tail = w.headline()
+		}
+		return []string{head + " " + styleMuted.Render(truncateLabel(tail, max(6, budget-lipgloss.Width(head)-1)))}
+	}
+
+	phase, pDone, pFailed, pTotal, pending := w.currentPhase()
+	phaseBit := ""
+	if phase != "" {
+		if pending {
+			phaseBit = styleMuted.Render(" ○ " + truncateLabel(phase, max(6, budget/4)))
+		} else {
+			phaseBit = lipgloss.NewStyle().Bold(true).Foreground(colorToolRun).
+				Render(" ▸ "+truncateLabel(phase, max(6, budget/4))) +
+				styleMuted.Render(fmt.Sprintf(" %d/%d", pDone+pFailed, pTotal))
+		}
+	}
+	counts := fmt.Sprintf("%d/%d", done+failed, total)
+	if failed > 0 {
+		counts += fmt.Sprintf(" · %d✗", failed)
+	}
+	line := head + phaseBit + "  " + progressBar(min(14, max(6, budget/4)), done, failed, total) +
+		" " + styleMuted.Render(counts)
+	lines := []string{line}
+
+	// Then only what is in flight — finished rows are history, and history is
+	// what the side panel is for.
+	var live []workflowAgentEntry
+	for _, a := range w.Agents {
+		if a.Status == "running" {
+			live = append(live, a)
+		}
+	}
+	rows := workflowFooterRows(height)
+	shown := min(len(live), rows)
+	for _, a := range live[:shown] {
+		icon, iconStyle := agentStatusGlyph(a.Status)
+		name := truncateAgentName(a.Instance, max(8, budget/3))
+		detail := a.Label
+		if activity := m.latestAgentActivity(a.Instance); activity != "" {
+			detail = activity
+		}
+		prefix := "  " + iconStyle.Render(icon+" ") + lipgloss.NewStyle().Foreground(colorText).Render(name)
+		lines = append(lines, prefix+" "+styleMuted.Render(
+			truncateLabel(strings.ReplaceAll(detail, "\n", " "), max(6, budget-lipgloss.Width(prefix)-1))))
+	}
+	if hidden := len(live) - shown; hidden > 0 {
+		lines = append(lines, styleMuted.Render(fmt.Sprintf("  … %d more running · ctrl+b for the full tree", hidden)))
+	} else if len(w.Phases) > 1 && height >= 30 {
+		// On a short terminal every row belongs to the conversation; the hint
+		// is the first thing to go.
+		lines = append(lines, styleMuted.Render("  ctrl+b for the full tree"))
+	}
+	return lines
+}
+
 // renderWorkflowBlock is the footer form of the panel, shown under the
 // transcript when the side panel is hidden.
-func (m Model) renderWorkflowBlock(width int) string {
-	// The footer competes with the transcript for rows, so a large run is
-	// trimmed rather than allowed to push the conversation off screen.
-	const maxRows = 14
-	lines := m.workflowTreeLines(width-4, maxRows)
+func (m Model) renderWorkflowBlock(width, height int) string {
+	lines := m.workflowSummaryLines(width-4, height)
 	if len(lines) == 0 {
 		return ""
 	}

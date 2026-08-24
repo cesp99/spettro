@@ -555,10 +555,10 @@ func renderGlare(text string, frame int, agentColor color.Color) string {
 func (m Model) renderParallelAgents() string {
 	paneW := m.paneWidth()
 	var blocks []string
-	if block := m.renderWorkflowBlock(paneW); block != "" {
+	if block := m.renderWorkflowBlock(paneW, m.height); block != "" {
 		blocks = append(blocks, block)
 	}
-	if block := m.renderSwarmBlock(paneW); block != "" {
+	if block := m.renderSwarmBlock(paneW, m.height); block != "" {
 		blocks = append(blocks, block)
 	}
 

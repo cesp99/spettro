@@ -120,7 +120,7 @@ func swarmStatus(status string) string {
 
 // renderSwarmBlock is the footer form of the swarm view, shown under the
 // transcript when the side panel is hidden.
-func (m Model) renderSwarmBlock(width int) string {
+func (m Model) renderSwarmBlock(width, height int) string {
 	s := m.swarmSummary()
 	if len(s.members) == 0 {
 		return ""
@@ -132,8 +132,10 @@ func (m Model) renderSwarmBlock(width int) string {
 			styleMuted.Render(fmt.Sprintf("%d/%d", s.done+s.failed, len(s.members))),
 	}
 	// A wide fan-out is capped so the swarm never crowds the conversation off
-	// screen; running members are kept in preference to finished ones.
-	const maxRows = 10
+	// screen; running members are kept in preference to finished ones. The cap
+	// scales with the terminal, because ten rows is a footnote on a tall
+	// window and most of a short one.
+	maxRows := min(max(height/5, 3), 10)
 	rows := s.members
 	if len(rows) > maxRows {
 		rows = prioritiseRunning(rows, maxRows)

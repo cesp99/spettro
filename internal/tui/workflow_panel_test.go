@@ -244,3 +244,97 @@ func TestWorkflowPanelTrimsFinishedRowsNotPhases(t *testing.T) {
 		t.Fatalf("uncapped tree (%d rows) should be longer than the capped one (%d)", len(full), len(lines))
 	}
 }
+
+// The footer competes with the conversation. The full tree belongs in the side
+// panel, which has the room; down here a running workflow must never be the
+// reason you cannot read what the agent just said.
+func TestWorkflowFooterStaysOutOfTheWay(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	for i := 1; i <= 6; i++ {
+		inst := fmt.Sprintf("general-purpose#%d", i)
+		m.applyToolTraceToObservability(wfAgentTrace(inst, fmt.Sprintf("scan:%d", i), "Review", "running", false))
+		m.applyToolTraceToObservability(wfAgentTrace(inst, fmt.Sprintf("scan:%d", i), "Review", "success", false))
+	}
+	for i := 7; i <= 14; i++ {
+		m.applyToolTraceToObservability(wfAgentTrace(fmt.Sprintf("general-purpose#%d", i),
+			fmt.Sprintf("verify:%d", i), "Verify", "running", false))
+	}
+
+	for _, height := range []int{20, 24, 40, 60} {
+		summary := m.workflowSummaryLines(90, height)
+		if len(summary) == 0 {
+			t.Fatalf("height %d: no summary", height)
+		}
+		// The block plus its border must stay a small share of the screen.
+		if rows := len(summary) + 2; rows > height/3 {
+			t.Fatalf("height %d: the footer takes %d of %d rows", height, rows, height)
+		}
+		joined := strings.Join(summary, "\n")
+		// Only live work: finished agents are history, and history is what the
+		// side panel is for.
+		if strings.Contains(joined, "scan:1") {
+			t.Fatalf("height %d: the footer lists finished agents:\n%s", height, joined)
+		}
+		// It still has to say where the run is and how to see the rest.
+		if !strings.Contains(joined, "Verify") {
+			t.Fatalf("height %d: the footer does not name the current phase:\n%s", height, joined)
+		}
+		if !strings.Contains(joined, "ctrl+b") {
+			t.Fatalf("height %d: no pointer to the full tree:\n%s", height, joined)
+		}
+	}
+
+	// A taller terminal may show more of the live work than a short one.
+	if short, tall := len(m.workflowSummaryLines(90, 20)), len(m.workflowSummaryLines(90, 60)); short >= tall {
+		t.Fatalf("the footer does not scale with the terminal: %d rows at 20, %d at 60", short, tall)
+	}
+	// The side panel keeps everything, including the finished agents.
+	full := strings.Join(m.sidePanelWorkflowLines(48), "\n")
+	if !strings.Contains(full, "scan:1") || !strings.Contains(full, "verify:7") {
+		t.Fatalf("the side panel must still show the whole tree:\n%s", full)
+	}
+}
+
+// Once a run is over its detail stops being live, and the conversation needs
+// the rows back.
+func TestFinishedWorkflowCollapsesToOneLine(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	for i := 1; i <= 6; i++ {
+		inst := fmt.Sprintf("general-purpose#%d", i)
+		m.applyToolTraceToObservability(wfAgentTrace(inst, fmt.Sprintf("scan:%d", i), "Review", "running", false))
+		m.applyToolTraceToObservability(wfAgentTrace(inst, fmt.Sprintf("scan:%d", i), "Review", "success", false))
+	}
+	m.applyToolTraceToObservability(agent.ToolTrace{
+		AgentID: "coding", Name: "workflow", Status: "success",
+		Args:   `{"run_id":"wf_1","workflow":"review-changes"}`,
+		Output: "6 agents · 0 failed · 0 replayed",
+	})
+	summary := m.workflowSummaryLines(90, 40)
+	if len(summary) != 1 {
+		t.Fatalf("a finished run should collapse to one line, got %d:\n%s", len(summary), strings.Join(summary, "\n"))
+	}
+	if !strings.Contains(summary[0], "6 agents") {
+		t.Fatalf("the one line must carry the outcome: %q", summary[0])
+	}
+}
+
+func TestCurrentPhaseTracksTheRun(t *testing.T) {
+	m := newWorkflowModel(t)
+	m.applyToolTraceToObservability(wfStartTrace())
+	// Nothing has started: the first declared phase is what is coming.
+	if title, _, _, _, pending := m.workflow.currentPhase(); title != "Review" || !pending {
+		t.Fatalf("before any agent: title=%q pending=%v", title, pending)
+	}
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#1", "scan", "Review", "running", false))
+	if title, _, _, _, pending := m.workflow.currentPhase(); title != "Review" || pending {
+		t.Fatalf("while Review runs: title=%q pending=%v", title, pending)
+	}
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#1", "scan", "Review", "success", false))
+	m.applyToolTraceToObservability(wfAgentTrace("general-purpose#2", "refute", "Verify", "running", false))
+	// Work in flight wins over a phase that has merely finished.
+	if title, _, _, total, _ := m.workflow.currentPhase(); title != "Verify" || total != 1 {
+		t.Fatalf("once Verify starts: title=%q total=%d", title, total)
+	}
+}
