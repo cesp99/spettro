@@ -196,3 +196,54 @@ func TestACPWorkflowsRunUnknownIsHandledInline(t *testing.T) {
 		t.Fatal("a runnable workflow must fall through to the prompt path")
 	}
 }
+
+// The finish payload is the one the observer builds from workflow.Result, so
+// this test writes it the way workflowObserver.finish does rather than by
+// hand: "cached" is a count there and a bool on a member trace, and the two
+// used to share one Go struct. The finish payload then failed to unmarshal,
+// onWorkflowTool disowned the trace, and the editor's workflow tool call was
+// left in progress forever with a duplicate completed call appended after it.
+func TestACPWorkflowFinishClosesTheCall(t *testing.T) {
+	turn := newSilentTurn()
+
+	if !turn.onWorkflowTool(wfTrace("workflow", "running",
+		`{"run_id":"wf_1","workflow":"audit","description":"d","phases":[{"title":"Scan"}]}`, "")) {
+		t.Fatal("start trace must be claimed")
+	}
+	if turn.workflow == nil {
+		t.Fatal("start trace must open a run")
+	}
+	callID := turn.workflow.callID
+
+	// A member reports a boolean "cached"; the run reports a count. Both must
+	// be understood, and neither may disown the other's trace.
+	turn.onWorkflowTool(wfTrace("agent", "running",
+		`{"agent":"scan#1","task":"t","workflow":"audit","run_id":"wf_1","phase":"Scan","cached":true}`, ""))
+	if n := len(turn.workflow.agents); n != 1 {
+		t.Fatalf("member not recorded: %d agents", n)
+	}
+	if !turn.workflow.agents[0].Cached {
+		t.Fatal("a replayed member must be marked cached")
+	}
+
+	if !turn.onWorkflowTool(wfTrace("workflow", "success",
+		`{"agents":3,"cached":1,"failed":0,"run_id":"wf_1","tokens":28787,"workflow":"audit"}`,
+		"3 agents · 0 failed · 1 replayed")) {
+		t.Fatal("finish trace must be claimed — otherwise it escapes to the ordinary " +
+			"tool path and the editor gets a second, orphaned workflow call")
+	}
+	if turn.workflow != nil {
+		t.Fatalf("finish must close the run, still open: %+v", turn.workflow)
+	}
+	_ = callID
+}
+
+// A finish trace arriving with no run open is not ours to handle: it must fall
+// through so the ordinary path still shows the user something.
+func TestACPWorkflowFinishWithoutStart(t *testing.T) {
+	turn := newSilentTurn()
+	if turn.onWorkflowTool(wfTrace("workflow", "success",
+		`{"agents":1,"cached":0,"failed":0,"run_id":"wf_9","tokens":1,"workflow":"audit"}`, "done")) {
+		t.Fatal("a finish with no open run must not be claimed")
+	}
+}

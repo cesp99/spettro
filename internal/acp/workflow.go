@@ -130,18 +130,48 @@ func (w *acpWorkflow) render() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// Three different payloads travel under these trace names, and they disagree
+// about the type of "cached": a member reports whether it was replayed (a
+// bool), while the lifecycle's finish payload reports how many calls were
+// replayed (a count). Decoding all three into one struct meant the finish
+// payload failed to unmarshal, onWorkflowTool bailed out, and the workflow
+// tool call was never closed — editors showed a run spinning forever with a
+// duplicate completed call appended after it. Each payload gets its own type.
+
+// acpWorkflowArgs is the shape common to every workflow trace: enough to tell
+// which run a trace belongs to. Fields that only some payloads carry live in
+// the specific types below.
 type acpWorkflowArgs struct {
-	RunID       string `json:"run_id"`
-	Workflow    string `json:"workflow"`
+	RunID    string `json:"run_id"`
+	Workflow string `json:"workflow"`
+}
+
+// acpWorkflowStartArgs is the lifecycle trace's opening payload. The finish
+// payload deliberately decodes with this same type: its extra counters are
+// summarised in the trace output, and ignoring them here keeps the finish path
+// from depending on fields whose types have already drifted once.
+type acpWorkflowStartArgs struct {
+	acpWorkflowArgs
 	Description string `json:"description"`
-	Kind        string `json:"kind"`
-	Phase       string `json:"phase"`
-	Agent       string `json:"agent"`
-	Task        string `json:"task"`
-	Cached      bool   `json:"cached"`
 	Phases      []struct {
 		Title string `json:"title"`
 	} `json:"phases"`
+}
+
+// acpWorkflowProgressArgs is a phase() or log() notification.
+type acpWorkflowProgressArgs struct {
+	acpWorkflowArgs
+	Kind  string `json:"kind"`
+	Phase string `json:"phase"`
+}
+
+// acpWorkflowMemberArgs is one agent() call's lifecycle.
+type acpWorkflowMemberArgs struct {
+	acpWorkflowArgs
+	Agent  string `json:"agent"`
+	Task   string `json:"task"`
+	Phase  string `json:"phase"`
+	Cached bool   `json:"cached"`
 }
 
 // onWorkflowTool folds a workflow trace into the live tool call. It reports
@@ -155,6 +185,9 @@ func (t *turnState) onWorkflowTool(tr agent.ToolTrace) (handled bool) {
 	default:
 		return false
 	}
+	// Only the two fields every payload shares are required here. Decoding a
+	// payload-specific field is done below, per trace kind, so a field one
+	// payload spells differently can never disown the whole trace.
 	var args acpWorkflowArgs
 	if json.Unmarshal([]byte(tr.Args), &args) != nil || args.Workflow == "" {
 		return false
@@ -165,13 +198,15 @@ func (t *turnState) onWorkflowTool(tr agent.ToolTrace) (handled bool) {
 
 	if tr.Name == "workflow" {
 		if tr.Status == "running" {
+			var start acpWorkflowStartArgs
+			_ = json.Unmarshal([]byte(tr.Args), &start)
 			w := &acpWorkflow{
 				callID:      t.nextToolCallIDLocked("wf"),
 				runID:       args.RunID,
 				name:        args.Workflow,
-				description: args.Description,
+				description: start.Description,
 			}
-			for _, p := range args.Phases {
+			for _, p := range start.Phases {
 				w.addPhase(p.Title)
 			}
 			t.workflow = w
@@ -213,9 +248,11 @@ func (t *turnState) onWorkflowTool(tr agent.ToolTrace) (handled bool) {
 	}
 	switch tr.Name {
 	case "workflow-progress":
-		switch args.Kind {
+		var prog acpWorkflowProgressArgs
+		_ = json.Unmarshal([]byte(tr.Args), &prog)
+		switch prog.Kind {
 		case "phase":
-			w.addPhase(args.Phase)
+			w.addPhase(prog.Phase)
 		case "log":
 			if msg := strings.TrimSpace(tr.Output); msg != "" {
 				w.logs = append(w.logs, msg)
@@ -223,12 +260,13 @@ func (t *turnState) onWorkflowTool(tr agent.ToolTrace) (handled bool) {
 		}
 		handled = true
 	case "agent":
-		if args.Agent == "" {
+		var mem acpWorkflowMemberArgs
+		if json.Unmarshal([]byte(tr.Args), &mem) != nil || mem.Agent == "" {
 			return false
 		}
 		found := false
 		for i := range w.agents {
-			if w.agents[i].Instance == args.Agent {
+			if w.agents[i].Instance == mem.Agent {
 				w.agents[i].Status = tr.Status
 				found = true
 				break
@@ -236,8 +274,8 @@ func (t *turnState) onWorkflowTool(tr agent.ToolTrace) (handled bool) {
 		}
 		if !found {
 			w.agents = append(w.agents, acpWorkflowAgent{
-				Instance: args.Agent, Label: args.Task, Phase: args.Phase,
-				Status: tr.Status, Cached: args.Cached,
+				Instance: mem.Agent, Label: mem.Task, Phase: mem.Phase,
+				Status: tr.Status, Cached: mem.Cached,
 			})
 		}
 		// Not handled: the sub-agent still deserves its own tool call.
